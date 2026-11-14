@@ -1,0 +1,51 @@
+#version 450
+// HUD detection, one value per render-resolution pixel: 1 where "this did not move" explains the
+// previous and the current real frame better than "this moved as the game's vectors say".
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D current_frame;
+layout(binding = 1) uniform sampler2D previous_frame;
+layout(binding = 2) uniform sampler2D vectors;
+layout(binding = 3, r8) uniform writeonly image2D mask;
+layout(push_constant) uniform Constants {
+    float bias;       // per tap: how much better "did not move" has to be at least
+    float ratio;      // ... and relative to the error of "moved"
+    float min_motion; // display pixels; below this the two explanations are the same
+    float unused;
+} constants;
+
+float peak(vec3 v) {
+    return max(v.r, max(v.g, v.b));
+}
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = imageSize(mask);
+    if (any(greaterThanEqual(pixel, size))) {
+        return;
+    }
+    const ivec2 display = textureSize(current_frame, 0);
+    const vec2 scale = vec2(display) / vec2(size);
+    const vec2 motion = texelFetch(vectors, pixel, 0).rg * scale; // to the pixel's place one frame ago
+    // 1: HUD, 0: tested and it is scene, 0.5: could not be tested (nothing moves here, or the
+    // place it came from is off screen)
+    float hud = 0.5;
+    if (dot(motion, motion) > constants.min_motion * constants.min_motion) {
+        const vec2 centre = (vec2(pixel) + 0.5) * scale;
+        float still = 0.0, moved = 0.0;
+        bool inside = true;
+        for (int j = 0; j < 4; ++j) {
+            for (int i = 0; i < 4; ++i) {
+                const ivec2 at = clamp(ivec2(centre + (vec2(i, j) - 1.5) * 2.0), ivec2(0), display - 1);
+                const vec2 from = vec2(at) + 0.5 + motion;
+                inside = inside && all(greaterThanEqual(from, vec2(0.0))) && all(lessThan(from, vec2(display)));
+                const vec3 now = texelFetch(current_frame, at, 0).rgb;
+                still += peak(abs(now - texelFetch(previous_frame, at, 0).rgb));
+                moved += peak(abs(now - textureLod(previous_frame, from / vec2(display), 0.0).rgb));
+            }
+        }
+        if (inside) {
+            hud = still + 16.0 * constants.bias < constants.ratio * moved ? 1.0 : 0.0;
+        }
+    }
+    imageStore(mask, pixel, vec4(hud));
+}

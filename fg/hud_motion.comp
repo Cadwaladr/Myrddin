@@ -1,0 +1,348 @@
+#version 450
+// HUD content that moves over the screen (world markers): where was the content of a tile (64x64
+// pixels) of this capture of the HUD layer in the capture before? One work group, 64 invocations,
+// works on one tile; the shifts to try are shared out among them. On the layer's alpha alone:
+//   active   a tile whose arrived content (hud_moved.comp) is at least ACTIVE pixels' worth.
+//   level A  cells of 16, arrived content against left content: every shift up to +-192 x +-128
+//            pixels; the sum over the tile's cells and one around of |this(x) - before(x + d)|.
+//            The smallest shift among those within 5 % of the best.
+//   level B  cells of 4, two answers. Far: arrived against left, around A's answer (+-3 cells).
+//            Near: all of this capture against all of the one before, weighted with how much
+//            changed in the cell, around "not moved" (+-4 cells): what moved by less than its own
+//            size lies over where it was, and only its edges changed.
+//   level C  pixels, around both of B's answers (+-3 each) and "not moved": the tile's changed
+//            pixels, every second one in both directions, against the capture before as it is.
+//            In whole numbers (alpha in 1023ths), so that the order of the sums does not matter.
+//            The smallest shift among those within 5 % of the best; taken when what it leaves
+//            unexplained is small against the tile's arrived content and at most half of what
+//            "not moved" leaves.
+// The answer: motion.xy, the content was at x + motion.xy before; motion.z is 1 when there is one.
+layout(local_size_x = 64) in;
+layout(binding = 0) uniform sampler2D layer;
+layout(binding = 1) uniform sampler2D layer_before;
+layout(binding = 2) uniform sampler2D quarter;   // hud_moved.comp
+layout(binding = 5) uniform sampler2D sixteenth;
+struct Tile {
+    vec4 motion;
+    vec4 reach;
+};
+layout(std430, binding = 6) buffer Markers {
+    uint seen;   // active tiles
+    uint found;  // ... with an answer
+    uint spread; // tiles that took a neighbour's (hud_spread.comp)
+    uint unused;
+    Tile tiles[];
+} markers;
+layout(push_constant) uniform Constants {
+    float tiles_w, tiles_h;
+    float cap; // more active tiles than this: the HUD as a whole is changing, none is looked at
+    float unused;
+} pc;
+
+const float EPS = 0.04;
+const float ACTIVE = 32.0;
+const int BORDER = 16;       // of the maps, in cells of 16
+const int RXA = 12, RYA = 8; // level A: the range in cells of 16
+const int SHIFTS_A = (2 * RXA + 1) * (2 * RYA + 1);
+const uint LEAST = 8u;       // changed pixels (of those looked at) a tile must have
+const uint CONTENT = 2048u;  // ... and arrived alpha in them, in 1023ths, in sum
+const float NONE = 1e30;
+
+shared bool s_over;
+shared float s_cost[64], s_cost_near[64];
+shared uint s_d2[64], s_pick[64], s_d2_near[64], s_pick_near[64];
+// level B: this capture's side, the tile's cells of 4 and two around (20 x 20)
+shared float s_arrived[400], s_all[400], s_weight[400];
+// level C: the tile's changed pixels of those looked at: x | y << 5 | alpha << 10 | alpha before << 20
+shared uint s_list[1024];
+shared uint s_count;
+shared uint s_left[64], s_zero;
+
+uint Level(float alpha) {
+    return uint(clamp(alpha, 0.0, 1.0) * 1023.0 + 0.5);
+}
+
+void main() {
+    const ivec2 tile = ivec2(gl_WorkGroupID.xy);
+    const uint me = gl_LocalInvocationIndex;
+    const uint record = uint(tile.y * int(pc.tiles_w) + tile.x);
+    const vec2 size16 = vec2(textureSize(sixteenth, 0));
+    const ivec2 cell16 = tile * 4 + BORDER;
+    float own = 0.0;
+    for (int q = 0; q < 4; ++q) {
+        const vec4 arrived = textureGather(sixteenth, (vec2(cell16 + 2 * ivec2(q & 1, q >> 1)) + 1.0) / size16, 0);
+        own += arrived.x + arrived.y + arrived.z + arrived.w;
+    }
+    if (own * 256.0 < ACTIVE) {
+        if (me == 0u) {
+            markers.tiles[record].motion = vec4(0.0);
+        }
+        return;
+    }
+    if (me == 0u) {
+        s_over = atomicAdd(markers.seen, 1u) >= uint(pc.cap);
+        s_count = 0u;
+    }
+    barrier();
+    if (s_over) {
+        if (me == 0u) {
+            markers.tiles[record].motion = vec4(0.0);
+        }
+        return;
+    }
+
+    // ---- level A
+    float window[36]; // (as textureGather hands them out: four cells to a corner)
+    const ivec2 corner16 = cell16 - 1;
+    for (int q = 0; q < 9; ++q) {
+        const vec4 four = textureGather(sixteenth, (vec2(corner16 + 2 * ivec2(q % 3, q / 3)) + 1.0) / size16, 0);
+        window[q * 4] = four.x;
+        window[q * 4 + 1] = four.y;
+        window[q * 4 + 2] = four.z;
+        window[q * 4 + 3] = four.w;
+    }
+    float costs[7];
+    float least = NONE;
+    for (int j = 0; j < 7; ++j) {
+        const int shift = int(me) + 64 * j;
+        costs[j] = NONE;
+        if (shift >= SHIFTS_A) {
+            continue;
+        }
+        const ivec2 d = ivec2(shift % (2 * RXA + 1) - RXA, shift / (2 * RXA + 1) - RYA);
+        float cost = 0.0;
+        for (int q = 0; q < 9; ++q) {
+            const vec4 four = textureGather(sixteenth, (vec2(corner16 + d + 2 * ivec2(q % 3, q / 3)) + 1.0) / size16, 1);
+            cost += abs(window[q * 4] - four.x) + abs(window[q * 4 + 1] - four.y) + abs(window[q * 4 + 2] - four.z) +
+                    abs(window[q * 4 + 3] - four.w);
+        }
+        costs[j] = cost;
+        least = min(least, cost);
+    }
+    s_cost[me] = least;
+    barrier();
+    for (int i = 0; i < 64; ++i) {
+        least = min(least, s_cost[i]);
+    }
+    uint d2 = 0xffffffffu, pick = 0xffffffffu;
+    for (int j = 0; j < 7; ++j) {
+        const int shift = int(me) + 64 * j;
+        if (shift >= SHIFTS_A || costs[j] > least * 1.05 + 1e-4) {
+            continue;
+        }
+        const ivec2 d = ivec2(shift % (2 * RXA + 1) - RXA, shift / (2 * RXA + 1) - RYA);
+        if (uint(dot(d, d)) < d2) {
+            d2 = uint(dot(d, d));
+            pick = uint(shift);
+        }
+    }
+    s_d2[me] = d2;
+    s_pick[me] = pick;
+    // (level B's windows, while the others are at the same point)
+    const vec2 size4 = vec2(textureSize(quarter, 0));
+    const ivec2 corner4 = tile * 16 + BORDER * 4 - 2;
+    for (uint q = me; q < 100u; q += 64u) {
+        const ivec2 at = 2 * ivec2(q % 10u, q / 10u);
+        const vec2 corner = (vec2(corner4 + at) + 1.0) / size4;
+        const vec4 arrived = textureGather(quarter, corner, 0);
+        const vec4 left = textureGather(quarter, corner, 1);
+        const vec4 all = textureGather(quarter, corner, 2);
+        const uint first = uint(at.y * 20 + at.x); // x: below, y: below right, z: right, w: this one
+        s_arrived[first] = arrived.w;
+        s_arrived[first + 1u] = arrived.z;
+        s_arrived[first + 20u] = arrived.x;
+        s_arrived[first + 21u] = arrived.y;
+        s_all[first] = all.w;
+        s_all[first + 1u] = all.z;
+        s_all[first + 20u] = all.x;
+        s_all[first + 21u] = all.y;
+        s_weight[first] = max(arrived.w, left.w);
+        s_weight[first + 1u] = max(arrived.z, left.z);
+        s_weight[first + 20u] = max(arrived.x, left.x);
+        s_weight[first + 21u] = max(arrived.y, left.y);
+    }
+    barrier();
+    for (int i = 0; i < 64; ++i) {
+        if (s_d2[i] < d2 || (s_d2[i] == d2 && s_pick[i] < pick)) {
+            d2 = s_d2[i];
+            pick = s_pick[i];
+        }
+    }
+    const ivec2 answer_a = ivec2(int(pick) % (2 * RXA + 1) - RXA, int(pick) / (2 * RXA + 1) - RYA);
+
+    // ---- level B: far (one shift of 49 for an invocation), near (81: one or two)
+    float far = NONE;
+    const ivec2 d_far = answer_a * 4 + ivec2(int(me) % 7 - 3, int(me) / 7 - 3);
+    if (me < 49u) {
+        far = 0.0;
+        for (uint q = 0u; q < 100u; ++q) {
+            const ivec2 at = 2 * ivec2(q % 10u, q / 10u);
+            const vec4 four = textureGather(quarter, (vec2(corner4 + d_far + at) + 1.0) / size4, 1);
+            const uint first = uint(at.y * 20 + at.x);
+            far += abs(s_arrived[first] - four.w) + abs(s_arrived[first + 1u] - four.z) +
+                   abs(s_arrived[first + 20u] - four.x) + abs(s_arrived[first + 21u] - four.y);
+        }
+    }
+    float near[2];
+    float least_near = NONE;
+    for (int j = 0; j < 2; ++j) {
+        const int shift = int(me) + 64 * j;
+        near[j] = NONE;
+        if (shift >= 81) {
+            continue;
+        }
+        const ivec2 d = ivec2(shift % 9 - 4, shift / 9 - 4);
+        float cost = 0.0;
+        for (uint q = 0u; q < 100u; ++q) {
+            const ivec2 at = 2 * ivec2(q % 10u, q / 10u);
+            const vec4 four = textureGather(quarter, (vec2(corner4 + d + at) + 1.0) / size4, 3);
+            const uint first = uint(at.y * 20 + at.x);
+            cost += s_weight[first] * abs(s_all[first] - four.w) + s_weight[first + 1u] * abs(s_all[first + 1u] - four.z) +
+                    s_weight[first + 20u] * abs(s_all[first + 20u] - four.x) +
+                    s_weight[first + 21u] * abs(s_all[first + 21u] - four.y);
+        }
+        near[j] = cost;
+        least_near = min(least_near, cost);
+    }
+    s_cost[me] = far;
+    s_cost_near[me] = least_near;
+    barrier();
+    least = NONE;
+    least_near = NONE;
+    for (int i = 0; i < 64; ++i) {
+        least = min(least, s_cost[i]);
+        least_near = min(least_near, s_cost_near[i]);
+    }
+    s_d2[me] = far <= least * 1.05 + 1e-4 ? uint(dot(d_far, d_far)) : 0xffffffffu;
+    s_pick[me] = me;
+    uint d2_near = 0xffffffffu, pick_near = 0xffffffffu;
+    for (int j = 0; j < 2; ++j) {
+        const int shift = int(me) + 64 * j;
+        if (shift >= 81 || near[j] > least_near * 1.05 + 1e-4) {
+            continue;
+        }
+        const ivec2 d = ivec2(shift % 9 - 4, shift / 9 - 4);
+        if (uint(dot(d, d)) < d2_near) {
+            d2_near = uint(dot(d, d));
+            pick_near = uint(shift);
+        }
+    }
+    s_d2_near[me] = d2_near;
+    s_pick_near[me] = pick_near;
+    // (level C's list of the tile's changed pixels, every second one: 16 of the 1024 places each)
+    const ivec2 size = textureSize(layer, 0);
+    const ivec2 origin = tile * 64;
+    for (uint k = me * 16u; k < me * 16u + 16u; ++k) {
+        const ivec2 at = origin + 2 * ivec2(k & 31u, k >> 5);
+        if (any(greaterThanEqual(at, size))) {
+            continue;
+        }
+        const float now = clamp(texelFetch(layer, at, 0).a, 0.0, 1.0);
+        const float before = clamp(texelFetch(layer_before, at, 0).a, 0.0, 1.0);
+        if (abs(now - before) > EPS) {
+            s_list[atomicAdd(s_count, 1u)] = k | Level(now) << 10 | Level(before) << 20;
+        }
+    }
+    barrier();
+    d2 = 0xffffffffu;
+    pick = 0xffffffffu;
+    d2_near = 0xffffffffu;
+    pick_near = 0xffffffffu;
+    for (int i = 0; i < 64; ++i) {
+        if (s_d2[i] < d2 || (s_d2[i] == d2 && s_pick[i] < pick)) {
+            d2 = s_d2[i];
+            pick = s_pick[i];
+        }
+        if (s_d2_near[i] < d2_near || (s_d2_near[i] == d2_near && s_pick_near[i] < pick_near)) {
+            d2_near = s_d2_near[i];
+            pick_near = s_pick_near[i];
+        }
+    }
+    const ivec2 answer_far = answer_a * 4 + ivec2(int(pick) % 7 - 3, int(pick) / 7 - 3);
+    const ivec2 answer_near = ivec2(int(pick_near) % 9 - 4, int(pick_near) / 9 - 4);
+
+    // ---- level C: 49 around the far answer, 49 around the near one, "not moved"
+    const uint count = s_count;
+    if (count < LEAST) {
+        if (me == 0u) {
+            markers.tiles[record].motion = vec4(0.0);
+        }
+        return;
+    }
+    uint left[2];
+    uint least_left = 0xffffffffu;
+    for (int j = 0; j < 2; ++j) {
+        const int candidate = int(me) + 64 * j;
+        left[j] = 0xffffffffu;
+        if (candidate >= 99) {
+            continue;
+        }
+        const int in_set = candidate % 49;
+        const ivec2 d = candidate == 98 ? ivec2(0)
+                                        : (candidate < 49 ? answer_far : answer_near) * 4 + ivec2(in_set % 7 - 3, in_set / 7 - 3);
+        uint cost = 0u;
+        for (uint k = 0u; k < count; ++k) {
+            const uint entry = s_list[k];
+            const ivec2 at = origin + 2 * ivec2(entry & 31u, (entry >> 5) & 31u) + d;
+            uint before = 0u;
+            if (all(greaterThanEqual(at, ivec2(0))) && all(lessThan(at, size))) {
+                before = Level(texelFetch(layer_before, at, 0).a);
+            }
+            cost += uint(abs(int((entry >> 10) & 1023u) - int(before)));
+        }
+        left[j] = cost;
+        least_left = min(least_left, cost);
+        if (candidate == 98) {
+            s_zero = cost;
+        }
+    }
+    s_left[me] = least_left;
+    barrier();
+    for (int i = 0; i < 64; ++i) {
+        least_left = min(least_left, s_left[i]);
+    }
+    d2 = 0xffffffffu;
+    pick = 0xffffffffu;
+    uint cost = 0u;
+    for (int j = 0; j < 2; ++j) {
+        const int candidate = int(me) + 64 * j;
+        if (candidate >= 99 || left[j] * 20u > least_left * 21u + 20u) {
+            continue;
+        }
+        const int in_set = candidate % 49;
+        const ivec2 d = candidate == 98 ? ivec2(0)
+                                        : (candidate < 49 ? answer_far : answer_near) * 4 + ivec2(in_set % 7 - 3, in_set / 7 - 3);
+        if (uint(dot(d, d)) < d2) {
+            d2 = uint(dot(d, d));
+            pick = uint(candidate);
+            cost = left[j];
+        }
+    }
+    s_d2[me] = d2;
+    s_pick[me] = pick;
+    s_left[me] = cost;
+    barrier();
+    if (me != 0u) {
+        return;
+    }
+    for (int i = 0; i < 64; ++i) {
+        if (s_d2[i] < d2 || (s_d2[i] == d2 && s_pick[i] < pick)) {
+            d2 = s_d2[i];
+            pick = s_pick[i];
+            cost = s_left[i];
+        }
+    }
+    uint content = 0u; // of what arrived
+    for (uint k = 0u; k < count; ++k) {
+        const uint now = (s_list[k] >> 10) & 1023u, before = (s_list[k] >> 20) & 1023u;
+        content += now > before + 40u ? now : 0u;
+    }
+    const int in_set = int(pick) % 49;
+    const ivec2 d = pick == 98u ? ivec2(0)
+                                : (pick < 49u ? answer_far : answer_near) * 4 + ivec2(in_set % 7 - 3, in_set / 7 - 3);
+    const bool ok = d != ivec2(0) && content >= CONTENT && 10u * cost <= 3u * content && 2u * cost <= s_zero;
+    markers.tiles[record].motion = ok ? vec4(vec2(d), 1.0, 0.0) : vec4(0.0);
+    if (ok) {
+        atomicAdd(markers.found, 1u);
+    }
+}

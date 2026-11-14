@@ -1,0 +1,24 @@
+#version 450
+// The performance panel (hud_panel.h) over a frame that goes out. Its picture is premultiplied:
+// frame = panel + frame * (1 - panel's alpha), for the pixels of the panel's place only.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D panel;
+layout(binding = 3, rgba8) uniform image2D frame;
+layout(push_constant) uniform Constants {
+    vec2 origin; // the panel's top left corner in the frame
+    vec2 size;   // of the panel's picture (the image can be larger)
+} pc;
+
+void main() {
+    const ivec2 at = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 pixel = ivec2(pc.origin) + at;
+    if (any(greaterThanEqual(at, ivec2(pc.size))) || any(greaterThanEqual(pixel, imageSize(frame)))) {
+        return;
+    }
+    const vec4 over = texelFetch(panel, at, 0);
+    if (over.a <= 0.0) {
+        return;
+    }
+    const vec3 under = imageLoad(frame, pixel).rgb;
+    imageStore(frame, pixel, vec4(over.rgb + under * (1.0 - over.a), 1.0));
+}

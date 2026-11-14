@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# sc-turbo: launches Star Citizen with the layers of this project and controls them while it runs.
+#
+#   sc-turbo probe     launch the game through the normal sc-launch.sh with the passive
+#                      probe layer loaded (nothing in the prefix or launch script changes)
+#   sc-turbo capture   like probe, and also saves a few frames of DLSS's inputs (colour, motion
+#                      vectors, depth) to logs/capture, but only after "sc-turbo go"
+#   sc-turbo go        start a capture series now: 4 consecutive frames every 10 s for 2 minutes
+#   sc-turbo fg [2|3|4] [trace|old|older]  launch with frame generation (DLSS must be the upscaler in game);
+#                      the number is the multiplier, default 2. Log and dumps: logs/fg
+#                      ("old": the build before the last one, kept in build/fg-prev; "older": the one
+#                      before that, build/fg-prev2)
+#   sc-turbo fg-off / fg-on   switch generation off / on while the game runs
+#   sc-turbo fg-mult N change the multiplier (2, 3 or 4) while the game runs
+#   sc-turbo fg-hud on|off   switch the HUD handling (keeps the HUD in place) while the game runs
+#   sc-turbo fg-layer on|off|mode M [GAIN] [FLOOR]   exact HUD separation (the game's own HUD layer)
+#   sc-turbo fg-scd on|off   FSR's scene-change detector (off by default: it stops interpolation in fast turns)
+#   sc-turbo fg-cap on|off   limit shown frames to the display's rate (on by default; holds the game at rate/multiplier)
+#   sc-turbo fg-panel [next|off|1|2|3] [tl|tr|bl|br]   the performance panel over the picture. Without a word
+#                      (or "next") it goes one step on, so that one key can be bound to it (a desktop
+#                      shortcut that runs "sc-turbo fg-panel"): off -> 1 the frame rate that is shown ("FG")
+#                      -> 2 that and the game's own ("BASE"), with the multiplier -> 3 both and a graph of
+#                      the time between shown frames (even pacing is a flat line) -> off. tl tr bl br: the
+#                      corner it sits in. It stays as it was left, also for the next launch.
+#   sc-turbo fg-panel-key [install [KEYS] | remove]   the desktop shortcut for that (default Ctrl+Shift+`;
+#                      KEYS like Ctrl+Shift+F10). Set up on COSMIC; elsewhere it says what to bind by hand.
+#   sc-turbo fg-params name=value ...   tune the HUD detection while the game runs
+#                      (bias ratio motion up down level grow), or switch parts of the frame
+#                      matching to compare in place: chain=0|1 (frames matched to their captures by
+#                      the hand-over), nohud=0|1 (a frame without a HUD capture: 0 restart, 1 go on
+#                      with the last capture), wait=0|1 (wait until generated frames are ready),
+#                      shift=N (move the match by N captures), vectors=0|1 (the game's motion vectors
+#                      checked against the picture: cures objects that flicker, like the hangar hoses),
+#                      or parts of the frame limiter: gate=0|1 (the game's frames let on in step with
+#                      the present call), guard=0|1 (the next frame kept back while the last waits to
+#                      be copied out), first=0|1 (the generated frames' GPU work goes before the game's
+#                      next frame), gpuwait=0|1 (off by default; the game's next frame waits until the
+#                      GPU is done with the one before: no frames queued on a GPU that is the slower
+#                      one, so the picture is a frame's time newer, but a hitch of the game then costs
+#                      a frame). "gate=0 guard=0 first=0 gpuwait=0" is how it was before these four.
+#                      How the multiplier follows the game: fill=1 (default) the fewest generated frames
+#                      that fill the display (a game that could do 50 a second gets x3, is held at 40 and
+#                      shows 120, evenly), fill=0 the most that do not hold the game back (the same game
+#                      gets x2 and shows 100); probe=0|1 (a held game is asked what it could do by letting
+#                      one frame on early now and then, instead of guessing)
+#   sc-turbo fg-watch [--last N]   the session's log at a glance: a short line per ten seconds (frame
+#                      rates, frame times, what the limiter did) and every change of the multiplier
+#   sc-turbo fg-ab "A" "B" [SECONDS] [CYCLES]   two settings compared within the running session: switched
+#                      back and forth (20 s each, 4 times), frame rates of each side. A, B: what fg-params
+#                      takes, e.g. sc-turbo fg-ab "gate=1 guard=1 first=1" "gate=0 guard=0 first=0"
+#                      (hold a steady view meanwhile)
+#   sc-turbo threads   where the game's threads may run (by name)
+#   sc-turbo threads-ab A B [SECONDS] [CYCLES]   two thread placements compared within the running session
+#                      (asis | all | own-core | bg-low | all-bg-low | main-p; generation is off meanwhile, so the
+#                      game runs at its own speed)
+#   sc-turbo displays [check]   the displays and which one the game takes as its main one (COSMIC's
+#                      primary display; another one: SC_MONITOR=NAME ./sc-turbo fg 4). check: what
+#                      Wine then tells a program (a small test program without a window)
+#   sc-turbo fg-events   write the last ~4000 presents (which captures, timings) to logs/fg/events-*.txt
+#   sc-turbo fg-scan  (trace launches) save the display-size passes before/after, to find the HUD pass
+#   sc-turbo fg-dump [N]   save the next real + generated frame pair (and vectors/depth, the HUD layer) to
+#                      logs/fg; N (up to 8): that many frames in a row
+#   sc-turbo fg-stat   last frame-rate lines of the running/last fg session
+#   sc-turbo check     run while the game is in a session: ntsync, thread placement, probe stats
+#   sc-turbo report    summarize the newest probe log of StarCitizen.exe
+set -u
+here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+# Where the game is on this machine: sc-turbo.conf beside this script (see sc-turbo.conf.example),
+# or the same names in the environment, which win.
+#   SC_PREFIX  the Wine prefix Star Citizen is installed in (default: ~/Games/star-citizen)
+#   SC_LAUNCH  the script that starts the game through Wine (default: sc-launch.sh in the prefix)
+env_prefix="${SC_PREFIX:-}"; env_launch="${SC_LAUNCH:-}"
+[ -f "$here/sc-turbo.conf" ] && . "$here/sc-turbo.conf"
+SC_PREFIX="${env_prefix:-${SC_PREFIX:-$HOME/Games/star-citizen}}"
+launch="${env_launch:-${SC_LAUNCH:-$SC_PREFIX/sc-launch.sh}}"
+need_launch() {
+    [ -x "$launch" ] && return 0
+    echo "no launch script at $launch"
+    echo "set SC_PREFIX or SC_LAUNCH in $here/sc-turbo.conf (see sc-turbo.conf.example)"
+    exit 1
+}
+old="$here/wine"
+logs="$here/logs/probe"
+
+newest_log() { ls -t "$here"/logs/probe/probe-StarCitizen*.log "$here"/logs/capture/probe-StarCitizen*.log 2>/dev/null | head -1; }
+
+case "${1:-}" in
+probe|capture)
+    if [ "$1" = capture ]; then
+        mkdir -p "$here/logs/capture"
+        logs="$here/logs/capture"
+        # nothing is captured until "sc-turbo go": then 4 consecutive frames every 10 s, 12 times
+        export SC_PROBE_CAPTURE=4 SC_PROBE_CAPTURE_EVERY=10 SC_PROBE_CAPTURE_BURSTS=12 SC_PROBE_CAPTURE_TRIGGER=1
+        rm -f "$here/logs/capture/GO"
+    fi
+    [ -f "$here/build/libsc_probe.so" ] || { echo "build/libsc_probe.so is missing"; exit 1; }
+    mkdir -p "$logs"
+    export SC_PROBE=1 SC_PROBE_DIR="$logs"
+    export VK_ADD_IMPLICIT_LAYER_PATH="$here/build${VK_ADD_IMPLICIT_LAYER_PATH:+:$VK_ADD_IMPLICIT_LAYER_PATH}"
+    export DISABLE_LSFGVK=1     # keep lsfg-vk out of this run so the numbers are the game's own
+    export WINE_SCHED_LOG=0     # the scheduling-call log is not needed and costs time
+    need_launch
+    echo "Probe logs: $logs"
+    exec "$launch"
+    ;;
+fg)
+    [ -f "$here/build/fg/libsc_fg.so" ] || { echo "build/fg/libsc_fg.so is missing (./build.sh install)"; exit 1; }
+    need_launch
+    mkdir -p "$here/logs/fg"; rm -f "$here/logs/fg/OFF" "$here/logs/fg/DUMP" "$here/logs/fg/MULT" "$here/logs/fg/HUDOFF" "$here/logs/fg/HUDLAYEROFF" "$here/logs/fg/HUDSCAN" "$here/logs/fg/TRACE" "$here/logs/fg/LAYER" "$here/logs/fg/SCDON" "$here/logs/fg/NOCAP" "$here/logs/fg/EVENTS" "$here/logs/fg/PARAMS"
+    export SC_FG=1 SC_FG_DIR="$here/logs/fg" SC_FG_MULT="${2:-2}"
+    [ "${3:-}" = trace ] && export SC_FG_TRACE=1   # lets "sc-turbo fg-trace" record the frame structure
+    layer="$here/build/fg"
+    case "${3:-}" in
+    old|older)
+        [ "$3" = old ] && layer="$here/build/fg-prev" || layer="$here/build/fg-prev2"
+        [ -f "$layer/libsc_fg.so" ] || { echo "$layer/libsc_fg.so is missing"; exit 1; }
+        echo "Using an earlier build ($layer)" ;;
+    esac
+    export VK_ADD_IMPLICIT_LAYER_PATH="$layer${VK_ADD_IMPLICIT_LAYER_PATH:+:$VK_ADD_IMPLICIT_LAYER_PATH}"
+    export DISABLE_LSFGVK=1 WINE_SCHED_LOG=0
+    echo "Frame generation x$SC_FG_MULT; log: $here/logs/fg"
+    exec "$launch"
+    ;;
+fg-off)  touch "$here/logs/fg/OFF" && echo "generation off" ;;
+fg-on)   rm -f "$here/logs/fg/OFF" && echo "generation on" ;;
+fg-hud)  case "${2:-}" in
+             off) touch "$here/logs/fg/HUDOFF" && echo "HUD handling off" ;;
+             on) rm -f "$here/logs/fg/HUDOFF" && echo "HUD handling on" ;;
+             *) echo "fg-hud on|off" ;; esac ;;
+fg-layer) case "${2:-}" in
+             off) touch "$here/logs/fg/HUDLAYEROFF" && echo "exact HUD layer off (picture-based detection instead)" ;;
+             on) rm -f "$here/logs/fg/HUDLAYEROFF" && echo "exact HUD layer on" ;;
+             mode) echo "${3:-0} ${4:-1} ${5:-0.006}" > "$here/logs/fg/LAYER" && echo "layer composite: mode ${3:-0} gain ${4:-1} floor ${5:-0.006}" ;;
+             *) echo "fg-layer on|off|mode M [GAIN] [FLOOR]   (M: 0 blend, 1 hard, 2 show)" ;; esac ;;
+fg-scd) case "${2:-}" in
+             on) touch "$here/logs/fg/SCDON" && echo "FSR scene-change detector in use" ;;
+             off) rm -f "$here/logs/fg/SCDON" && echo "FSR scene-change detector ignored (default)" ;;
+             *) echo "fg-scd on|off" ;; esac ;;
+fg-cap) case "${2:-}" in
+             off) touch "$here/logs/fg/NOCAP" && echo "output not limited to the display's rate" ;;
+             on) rm -f "$here/logs/fg/NOCAP" && echo "output limited to the display's rate (default)" ;;
+             *) echo "fg-cap on|off" ;; esac ;;
+fg-params) shift; printf '%s\n' "$@" > "$here/logs/fg/PARAMS.tmp" && mv "$here/logs/fg/PARAMS.tmp" "$here/logs/fg/PARAMS" && echo "parameters sent: $*" ;;
+fg-trace) touch "$here/logs/fg/TRACE" && echo "trace requested" ;;
+fg-scan) touch "$here/logs/fg/HUDSCAN" && echo "pass scan requested (trace launches only)" ;;
+fg-dump) echo "${2:-1}" > "$here/logs/fg/DUMP.tmp" && mv "$here/logs/fg/DUMP.tmp" "$here/logs/fg/DUMP" && echo "dump requested (${2:-1} frame(s))" ;;
+fg-panel-key) shift; exec "$here/tools/sc-panel-key" "$@" ;;
+fg-panel)
+    file="$here/logs/fg/PANEL"; step=0; corner=tl
+    [ -f "$file" ] && read -r step corner < "$file"
+    case "$step" in [0-3]) ;; *) step=0 ;; esac
+    case "$corner" in tl|tr|bl|br) ;; *) corner=tl ;; esac
+    for word in "${@:2}"; do
+        case "$word" in
+        next) step=$(( (step + 1) % 4 )) ;;
+        off) step=0 ;;
+        [0-3]) step=$word ;;
+        tl|tr|bl|br) corner=$word ;;
+        *) echo "fg-panel [next|off|1|2|3] [tl|tr|bl|br]"; exit 1 ;;
+        esac
+    done
+    [ $# -lt 2 ] && step=$(( (step + 1) % 4 ))
+    mkdir -p "$here/logs/fg" && echo "$step $corner" > "$file.tmp" && mv "$file.tmp" "$file" || exit 1
+    case "$step" in 0) echo "panel off" ;; 1) echo "panel: shown rate ($corner)" ;; 2) echo "panel: shown rate and the game's ($corner)" ;;
+        3) echo "panel: both rates and the pacing graph ($corner)" ;; esac ;;
+fg-events) touch "$here/logs/fg/EVENTS" && echo "event log requested (logs/fg/events-*.txt)" ;;
+fg-mult) echo "${2:?multiplier 2, 3 or 4}" > "$here/logs/fg/MULT" && echo "multiplier x$2 requested" ;;
+fg-stat) log="$(ls -t "$here"/logs/fg/fg-*.log 2>/dev/null | head -1)"; [ -n "$log" ] && { grep -v 'STAT' "$log" | tail -8; grep 'STAT' "$log" | tail -4; } ;;
+fg-watch) shift; exec "$here/tools/fg-watch.py" "$@" ;;
+fg-ab) shift; exec "$here/tools/fg-ab.sh" "$@" ;;
+threads) exec "$here/tools/sc-threads" show ;;
+threads-ab) shift; exec "$here/tools/sc-ab-threads.sh" "$@" ;;
+displays)
+    "$here/wine/tools/sc-monitor" show
+    if [ "${2:-}" = check ]; then
+        echo "-- what Wine tells a program with that choice (a test program, it opens no window):"
+        WAYLANDDRV_PRIMARY_MONITOR="$("$here/wine/tools/sc-monitor")" "$here/wine/build/test/run_displays.sh"
+    fi ;;
+go)
+    pgrep -f 'StarCitizen\.exe' >/dev/null || { echo "StarCitizen.exe is not running"; exit 1; }
+    touch "$here/logs/capture/GO" && echo "capture series requested"
+    ;;
+check)
+    pid="$(pgrep -f 'StarCitizen\.exe' | head -1)"
+    [ -n "$pid" ] || { echo "StarCitizen.exe is not running"; exit 1; }
+    echo "== ntsync =="
+    if ls -l /proc/"$pid"/fd 2>/dev/null | grep -q '/dev/ntsync'; then
+        echo "in use by the game (pid $pid)"
+    else
+        echo "NOT open in the game process (pid $pid)"
+    fi
+    echo "== thread placement (20 s) =="
+    "$old/tools/sc-hybrid" status --seconds 20 2>&1 | head -30
+    echo "== C runtime the game has loaded (Bin64: the game's own; lib/wine: Wine's builtin) =="
+    grep -Eio '/[^ ]*/(vcruntime140[^/ ]*|ucrtbase|msvcrt|msvcp140[^/ ]*)\.dll' /proc/"$pid"/maps 2>/dev/null | sort -u
+    echo "== probe =="
+    log="$(newest_log)"; [ -n "$log" ] && grep STATS "$log" | tail -3
+    ;;
+report)
+    log="${2:-$(newest_log)}"
+    [ -n "$log" ] || { echo "no StarCitizen probe log in $logs"; exit 1; }
+    echo "log: $log"
+    grep -E 'SWAPCHAIN|NVX function|NVX module' "$log" | cut -c12- | sort | uniq -c
+    echo "-- extensions of interest:"
+    grep -E 'ext VK_(NVX|NV_low_latency|EXT_swapchain_maint|EXT_present|KHR_present)' "$log" | cut -c12- | sort -u
+    echo "-- distinct image views handed to the driver (DLSS inputs/outputs):"
+    grep 'new signature' "$log" | cut -c12-
+    echo "-- one full frame of NVX calls:"
+    awk '/NVX (handle|address|launch)/{buf=buf $0 "\n"} /FRAME end/{printf "%s", buf; exit}' "$log" | cut -c12-
+    echo "-- frame rate samples:"
+    grep STATS "$log" | awk '{print $3}' | sort -n | awk '{a[NR]=$1} END{if(NR) printf "n=%d min=%.1f median=%.1f max=%.1f presents/s\n", NR, a[1], a[int((NR+1)/2)], a[NR]}'
+    grep STATS "$log" | tail -2 | cut -c12-
+    ;;
+*)
+    awk 'NR > 1 { if (/^#/) print; else exit }' "$0"; exit 1 ;;
+esac

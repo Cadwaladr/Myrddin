@@ -1,0 +1,11 @@
+# Settings of this machine. Copy to sc-turbo.conf (kept out of git) and change what differs;
+# every line is optional, and the same names in the environment win.
+
+# The Wine prefix Star Citizen is installed in. The LUG Helper's default:
+#SC_PREFIX="$HOME/Games/star-citizen"
+
+# The script that starts the game through Wine. Default: the LUG Helper's sc-launch.sh in the prefix.
+#SC_LAUNCH="$SC_PREFIX/sc-launch.sh"
+
+# The stock runner that wine/build/test compares the patched copy against.
+#SC_RUNNER="$SC_PREFIX/runners/lug-wine-tkg-experimental-wayland-git-11.20-2"

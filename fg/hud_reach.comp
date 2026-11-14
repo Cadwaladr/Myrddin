@@ -1,0 +1,50 @@
+#version 450
+// HUD content that moves over the screen, after hud_spread.comp: per tile (64x64 pixels) the
+// motions, two at most, of the tiles whose content passes through it on its way from where it was
+// (x + motion) to where it is. One invocation works on one tile.
+layout(local_size_x = 8, local_size_y = 8) in;
+struct Tile {
+    vec4 motion; // xy, and z: 0 when there is none
+    vec4 reach;  // xy the first, zw the second; zeros: none
+};
+layout(std430, binding = 6) buffer Markers {
+    uint seen, found, spread, unused;
+    Tile tiles[];
+} markers;
+layout(push_constant) uniform Constants {
+    float tiles_w, tiles_h;
+    float cap, unused;
+} pc;
+
+void main() {
+    const ivec2 tile = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 tiles = ivec2(pc.tiles_w, pc.tiles_h);
+    if (any(greaterThanEqual(tile, tiles))) {
+        return;
+    }
+    const vec2 low = vec2(tile * 64), high = low + 64.0;
+    vec4 reach = vec4(0.0);
+    int found = 0;
+    // (a motion is at most 207 pixels across and 143 down: four tiles, three tiles)
+    for (int j = max(tile.y - 3, 0); j <= min(tile.y + 3, tiles.y - 1); ++j) {
+        for (int i = max(tile.x - 4, 0); i <= min(tile.x + 4, tiles.x - 1); ++i) {
+            const vec4 motion = markers.tiles[j * tiles.x + i].motion;
+            if (motion.z == 0.0 || found == 2) {
+                continue;
+            }
+            const vec2 from = vec2(i, j) * 64.0 + min(motion.xy, vec2(0.0));
+            const vec2 to = vec2(i, j) * 64.0 + 64.0 + max(motion.xy, vec2(0.0));
+            if (any(lessThanEqual(to, low)) || any(greaterThanEqual(from, high))) {
+                continue;
+            }
+            if (found == 0) {
+                reach.xy = motion.xy;
+                found = 1;
+            } else if (any(greaterThan(abs(motion.xy - reach.xy), vec2(1.5)))) {
+                reach.zw = motion.xy;
+                found = 2;
+            }
+        }
+    }
+    markers.tiles[tile.y * tiles.x + tile.x].reach = reach;
+}

@@ -1,0 +1,129 @@
+#version 450
+// hud_layer.comp for a frame whose HUD has content that moves over the screen (world markers):
+// the real frame's HUD contribution over the generated frame, and what moved since the capture
+// before put where it is on its way at the generated frame's time, instead of where it will be.
+// Inputs as in hud_layer.comp, the same three of the frame before, and per tile of 64x64 pixels
+// what hud_motion.comp, hud_spread.comp and hud_reach.comp found.
+//   in place   a pixel's HUD is this frame's, as in hud_layer.comp. Where the layer changed, in a
+//              tile with a motion, and has more alpha now than before, something arrived there
+//              that is still on its way: the frame before's HUD is put there, what was under it.
+//   moved      for each motion that reaches the pixel's tile: the place in this frame that the
+//              motion brings here by now. Its HUD is put here when it is content that arrived
+//              there, or content of something that also left a place behind it (a filled shape
+//              that moved by less than its size: its middle did not change), and it has more
+//              alpha than what is here or is opaque.
+// The layer's alpha is all that tells what changed: something opaque that moves over something
+// opaque is not seen to move there.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D current_frame;
+layout(binding = 1) uniform sampler2D scene;
+layout(binding = 2) uniform sampler2D layer;
+layout(binding = 3, rgba8) uniform image2D generated;
+layout(binding = 5) uniform sampler2D curve; // see hud_layer.comp
+struct Tile {
+    vec4 motion; // its changed content was at x + xy in the capture before; z: 0 when not known
+    vec4 reach;  // the motions (xy, zw) of content that passes through it; zeros: none
+};
+layout(std430, binding = 6) readonly buffer Markers {
+    uint seen, found, spread, unused;
+    Tile tiles[];
+} markers;
+layout(binding = 7) uniform sampler2D layer_before;
+layout(binding = 8) uniform sampler2D frame_before;
+layout(binding = 9) uniform sampler2D scene_before;
+layout(push_constant) uniform Constants {
+    float back;    // how far before this frame the generated one is: 1 - its time between the two
+    float gain;    // multiplies the layer's alpha
+    float floor_;  // differences below this count as none
+    float tiles_w; // tiles in a row
+} pc;
+
+const float EPS = 0.04;
+
+vec3 Tone(vec3 colour) {
+    const vec3 at = (colour * 255.0 + 0.5) / 256.0;
+    return vec3(textureLod(curve, vec2(at.r, 0.5), 0.0).r, textureLod(curve, vec2(at.g, 0.5), 0.0).g,
+                textureLod(curve, vec2(at.b, 0.5), 0.0).b);
+}
+
+/// The HUD of a frame at a place, as hud_layer.comp works it out: what it added (rgb) on top of
+/// the (1 - a) share of the scene.
+vec4 Hud(vec3 real, vec3 without, float layer_alpha) {
+    const vec3 hudless = Tone(without);
+    float alpha = clamp(layer_alpha * pc.gain, 0.0, 1.0);
+    const vec3 share = hudless * (1.0 - alpha);
+    const vec3 fits = min(vec3(1.0), (real + pc.floor_) / max(share, vec3(1e-4)));
+    alpha = 1.0 - (1.0 - alpha) * min(fits.r, min(fits.g, fits.b));
+    const vec3 difference = abs(real - hudless);
+    if (alpha <= 0.0 && max(difference.r, max(difference.g, difference.b)) <= pc.floor_) {
+        return vec4(0.0);
+    }
+    return vec4(real - hudless * (1.0 - alpha), alpha);
+}
+
+vec4 HudNow(ivec2 at) {
+    return Hud(texelFetch(current_frame, at, 0).rgb, texelFetch(scene, at, 0).rgb, texelFetch(layer, at, 0).a);
+}
+
+float Alpha(sampler2D of, ivec2 at, ivec2 size) {
+    return all(greaterThanEqual(at, ivec2(0))) && all(lessThan(at, size)) ? clamp(texelFetch(of, at, 0).a, 0.0, 1.0) : 0.0;
+}
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = imageSize(generated);
+    if (any(greaterThanEqual(pixel, size))) {
+        return;
+    }
+    const int tiles_w = int(pc.tiles_w);
+    const Tile tile = markers.tiles[(pixel.y >> 6) * tiles_w + (pixel.x >> 6)];
+    const vec3 interpolated = Tone(imageLoad(generated, pixel).rgb);
+    vec4 hud;
+    if (tile.motion.z == 0.0 && tile.reach == vec4(0.0)) {
+        hud = HudNow(pixel);
+    } else {
+        const float now = clamp(texelFetch(layer, pixel, 0).a, 0.0, 1.0);
+        const float before = clamp(texelFetch(layer_before, pixel, 0).a, 0.0, 1.0);
+        float covered; // the layer's alpha of what is put here
+        if (tile.motion.z != 0.0 && now - before > EPS) {
+            covered = before;
+            hud = Hud(texelFetch(frame_before, pixel, 0).rgb, texelFetch(scene_before, pixel, 0).rgb,
+                      texelFetch(layer_before, pixel, 0).a);
+        } else {
+            covered = now;
+            hud = HudNow(pixel);
+        }
+        for (int k = 0; k < 2; ++k) {
+            const vec2 motion = k == 0 ? tile.reach.xy : tile.reach.zw;
+            if (motion == vec2(0.0)) {
+                continue;
+            }
+            const ivec2 from = ivec2(floor(vec2(pixel) - pc.back * motion + 0.5));
+            if (any(lessThan(from, ivec2(0))) || any(greaterThanEqual(from, size))) {
+                continue;
+            }
+            const vec4 its = markers.tiles[(from.y >> 6) * tiles_w + (from.x >> 6)].motion;
+            if (its.z == 0.0 || any(greaterThan(abs(its.xy - motion), vec2(1.5)))) {
+                continue;
+            }
+            // Over what is here already it goes when it has more alpha, or is as good as opaque
+            // (then it covers whatever is here; a translucent shape that lies over where it was
+            // is not laid over itself a second time).
+            const float here = clamp(texelFetch(layer, from, 0).a, 0.0, 1.0);
+            if (here <= covered && here < 0.9) {
+                continue;
+            }
+            bool moving = here - clamp(texelFetch(layer_before, from, 0).a, 0.0, 1.0) > EPS;
+            if (!moving) {
+                const ivec2 was = from + ivec2(motion);
+                const float was_before = Alpha(layer_before, was, size);
+                moving = was_before - Alpha(layer, was, size) > EPS && here >= 0.5 * was_before;
+            }
+            if (moving) {
+                covered = here;
+                hud = HudNow(from);
+            }
+        }
+    }
+    imageStore(generated, pixel, vec4(clamp(interpolated * (1.0 - hud.a) + hud.rgb, 0.0, 1.0), 1.0));
+}

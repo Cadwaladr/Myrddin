@@ -1,0 +1,19 @@
+#version 450
+// Puts the HUD of the current real frame over a generated frame: the HUD does not move, so the
+// real one is exact.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D current_frame;
+layout(binding = 1) uniform sampler2D grown;
+layout(binding = 3, rgba8) uniform image2D generated;
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = imageSize(generated);
+    if (any(greaterThanEqual(pixel, size))) {
+        return;
+    }
+    const float hud = smoothstep(0.3, 0.7, textureLod(grown, (vec2(pixel) + 0.5) / vec2(size), 0.0).g);
+    if (hud > 0.0) {
+        imageStore(generated, pixel, mix(imageLoad(generated, pixel), texelFetch(current_frame, pixel, 0), hud));
+    }
+}

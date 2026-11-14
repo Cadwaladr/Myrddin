@@ -1,0 +1,97 @@
+#version 450
+// Motion-vector check, second pass. The first pass replaces a vector only where the picture
+// clearly contradicts it; on the pale side of a hose, where the floor it claims to come from looks
+// much the same, it does not. A pixel next to a replaced one, with a vector like the one that was
+// replaced there, is part of the same object: it takes the same replacement, unless its own
+// vector explains the picture better.
+//
+// Started once for every 8x8 block next to where the first pass replaced something (mv_marks.comp):
+// only there is anything to do or to write, the output holds the game's vectors already.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D vectors;  // render size: the game's
+layout(binding = 1) uniform sampler2D checked;  // render size: the first pass (xy vector, z 1 where replaced)
+layout(binding = 2) uniform sampler2D current;  // display size: this frame (without the HUD)
+layout(binding = 5) uniform sampler2D previous; // display size: the frame before
+layout(binding = 3, rg16f) uniform writeonly image2D fixed_vectors;
+layout(binding = 4, rgba16f) uniform readonly image2D reach;    // mv_reach.comp: 1 where the first pass looked
+// The 8x8 blocks the check's two passes work on. Each pass is started once for every block in its
+// list (vkCmdDispatchIndirect: the counts with their 1, 1 are its arguments), so that the rest of
+// the frame, which is most of it, costs nothing.
+layout(binding = 6, std430) buffer Lists {
+    uint first_count;    // blocks in the first pass's list
+    uint first_rest[3];
+    uint second_count;   // ... in the second's
+    uint second_rest[3];
+    uint blocks[];       // the first pass's list in the first half, the second's in the other; y * width + x
+} lists;
+layout(push_constant) uniform Constants {
+    float margin;  // the replacement may explain the picture this much worse than the pixel's own vector
+    float alike;   // vectors this close (pixels) ...
+    float alike_share; // ... or this share of their length are the same object's
+    float unknown; // what a vector that points off the screen counts as
+} pc;
+
+const ivec2 DIRECTIONS[8] = ivec2[8](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1),
+                                     ivec2(1, 1), ivec2(-1, 1), ivec2(1, -1), ivec2(-1, -1));
+const int RADII[4] = int[4](1, 2, 4, 8);
+const vec2 TAPS[9] = vec2[9](vec2(0.0, 0.0), vec2(-1.0, 0.0), vec2(1.0, 0.0), vec2(0.0, -1.0), vec2(0.0, 1.0),
+                             vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0), vec2(1.0, 1.0));
+
+/// As in the first pass: how badly `v` explains the picture around `at`; negative: off the screen.
+float Mismatch(vec2 at, vec2 v, vec2 size) {
+    const vec2 from = at + v;
+    if (from.x < 0.0 || from.y < 0.0 || from.x > size.x || from.y > size.y) {
+        return -1.0;
+    }
+    float sum = 0.0;
+    for (int i = 0; i < 9; ++i) {
+        const vec2 tap = at + TAPS[i];
+        const vec3 difference =
+            abs(textureLod(current, tap / size, 0.0).rgb - textureLod(previous, (tap + v) / size, 0.0).rgb);
+        sum += difference.r + difference.g + difference.b;
+    }
+    return sum / 27.0;
+}
+
+/// The vector for `pixel`, which the first pass left with its own, `own`.
+vec2 Spread(ivec2 pixel, vec2 own, ivec2 extent) {
+    const float alike = max(pc.alike, pc.alike_share * length(own));
+    for (int r = 0; r < 4; ++r) {
+        for (int k = 0; k < 8; ++k) {
+            const ivec2 other = clamp(pixel + DIRECTIONS[k] * RADII[r], ivec2(0), extent - 1);
+            if (imageLoad(reach, other / 8).x < 0.5) {
+                continue; // the first pass was not there: nothing replaced, and `checked` is not this frame's
+            }
+            const vec4 theirs = texelFetch(checked, other, 0);
+            if (theirs.z < 0.5 || distance(texelFetch(vectors, other, 0).xy, own) > alike ||
+                distance(theirs.xy, own) <= 2.0) {
+                continue;
+            }
+            // The first such neighbour decides.
+            const vec2 size = vec2(extent);
+            const vec2 at = vec2(pixel) + 0.5;
+            const float replacement = Mismatch(at, theirs.xy, size);
+            if (replacement < 0.0) {
+                return own;
+            }
+            float mine = Mismatch(at, own, size);
+            if (mine < 0.0) {
+                mine = pc.unknown;
+            }
+            return replacement <= mine + pc.margin ? theirs.xy : own;
+        }
+    }
+    return own;
+}
+
+void main() {
+    const ivec2 extent = textureSize(vectors, 0);
+    const int block = int(lists.blocks[lists.blocks.length() / 2 + int(gl_WorkGroupID.x)]), across = (extent.x + 7) / 8;
+    const ivec2 pixel = ivec2(block % across, block / across) * 8 + ivec2(gl_LocalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, extent))) {
+        return;
+    }
+    const vec4 first =
+        imageLoad(reach, pixel / 8).x < 0.5 ? vec4(texelFetch(vectors, pixel, 0).xy, 0.0, 0.0) : texelFetch(checked, pixel, 0);
+    imageStore(fixed_vectors, pixel, vec4(first.z < 0.5 ? Spread(pixel, first.xy, extent) : first.xy, 0.0, 0.0));
+}

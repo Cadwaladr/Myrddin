@@ -1,0 +1,33 @@
+#version 450
+// Motion-vector check, preparation: which 8x8 blocks of the game's vectors have a break in them
+// (vectors that differ, in the block or between it and the pixels right around it). Only near such
+// a block can a vector be wrong in the way the check looks for. One invocation works on one block.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D vectors;                 // render size
+layout(binding = 3, rgba16f) uniform writeonly image2D tiles;  // an eighth of it: x is 1 where there is a break
+
+void main() {
+    const ivec2 tile = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(tile, imageSize(tiles)))) {
+        return;
+    }
+    const vec2 size = vec2(textureSize(vectors, 0));
+    vec2 lowest = vec2(1e9), highest = vec2(-1e9);
+    // The block and one pixel around it, four pixels at a time: those around every second corner.
+    // (Beyond the picture's edge the sampler repeats the edge.)
+    for (int y = 0; y < 5; ++y) {
+        for (int x = 0; x < 5; ++x) {
+            const vec2 corner = vec2(tile * 8 + 2 * ivec2(x, y)) / size;
+            const vec4 across = textureGather(vectors, corner, 0);
+            const vec4 down = textureGather(vectors, corner, 1);
+            lowest = min(lowest, vec2(min(min(across.x, across.y), min(across.z, across.w)),
+                                      min(min(down.x, down.y), min(down.z, down.w))));
+            highest = max(highest, vec2(max(max(across.x, across.y), max(across.z, across.w)),
+                                        max(max(down.x, down.y), max(down.z, down.w))));
+        }
+    }
+    // As in mv_check.comp: vectors differ when they are further apart than 2 pixels and a fifth of
+    // their length (here: of the shortest there can be among them).
+    const bool breaks = distance(lowest, highest) > max(2.0, 0.2 * length(clamp(vec2(0.0), lowest, highest)));
+    imageStore(tiles, tile, vec4(breaks ? 1.0 : 0.0));
+}

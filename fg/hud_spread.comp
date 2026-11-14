@@ -1,0 +1,121 @@
+#version 450
+// HUD content that moves over the screen, after hud_motion.comp: a tile without an answer of its
+// own (too little arrived content in it, or none found) takes that of a tile next to it, when
+// that explains its changed pixels. A marker lies across tiles, with small parts in some of them.
+// One work group, 64 invocations, works on one tile. Answers taken here are marked 2 in motion.z
+// and are not passed on.
+layout(local_size_x = 64) in;
+layout(binding = 0) uniform sampler2D layer;
+layout(binding = 1) uniform sampler2D layer_before;
+struct Tile {
+    vec4 motion;
+    vec4 reach;
+};
+layout(std430, binding = 6) buffer Markers {
+    uint seen, found, spread, unused;
+    Tile tiles[];
+} markers;
+layout(push_constant) uniform Constants {
+    float tiles_w, tiles_h;
+    float cap, unused;
+} pc;
+
+const float EPS = 0.04;
+const uint LEAST = 4u;      // changed pixels (of those looked at) the tile must have
+const uint CONTENT = 1024u; // ... and arrived alpha in them, in 1023ths, in sum
+
+shared uint s_left[64 * 8], s_zero[64], s_content[64], s_count[64];
+
+uint Level(float alpha) {
+    return uint(clamp(alpha, 0.0, 1.0) * 1023.0 + 0.5);
+}
+
+void main() {
+    const ivec2 tile = ivec2(gl_WorkGroupID.xy);
+    const uint me = gl_LocalInvocationIndex;
+    const ivec2 tiles = ivec2(pc.tiles_w, pc.tiles_h);
+    const uint record = uint(tile.y * tiles.x + tile.x);
+    if (markers.tiles[record].motion.z != 0.0) {
+        return;
+    }
+    // the answers of the tiles around, each one once
+    ivec2 motions[8];
+    int known = 0;
+    for (int j = max(tile.y - 1, 0); j <= min(tile.y + 1, tiles.y - 1); ++j) {
+        for (int i = max(tile.x - 1, 0); i <= min(tile.x + 1, tiles.x - 1); ++i) {
+            const vec4 other = markers.tiles[j * tiles.x + i].motion;
+            if (other.z != 1.0) {
+                continue;
+            }
+            const ivec2 motion = ivec2(other.xy);
+            bool had = false;
+            for (int k = 0; k < known; ++k) {
+                had = had || motions[k] == motion;
+            }
+            if (!had) {
+                motions[known++] = motion;
+            }
+        }
+    }
+    if (known == 0) {
+        return;
+    }
+    // every second pixel in both directions: 16 of the 1024 places each
+    const ivec2 size = textureSize(layer, 0);
+    const ivec2 origin = tile * 64;
+    uint left[8], zero = 0u, content = 0u, count = 0u;
+    for (int k = 0; k < 8; ++k) {
+        left[k] = 0u;
+    }
+    for (uint place = me * 16u; place < me * 16u + 16u; ++place) {
+        const ivec2 at = origin + 2 * ivec2(place & 31u, place >> 5);
+        if (any(greaterThanEqual(at, size))) {
+            continue;
+        }
+        const float alpha = clamp(texelFetch(layer, at, 0).a, 0.0, 1.0);
+        const float alpha_before = clamp(texelFetch(layer_before, at, 0).a, 0.0, 1.0);
+        if (abs(alpha - alpha_before) <= EPS) {
+            continue;
+        }
+        const int now = int(Level(alpha)), before = int(Level(alpha_before));
+        ++count;
+        zero += uint(abs(now - before));
+        content += now > before + 40 ? uint(now) : 0u;
+        for (int k = 0; k < known; ++k) {
+            const ivec2 from = at + motions[k];
+            int there = 0;
+            if (all(greaterThanEqual(from, ivec2(0))) && all(lessThan(from, size))) {
+                there = int(Level(texelFetch(layer_before, from, 0).a));
+            }
+            left[k] += uint(abs(now - there));
+        }
+    }
+    for (int k = 0; k < 8; ++k) {
+        s_left[me * 8u + uint(k)] = left[k];
+    }
+    s_zero[me] = zero;
+    s_content[me] = content;
+    s_count[me] = count;
+    barrier();
+    if (me != 0u) {
+        return;
+    }
+    for (uint i = 1u; i < 64u; ++i) {
+        for (int k = 0; k < known; ++k) {
+            left[k] += s_left[i * 8u + uint(k)];
+        }
+        zero += s_zero[i];
+        content += s_content[i];
+        count += s_count[i];
+    }
+    int best = 0;
+    for (int k = 1; k < known; ++k) {
+        if (left[k] < left[best]) {
+            best = k;
+        }
+    }
+    if (count >= LEAST && content >= CONTENT && 10u * left[best] <= 3u * content && 2u * left[best] <= zero) {
+        markers.tiles[record].motion = vec4(vec2(motions[best]), 2.0, 0.0);
+        atomicAdd(markers.spread, 1u);
+    }
+}

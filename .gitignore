@@ -1,0 +1,20 @@
+# generated or bulky: rebuilt from source, or session data
+/build/
+/logs/
+*.bak*
+*.a
+__pycache__/
+*.pyc
+# this machine's settings and backups of desktop files
+/sc-turbo.conf
+/backups/
+# Wine source trees, build output, test prefix, runner binaries and session records
+/wine/build/wine-*/
+/wine/build/obj-*/
+/wine/build/out/
+/wine/build/test/prefix/
+/wine/build/*.log
+/wine/runners/
+/wine/logs/
+/wine/docs/data/
+*.exe

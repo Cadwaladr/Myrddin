@@ -1,0 +1,36 @@
+#version 450
+// Turns the per-frame HUD detection into the HUD mask and writes the game's vectors with the
+// HUD's set to zero. A pixel becomes HUD only after it was detected at the same place several
+// frames in a row: the HUD stays where it is, while wrongly detected scenery moves on.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D detected;
+layout(binding = 1) uniform sampler2D history; // r: confidence one frame ago, g: mask one frame ago
+layout(binding = 2) uniform sampler2D vectors;
+layout(binding = 3, rg16f) uniform writeonly image2D masked_vectors;
+layout(binding = 4, rg8) uniform writeonly image2D state; // r: confidence, g: mask
+layout(push_constant) uniform Constants {
+    float up;     // confidence gained by a detection
+    float down;   // ... lost when tested and found to be scene
+    float level;  // confidence at which a pixel is HUD
+    float grow;   // confident pixels needed among the 5x5 neighbours to join them
+} constants;
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = imageSize(state);
+    if (any(greaterThanEqual(pixel, size))) {
+        return;
+    }
+    const float now = texelFetch(detected, pixel, 0).r;
+    float confidence = texelFetch(history, pixel, 0).r;
+    confidence = clamp(confidence + (now > 0.75 ? constants.up : now < 0.25 ? -constants.down : 0.0), 0.0, 1.0);
+    float near = 0.0;
+    for (int dy = -2; dy <= 2; ++dy) {
+        for (int dx = -2; dx <= 2; ++dx) {
+            near += texelFetch(history, clamp(pixel + ivec2(dx, dy), ivec2(0), size - 1), 0).r >= constants.level ? 1.0 : 0.0;
+        }
+    }
+    const bool hud = confidence >= constants.level || near >= constants.grow;
+    imageStore(state, pixel, vec4(confidence, hud ? 1.0 : 0.0, 0.0, 0.0));
+    imageStore(masked_vectors, pixel, vec4(hud ? vec2(0.0) : texelFetch(vectors, pixel, 0).rg, 0.0, 0.0));
+}

@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""The CPU's clock under the game's load, a line every few seconds: is it held back, by the
+power limit (125 W sustained on this machine, 181 W for the first minute) or by heat?
+Only reads /proc and /sys; needs no root and touches nothing.
+
+    tools/sc-cpuwatch [SECONDS=5] [--for SECONDS]
+
+Columns: busy CPUs among the P-cores' 12 and the E-cores' 8 (more than half the time at work),
+the clock of the busy P-core CPUs (mean and slowest, GHz; 5.1 is the most there is) and of the
+busy E-core CPUs (3.9 the most), the package temperature, how often the CPU has throttled for
+heat since boot, and, with the game running, the CPU its main thread was last on and that
+one's clock.
+"""
+import os, sys, time
+
+
+def read(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def cpulist(text):
+    cpus = set()
+    for part in text.split(","):
+        if "-" in part:
+            a, b = part.split("-")
+            cpus.update(range(int(a), int(b) + 1))
+        elif part:
+            cpus.add(int(part))
+    return cpus
+
+
+def times():
+    out = {}
+    for line in open("/proc/stat"):
+        f = line.split()
+        if f[0].startswith("cpu") and f[0] != "cpu":
+            v = [int(x) for x in f[1:9]]
+            out[int(f[0][3:])] = (sum(v), v[3] + v[4]) # all, idle + iowait
+    return out
+
+
+def freq(cpu):
+    base = f"/sys/devices/system/cpu/cpu{cpu}/cpufreq/"
+    return int(read(base + "cpuinfo_avg_freq") or read(base + "scaling_cur_freq") or 0) / 1e6
+
+
+def game():
+    for d in os.listdir("/proc"):
+        if d.isdigit() and read(f"/proc/{d}/comm") == "StarCitizen.exe" and len(os.listdir(f"/proc/{d}/task")) > 50:
+            return int(d)
+    return None
+
+
+def main():
+    args = sys.argv[1:]
+    total = None
+    if "--for" in args:
+        i = args.index("--for")
+        total = float(args[i + 1])
+        del args[i:i + 2]
+    step = float(args[0]) if args else 5.0
+    online = cpulist(read("/sys/devices/system/cpu/online", "0"))
+    pcores = cpulist(read("/sys/devices/cpu_core/cpus")) or online
+    ecores = cpulist(read("/sys/devices/cpu_atom/cpus"))
+    temp = next((h for h in (f"/sys/class/hwmon/{d}" for d in os.listdir("/sys/class/hwmon")) if read(h + "/name") == "coretemp"), None)
+    print("time      busy P  E | P GHz mean  min | E GHz mean | temp C | throttled | main thread on")
+    before, start = times(), time.time()
+    while total is None or time.time() - start < total:
+        # (the clock is sampled a few times within the step: a single reading is one moment)
+        samples = {c: [] for c in online}
+        for _ in range(5):
+            time.sleep(step / 5)
+            for c in online:
+                samples[c].append(freq(c))
+        now = times()
+        busy = {c: 1 - (now[c][1] - before[c][1]) / max(now[c][0] - before[c][0], 1) for c in online if c in now and c in before}
+        before = now
+        bp = [c for c in pcores if busy.get(c, 0) > 0.5]
+        be = [c for c in ecores if busy.get(c, 0) > 0.5]
+        mean = lambda cs: sum(sum(samples[c]) / len(samples[c]) for c in cs) / len(cs) if cs else 0.0
+        low = min((sum(samples[c]) / len(samples[c]) for c in bp), default=0.0)
+        throttled = read("/sys/devices/system/cpu/cpu0/thermal_throttle/package_throttle_count", "?")
+        where = ""
+        pid = game()
+        if pid:
+            stat = read(f"/proc/{pid}/task/{pid}/stat")
+            if stat:
+                cpu = int(stat.rsplit(")", 1)[1].split()[36])
+                where = f"cpu {cpu} ({'P' if cpu in pcores else 'E'}) {sum(samples[cpu]) / len(samples[cpu]):.2f} GHz, {100 * busy.get(cpu, 0):.0f} % busy"
+        print(f"{time.strftime('%H:%M:%S')}  {len(bp):6d} {len(be):2d} | {mean(bp):10.2f} {low:4.2f} | {mean(be):10.2f} | "
+              f"{int(read(temp + '/temp1_input', '0')) / 1000 if temp else 0:6.0f} | {throttled:>9} | {where}", flush=True)
+
+
+main()

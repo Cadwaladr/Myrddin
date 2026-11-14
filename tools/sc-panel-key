@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+"""The key that steps the performance panel: a desktop shortcut that runs "sc-turbo fg-panel"
+(off -> shown rate -> and the game's -> and the pacing graph -> off). The desktop takes the key,
+not the game: nothing is sent to the game and nothing in it is read.
+
+    tools/sc-panel-key                    what is set up
+    tools/sc-panel-key install [KEYS]     set it up; KEYS like Ctrl+Shift+grave (the default: Ctrl+Shift+`)
+    tools/sc-panel-key remove             take it out again
+
+COSMIC: an entry in ~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom (where its
+Settings > Keyboard > Custom shortcuts are kept; the desktop reads the file again at once). The
+file as it was is kept in backups/ of this project. Any other desktop: this prints the command
+to bind there by hand.
+"""
+import os, re, sys, time
+
+HERE = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+COMMAND = os.path.join(HERE, "sc-turbo") + " fg-panel"
+# (SC_PANEL_KEY_FILE: another file, to try this out on a copy)
+FILE = os.environ.get("SC_PANEL_KEY_FILE") or os.path.expanduser("~/.config/cosmic/com.system76.CosmicSettings.Shortcuts/v1/custom")
+NOTE = "Star Citizen performance panel"
+MODIFIERS = {"ctrl": "Ctrl", "control": "Ctrl", "shift": "Shift", "alt": "Alt", "super": "Super"}
+KEYS = {"`": "grave", "~": "grave", "backtick": "grave", "tilde": "grave"}
+# One entry of the file: "(modifiers: [..], key: "..", description: ..): Action,"
+ENTRY = re.compile(r'[ \t]*\(\s*modifiers:\s*\[([^\]]*)\],\s*(?:key:\s*"([^"]*)",\s*)?(?:description:\s*[^\n]*\n\s*)?\):\s*([^\n]*),\n')
+
+
+def entries(text):
+    for m in ENTRY.finditer(text):
+        mods = sorted(x.strip() for x in m.group(1).split(",") if x.strip())
+        yield m, mods, m.group(2) or "", m.group(3)
+
+
+def ours(text):
+    return [(m, mods, key) for m, mods, key, action in entries(text) if "sc-turbo fg-panel" in action]
+
+
+def parse(keys):
+    parts = [p for p in keys.replace(" ", "").split("+") if p] if keys != "+" else ["+"]
+    mods, key = [], None
+    for p in parts:
+        if p.lower() in MODIFIERS:
+            mods.append(MODIFIERS[p.lower()])
+        elif key is None:
+            key = KEYS.get(p.lower(), p)
+        else:
+            sys.exit(f"{keys}: more than one key")
+    if not key:
+        sys.exit(f"{keys}: no key")
+    return sorted(set(mods)), key
+
+
+def manual():
+    print("This desktop's shortcuts are not known to this tool. Bind a key of your choice to this command")
+    print("in its keyboard settings (custom shortcut):")
+    print("    " + COMMAND)
+
+
+def write(text, before):
+    if text.count("(") != text.count(")") or text.count("[") != text.count("]") or text.count("{") != text.count("}"):
+        sys.exit("the result would not be well formed: nothing written")
+    if before is not None:
+        keep = os.path.join(HERE, "backups")
+        os.makedirs(keep, exist_ok=True)
+        name = os.path.join(keep, "cosmic-shortcuts-custom." + time.strftime("%Y%m%d-%H%M%S"))
+        n = 1
+        while os.path.exists(name + ("" if n == 1 else f"-{n}")): # (never over an earlier one)
+            n += 1
+        with open(name + ("" if n == 1 else f"-{n}"), "w") as f:
+            f.write(before)
+    tmp = FILE + ".sc-turbo-tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.replace(tmp, FILE)
+
+
+def main():
+    what = sys.argv[1] if len(sys.argv) > 1 else "show"
+    if not os.path.isdir(os.path.expanduser("~/.config/cosmic")):
+        manual()
+        return
+    text = open(FILE).read() if os.path.exists(FILE) else None
+    mine = ours(text) if text else []
+    if what == "show":
+        if mine:
+            for _, mods, key in mine:
+                print("+".join(mods + [key]) + "  ->  " + COMMAND)
+        else:
+            print("no key is set up (tools/sc-panel-key install)")
+    elif what == "remove":
+        if not mine:
+            print("no key was set up")
+            return
+        new = text
+        for m, _, _ in reversed(mine):
+            new = new[: m.start()] + new[m.end() :]
+        write(new, text)
+        print("removed")
+    elif what == "install":
+        mods, key = parse(sys.argv[2] if len(sys.argv) > 2 else "Ctrl+Shift+grave")
+        new = text if text is not None else "{\n}"
+        for m, _, _ in reversed(ours(new)):
+            new = new[: m.start()] + new[m.end() :]
+        for _, other_mods, other_key, action in entries(new):
+            if other_mods == mods and other_key == key and action != "Disable":
+                sys.exit("+".join(mods + [key]) + f" is already taken there ({action}): nothing written")
+        entry = "    (\n        modifiers: [\n" + "".join(f"            {m},\n" for m in mods) + "        ],\n"
+        entry += f'        key: "{key}",\n        description: Some("{NOTE}"),\n    ): Spawn("{COMMAND}"),\n'
+        end = new.rstrip().rfind("}")
+        if end < 0:
+            sys.exit(FILE + " is not what was expected: nothing written")
+        head = new[:end]
+        if head.strip() != "{" and not head.rstrip().endswith(","):
+            head = head.rstrip() + ",\n"
+        new = head + entry + new[end:]
+        if len(list(entries(new))) != len(list(entries(text or ""))) - len(mine) + 1:
+            sys.exit("the result does not read back as expected: nothing written")
+        write(new, text)
+        print("+".join(mods + [key]) + "  ->  " + COMMAND)
+    else:
+        print(__doc__)
+
+
+main()

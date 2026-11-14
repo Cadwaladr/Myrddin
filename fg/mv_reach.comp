@@ -1,0 +1,37 @@
+#version 450
+// Motion-vector check, preparation: the 8x8 blocks within three blocks of a break in the vectors
+// (mv_tiles.comp). A pixel there can have a neighbour, up to 24 pixels away, on the other side of
+// the break: the first pass looks at these blocks, and at no others.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D tiles;
+layout(binding = 3, rgba16f) uniform writeonly image2D reach; // x: 1 for the first pass's blocks
+// The 8x8 blocks the check's two passes work on. Each pass is started once for every block in its
+// list (vkCmdDispatchIndirect: the counts with their 1, 1 are its arguments), so that the rest of
+// the frame, which is most of it, costs nothing.
+layout(binding = 6, std430) buffer Lists {
+    uint first_count;    // blocks in the first pass's list
+    uint first_rest[3];
+    uint second_count;   // ... in the second's
+    uint second_rest[3];
+    uint blocks[];       // the first pass's list in the first half, the second's in the other; y * width + x
+} lists;
+
+void main() {
+    const ivec2 tile = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = textureSize(tiles, 0);
+    if (any(greaterThanEqual(tile, size))) {
+        return;
+    }
+    bool near = false;
+    for (int y = -3; y <= 3; ++y) {
+        for (int x = -3; x <= 3; ++x) {
+            const ivec2 other = tile + ivec2(x, y);
+            near = near || (all(greaterThanEqual(other, ivec2(0))) && all(lessThan(other, size)) &&
+                            texelFetch(tiles, other, 0).x > 0.5);
+        }
+    }
+    imageStore(reach, tile, vec4(near ? 1.0 : 0.0));
+    if (near) {
+        lists.blocks[atomicAdd(lists.first_count, 1u)] = uint(tile.y * size.x + tile.x);
+    }
+}

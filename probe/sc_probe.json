@@ -1,0 +1,13 @@
+{
+  "file_format_version": "1.1.0",
+  "layer": {
+    "name": "VK_LAYER_SCTURBO_probe",
+    "type": "GLOBAL",
+    "library_path": "./libsc_probe.so",
+    "api_version": "1.4.300",
+    "implementation_version": "1",
+    "description": "Passive logging probe (swapchain, frame rate, NVX image view handles)",
+    "enable_environment": { "SC_PROBE": "1" },
+    "disable_environment": { "DISABLE_SC_PROBE": "1" }
+  }
+}

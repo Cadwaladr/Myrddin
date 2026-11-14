@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+"""Where the game's threads may run, changed from outside while the game runs, to compare
+placements within one session (tools/sc-ab-threads.sh). Nothing in the game is touched: this
+calls sched_setaffinity() on its threads, what `taskset -p` does and what wine/tools/sc-hybrid
+has done in every session.
+
+    tools/sc-threads save FILE            note every thread's CPUs, nice value and policy as they are now
+    tools/sc-threads restore FILE         put them back (threads that still exist)
+    tools/sc-threads all [FILE]           every thread on every CPU: no placement at all, what
+                                          stock Wine without sc-hybrid gives (with FILE: nice
+                                          values as noted there)
+    tools/sc-threads own-core FILE [--core CPU]
+                                          as noted, but the main thread has one P-core to itself:
+                                          it may run on that core's two CPUs and no other thread
+                                          of the game may. (Two busy threads on the two CPUs of
+                                          one core each run at about two thirds of the speed.)
+                                          Default core: the P-core with the highest number.
+    tools/sc-threads bg-low FILE [--nice N]
+                                          as noted, but the game's background workers (its threads
+                                          named BackgroundWorker: loading and streaming, 68 of them
+                                          on the E-cores) give way to everything else: nice N
+                                          (default 19) instead of Wine's 0 to 3. Windows always runs
+                                          the thread with the higher priority first; Linux only
+                                          gives it a bigger share, and at 0 to 3 against the frame
+                                          workers' -1 that share is small. (Wine sets a thread's
+                                          nice value again whenever the game sets its priority.)
+    tools/sc-threads all-bg-low FILE [--nice N]
+                                          both: every thread on every CPU, background workers low
+    tools/sc-threads main-p [FILE]        every thread on every CPU, but the main thread on the
+                                          P-cores only (left to itself it did 42 % of its work on
+                                          E-cores, 2026-11-14)
+    tools/sc-threads show                 the threads by name, how many, and where they may run
+    tools/sc-threads load [SECONDS=15]    what the threads do, measured: per name the time at work
+                                          (% of one CPU, all of them together), the busiest single
+                                          thread of that name (near 100: that thread is a limit),
+                                          the time spent waiting for a CPU although ready to run,
+                                          how often a second they were pushed off a CPU, the share
+                                          of their work done on E-cores, and their nice value
+
+--comm NAME: another process than StarCitizen.exe (to try this out); --bg NAME: what the
+background workers are called there.
+"""
+import json, os, re, sys, time
+
+
+def read(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read()
+    except OSError:
+        return default
+
+
+def cpulist(text):
+    cpus = set()
+    for part in text.strip().split(","):
+        if "-" in part:
+            a, b = part.split("-")
+            cpus.update(range(int(a), int(b) + 1))
+        elif part:
+            cpus.add(int(part))
+    return cpus
+
+
+def fmt(cpus):
+    cpus, out, i = sorted(cpus), [], 0
+    while i < len(cpus):
+        j = i
+        while j + 1 < len(cpus) and cpus[j + 1] == cpus[j] + 1:
+            j += 1
+        out.append(str(cpus[i]) if i == j else f"{cpus[i]}-{cpus[j]}")
+        i = j + 1
+    return ",".join(out)
+
+
+def find(comm):
+    """The process of that name; of several, the one with the most threads (the game itself)."""
+    best, most = None, 0
+    for d in os.listdir("/proc"):
+        if d.isdigit() and read(f"/proc/{d}/comm").strip() == comm[:15]:
+            try:
+                n = len(os.listdir(f"/proc/{d}/task"))
+            except OSError:
+                continue
+            if n > most:
+                best, most = int(d), n
+    return best
+
+
+def threads(pid):
+    out = []
+    try:
+        tids = os.listdir(f"/proc/{pid}/task")
+    except OSError:
+        return out
+    for t in tids:
+        name = read(f"/proc/{pid}/task/{t}/comm", None)
+        if name is not None:
+            out.append((int(t), name.strip()))
+    return out
+
+
+def place(tid, cpus):
+    try:
+        if os.sched_getaffinity(tid) != cpus:
+            os.sched_setaffinity(tid, cpus)
+            return 1
+    except OSError:
+        pass
+    return 0
+
+
+def rank(tid, nice, policy=None):
+    """A thread's nice value (and policy), where they differ. Up is always allowed; back down as
+    far as the game's own limit goes (RLIMIT_NICE), which is where Wine has put them from."""
+    done = 0
+    try:
+        if policy is not None and os.sched_getscheduler(tid) != policy:
+            os.sched_setscheduler(tid, policy, os.sched_param(0))
+            done = 1
+        if os.getpriority(os.PRIO_PROCESS, tid) != nice:
+            os.setpriority(os.PRIO_PROCESS, tid, nice)
+            done = 1
+    except OSError as e:
+        print(f"thread {tid}: {e}", file=sys.stderr)
+    return done
+
+
+def load(pid, seconds):
+    """Per thread, over `seconds`: time on a CPU and time waiting for one (schedstat), switches
+    (status), and on which kind of core it was seen at work (stat, 20 times a second)."""
+    pcores = cpulist(read("/sys/devices/cpu_core/cpus"))
+    ths = threads(pid)
+
+    def snap():
+        out = {}
+        for tid, _ in ths:
+            f = read(f"/proc/{pid}/task/{tid}/schedstat").split()
+            status = read(f"/proc/{pid}/task/{tid}/status")
+            pushed = re.search(r"nonvoluntary_ctxt_switches:\s*(\d+)", status)
+            if len(f) >= 2:
+                out[tid] = (int(f[0]), int(f[1]), int(pushed[1]) if pushed else 0)
+        return out
+
+    seen = {} # tid -> [times seen at work on a P-core, on an E-core]
+    before, start = snap(), time.time()
+    while time.time() - start < seconds:
+        for tid, _ in ths:
+            stat = read(f"/proc/{pid}/task/{tid}/stat")
+            if stat:
+                f = stat.rsplit(")", 1)[1].split()
+                if f[0] == "R":
+                    seen.setdefault(tid, [0, 0])[0 if int(f[36]) in pcores or not pcores else 1] += 1
+        time.sleep(0.05)
+    after, span = snap(), time.time() - start
+    groups = {}
+    for tid, name in ths:
+        if tid not in before or tid not in after:
+            continue
+        work = (after[tid][0] - before[tid][0]) / 1e7 / span
+        key = "MAIN THREAD" if tid == pid else re.sub(r"[\d ]+$", "", name)
+        g = groups.setdefault(key, {"n": 0, "work": 0.0, "top": 0.0, "wait": 0.0, "pushed": 0.0, "p": 0, "e": 0, "nice": set()})
+        g["n"] += 1
+        g["work"] += work
+        g["top"] = max(g["top"], work)
+        g["wait"] += (after[tid][1] - before[tid][1]) / 1e7 / span
+        g["pushed"] += (after[tid][2] - before[tid][2]) / span
+        p, e = seen.get(tid, [0, 0])
+        g["p"] += p
+        g["e"] += e
+        stat = read(f"/proc/{pid}/task/{tid}/stat")
+        if stat:
+            g["nice"].add(int(stat.rsplit(")", 1)[1].split()[16]))
+    print(f"pid {pid}, {len(ths)} threads, {span:.0f} s; all together at work {sum(g['work'] for g in groups.values()):.0f} % of one CPU, "
+          f"waiting for a CPU {sum(g['wait'] for g in groups.values()):.0f} %")
+    print(f"{'threads':<18} {'n':>3} {'work %':>7} {'busiest %':>9} {'waiting %':>9} {'pushed off/s':>12} {'on E-cores':>10}  nice")
+    for key, g in sorted(groups.items(), key=lambda kv: -kv[1]["work"]):
+        if g["work"] < 1.0 and key != "MAIN THREAD":
+            continue
+        both = g["p"] + g["e"]
+        share = f"{100 * g['e'] / both:.0f} %" if both else "-"
+        print(f"{key:<18} {g['n']:>3} {g['work']:7.1f} {g['top']:9.1f} {g['wait']:9.1f} {g['pushed']:12.0f} {share:>10}  "
+              f"{','.join(str(n) for n in sorted(g['nice']))}")
+
+
+def main():
+    args = sys.argv[1:]
+    comm, core, low, bg = "StarCitizen.exe", None, 19, "BackgroundWorke"
+    for flag in ("--comm", "--core", "--nice", "--bg"):
+        if flag in args:
+            i = args.index(flag)
+            value = args[i + 1]
+            del args[i:i + 2]
+            if flag == "--comm":
+                comm = value
+            elif flag == "--core":
+                core = int(value)
+            elif flag == "--nice":
+                low = int(value)
+            else:
+                bg = value[:15]
+    if not args or args[0] not in ("save", "restore", "all", "own-core", "bg-low", "all-bg-low", "main-p", "show", "load"):
+        sys.exit(__doc__)
+    what = args[0]
+    file = args[1] if len(args) > 1 else None
+    if what in ("save", "restore", "own-core", "bg-low", "all-bg-low") and not file:
+        sys.exit(f"{what} needs a file")
+    pid = find(comm)
+    if pid is None:
+        sys.exit(f"{comm} is not running")
+    if what == "load":
+        load(pid, float(file) if file else 15.0)
+        return
+    online = cpulist(read("/sys/devices/system/cpu/online", "0"))
+    if what == "save":
+        saved = {}
+        for tid, name in threads(pid):
+            try:
+                saved[str(tid)] = {"name": name, "cpus": sorted(os.sched_getaffinity(tid)),
+                                   "nice": os.getpriority(os.PRIO_PROCESS, tid), "policy": os.sched_getscheduler(tid)}
+            except OSError:
+                pass
+        with open(file, "w") as f:
+            json.dump({"pid": pid, "threads": saved}, f)
+        print(f"{len(saved)} threads noted")
+        return
+    if what == "show":
+        groups = {}
+        for tid, name in threads(pid):
+            try:
+                cpus = fmt(os.sched_getaffinity(tid))
+            except OSError:
+                continue
+            key = "MAIN THREAD" if tid == pid else re.sub(r"[\d ]+$", "", name)
+            g = groups.setdefault(key, {})
+            g[cpus] = g.get(cpus, 0) + 1
+        for key, g in sorted(groups.items(), key=lambda kv: -sum(kv[1].values())):
+            print(f"{key:<18} {sum(g.values()):>4}  " + "  ".join(f"{n} on {c}" for c, n in sorted(g.items(), key=lambda kv: -kv[1])))
+        return
+    everywhere, lower = what in ("all", "all-bg-low", "main-p"), what in ("bg-low", "all-bg-low")
+    pcores = cpulist(read("/sys/devices/cpu_core/cpus")) or online
+    saved = {}
+    if file:
+        snap = json.load(open(file))
+        if snap["pid"] != pid:
+            sys.exit(f"{file} is from another run of the game (pid {snap['pid']}, now {pid})")
+        saved = snap["threads"]
+    reserved = set()
+    if what == "own-core":
+        cpu = core if core is not None else max(pcores)
+        reserved = cpulist(read(f"/sys/devices/system/cpu/cpu{cpu}/topology/thread_siblings_list", str(cpu)))
+    n = ranked = 0
+    for tid, name in threads(pid):
+        was = saved.get(str(tid))
+        if was and was["name"] != name:
+            was = None # (the number has been given to another thread)
+        if everywhere:
+            n += place(tid, pcores if what == "main-p" and tid == pid else online)
+        if not was:
+            continue # (made since: left as it is, but for "every thread on every CPU")
+        if not everywhere:
+            cpus = set(was["cpus"])
+            if reserved:
+                cpus = reserved if tid == pid else (cpus - reserved or cpus)
+            n += place(tid, cpus)
+        if "nice" in was:
+            if lower and tid != pid and name.startswith(bg):
+                ranked += rank(tid, max(low, was["nice"]))
+            else:
+                ranked += rank(tid, was["nice"], was.get("policy"))
+    print(f"{n} threads moved" + (f": all on {fmt(online)}, the main thread on {fmt(pcores)}" if what == "main-p" else f": all on {fmt(online)}" if everywhere else f": the main thread alone on {fmt(reserved)}" if reserved else ": as noted") +
+          (f"; {ranked} threads' nice value set" + (f": {bg}* at {low}" if lower else ": as noted") if ranked else ""))
+
+
+main()

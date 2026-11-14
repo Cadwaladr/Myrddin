@@ -1,0 +1,79 @@
+#version 450
+// Writes the game's motion vectors with the vectors of screen-static, bright pixels (HUD text and
+// icons drawn over the moving scene) set to zero, so frame interpolation leaves those in place.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D current_frame;
+layout(binding = 1) uniform sampler2D previous_frame;
+layout(binding = 2) uniform sampler2D vectors;
+layout(binding = 3, rg16f) uniform writeonly image2D masked;
+layout(binding = 4) uniform sampler2D hud_layer;
+layout(push_constant) uniform Constants {
+    float threshold; // largest per-channel change that still counts as "the same pixel"
+    float min_luma;  // darker pixels are not HUD
+    float min_taps;  // static taps needed in the 3x3 neighbourhood
+    float contrast;  // how far a HUD pixel stands out from the neighbourhood's mean
+    float layer;     // > 0: the game's HUD layer is bound; values above this are HUD
+} constants;
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = imageSize(masked);
+    if (any(greaterThanEqual(pixel, size))) {
+        return;
+    }
+    vec2 vector = texelFetch(vectors, pixel, 0).rg;
+    if (constants.layer > 0.0) {
+        // Exact: wherever the game drew HUD (and one pixel around it), nothing moves.
+        const ivec2 extent = textureSize(hud_layer, 0);
+        const vec2 scale = vec2(extent) / vec2(size);
+        bool hud = false;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                for (int t = 0; t < 4; ++t) {
+                    const vec2 inside = vec2(0.25 + 0.5 * float(t & 1), 0.25 + 0.5 * float(t >> 1));
+                    const ivec2 at = clamp(ivec2((vec2(pixel + ivec2(dx, dy)) + inside) * scale), ivec2(0), extent - 1);
+                    const vec3 value = texelFetch(hud_layer, at, 0).rgb;
+                    hud = hud || max(value.r, max(value.g, value.b)) > constants.layer;
+                }
+            }
+        }
+        if (hud) {
+            vector = vec2(0.0);
+        }
+    } else if (dot(vector, vector) > 0.25) {
+        const ivec2 display = textureSize(current_frame, 0);
+        const vec2 scale = vec2(display) / vec2(size);
+        // A HUD pixel is the same as one frame ago although the scene under it moves, and it
+        // stands out from its surroundings (a flat surface also "stays the same" while it moves).
+        float luma[36];
+        bool same[36];
+        float mean = 0.0;
+        int n = 0;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                for (int t = 0; t < 4; ++t) {
+                    const vec2 inside = vec2(0.25 + 0.5 * float(t & 1), 0.25 + 0.5 * float(t >> 1));
+                    const ivec2 at = clamp(ivec2((vec2(pixel + ivec2(dx, dy)) + inside) * scale), ivec2(0), display - 1);
+                    const vec3 now = texelFetch(current_frame, at, 0).rgb;
+                    const vec3 before = texelFetch(previous_frame, at, 0).rgb;
+                    const vec3 change = abs(now - before);
+                    luma[n] = max(now.r, max(now.g, now.b));
+                    same[n] = max(change.r, max(change.g, change.b)) < constants.threshold;
+                    mean += luma[n];
+                    ++n;
+                }
+            }
+        }
+        mean /= 36.0;
+        float taps = 0.0;
+        for (int i = 0; i < 36; ++i) {
+            if (same[i] && luma[i] > constants.min_luma && abs(luma[i] - mean) > constants.contrast) {
+                taps += 1.0;
+            }
+        }
+        if (taps >= constants.min_taps) {
+            vector = vec2(0.0);
+        }
+    }
+    imageStore(masked, pixel, vec4(vector, 0.0, 0.0));
+}

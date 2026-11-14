@@ -1,0 +1,60 @@
+#version 450
+// Exact HUD handling. The game draws its HUD into a separate transparent layer and then puts it
+// over the finished scene. Inputs: the real frame as presented (scene + HUD), the same frame's
+// scene without the HUD, and the HUD layer (its alpha). The generated frame was interpolated from
+// HUD-less scenes; this puts the real frame's HUD contribution over it.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D current_frame;
+layout(binding = 1) uniform sampler2D scene;
+layout(binding = 2) uniform sampler2D layer;
+layout(binding = 3, rgba8) uniform image2D generated;
+// The game's final tone curve (applied after the HUD is put over the scene), measured from live
+// frames: presented value per scene value, per channel, 256 entries.
+layout(binding = 5) uniform sampler2D curve;
+layout(push_constant) uniform Constants {
+    float mode;  // 0 blend, 1 hard (real frame wherever the HUD or a difference is), 2 show alpha
+    float gain;  // multiplies the layer's alpha
+    float floor_; // differences below this count as none
+    float unused;
+} pc;
+
+vec3 Tone(vec3 colour) {
+    const vec3 at = (colour * 255.0 + 0.5) / 256.0;
+    return vec3(textureLod(curve, vec2(at.r, 0.5), 0.0).r, textureLod(curve, vec2(at.g, 0.5), 0.0).g,
+                textureLod(curve, vec2(at.b, 0.5), 0.0).b);
+}
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = imageSize(generated);
+    if (any(greaterThanEqual(pixel, size))) {
+        return;
+    }
+    const vec3 real = texelFetch(current_frame, pixel, 0).rgb;
+    const vec3 hudless = Tone(texelFetch(scene, pixel, 0).rgb);
+    float alpha = clamp(texelFetch(layer, pixel, 0).a * pc.gain, 0.0, 1.0);
+    // The frame can be darker than the scene's share allows (a menu over a black background that
+    // the layer does not account for): then more of the scene is covered than the layer says, and
+    // the scene's share shrinks until the HUD's contribution is no longer negative.
+    const vec3 share = hudless * (1.0 - alpha);
+    const vec3 fits = min(vec3(1.0), (real + pc.floor_) / max(share, vec3(1e-4)));
+    alpha = 1.0 - (1.0 - alpha) * min(fits.r, min(fits.g, fits.b));
+    const vec3 difference = abs(real - hudless);
+    const bool differs = max(difference.r, max(difference.g, difference.b)) > pc.floor_;
+    if (pc.mode > 1.5) {
+        imageStore(generated, pixel, vec4(alpha, differs ? 1.0 : 0.0, 0.0, 1.0));
+        return;
+    }
+    const vec3 interpolated = Tone(imageLoad(generated, pixel).rgb);
+    if (alpha <= 0.0 && !differs) {
+        imageStore(generated, pixel, vec4(interpolated, 1.0));
+        return;
+    }
+    if (pc.mode > 0.5) {
+        imageStore(generated, pixel, vec4(real, 1.0));
+        return;
+    }
+    // what the HUD added on top of the (1 - alpha) share of the scene
+    const vec3 contribution = real - hudless * (1.0 - alpha);
+    imageStore(generated, pixel, vec4(clamp(interpolated * (1.0 - alpha) + contribution, 0.0, 1.0), 1.0));
+}

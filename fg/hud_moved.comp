@@ -1,0 +1,46 @@
+#version 450
+// HUD content that moves over the screen (world markers), preparation: the HUD layer's alpha of
+// this capture and of the one before, in cells of 4x4 pixels and of 16x16. "Arrived": this
+// capture's alpha where it rose by more than EPS; "left": the alpha before where it fell by more.
+// One invocation works on one cell of 16 and the 16 cells of 4 in it. Both maps have a border of
+// BORDER cells of 16 around the picture's tiles (of 64 pixels), all zeros, so that a search can
+// look past the picture's edges; a cell that is not wholly in the picture is zero as well.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D layer;        // this capture's
+layout(binding = 1) uniform sampler2D layer_before; // the one before's
+// arrived, left, all of this capture's, all of the one before's: means over the cell
+layout(binding = 3, rgba16f) uniform writeonly image2D quarter;
+layout(binding = 4, rgba16f) uniform writeonly image2D sixteenth; // arrived, left
+
+const float EPS = 0.04;
+const int BORDER = 16;
+
+void main() {
+    const ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(cell, imageSize(sixteenth)))) {
+        return;
+    }
+    const ivec2 size = textureSize(layer, 0);
+    const ivec2 origin = (cell - BORDER) * 16;
+    vec2 sum = vec2(0.0);
+    for (int j = 0; j < 4; ++j) {
+        for (int i = 0; i < 4; ++i) {
+            const ivec2 at = origin + 4 * ivec2(i, j);
+            vec4 mean = vec4(0.0);
+            if (all(greaterThanEqual(at, ivec2(0))) && all(lessThanEqual(at + 4, size))) {
+                for (int q = 0; q < 4; ++q) { // four pixels at a time
+                    const vec2 corner = (vec2(at + 2 * ivec2(q & 1, q >> 1)) + 1.0) / vec2(size);
+                    const vec4 now = clamp(textureGather(layer, corner, 3), 0.0, 1.0);
+                    const vec4 before = clamp(textureGather(layer_before, corner, 3), 0.0, 1.0);
+                    const vec4 arrived = vec4(greaterThan(now - before, vec4(EPS)));
+                    const vec4 left = vec4(greaterThan(before - now, vec4(EPS)));
+                    mean += vec4(dot(now, arrived), dot(before, left), dot(now, vec4(1.0)), dot(before, vec4(1.0)));
+                }
+                mean /= 16.0;
+            }
+            imageStore(quarter, cell * 4 + ivec2(i, j), mean);
+            sum += mean.xy;
+        }
+    }
+    imageStore(sixteenth, cell, vec4(sum / 16.0, 0.0, 0.0));
+}

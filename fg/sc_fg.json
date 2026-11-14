@@ -1,0 +1,13 @@
+{
+  "file_format_version": "1.0.0",
+  "layer": {
+    "name": "VK_LAYER_SCTURBO_fg",
+    "type": "GLOBAL",
+    "library_path": "./libsc_fg.so",
+    "api_version": "1.3.0",
+    "implementation_version": "1",
+    "description": "Star Citizen frame generation (FSR 3.1 fed by DLSS inputs)",
+    "enable_environment": { "SC_FG": "1" },
+    "disable_environment": { "DISABLE_SC_FG": "1" }
+  }
+}

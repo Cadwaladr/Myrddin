@@ -1,0 +1,45 @@
+#version 450
+// Motion-vector check, between its two passes: the 8x8 blocks with a pixel in them or in a block
+// next to them whose vector the first pass replaced. The second pass has work only there.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D reach;    // mv_reach.comp: 1 where the first pass looked
+layout(binding = 1) uniform sampler2D checked;  // mv_check.comp: z is 1 where it replaced the vector
+// The 8x8 blocks the check's two passes work on. Each pass is started once for every block in its
+// list (vkCmdDispatchIndirect: the counts with their 1, 1 are its arguments), so that the rest of
+// the frame, which is most of it, costs nothing.
+layout(binding = 6, std430) buffer Lists {
+    uint first_count;    // blocks in the first pass's list
+    uint first_rest[3];
+    uint second_count;   // ... in the second's
+    uint second_rest[3];
+    uint blocks[];       // the first pass's list in the first half, the second's in the other; y * width + x
+} lists;
+
+void main() {
+    const ivec2 tile = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = textureSize(reach, 0);
+    if (any(greaterThanEqual(tile, size))) {
+        return;
+    }
+    const vec2 pixels = vec2(textureSize(checked, 0));
+    float replaced = 0.0;
+    for (int j = -1; j <= 1; ++j) {
+        for (int i = -1; i <= 1; ++i) {
+            const ivec2 other = tile + ivec2(i, j);
+            // Only where the first pass looked: elsewhere `checked` is not this frame's.
+            if (any(lessThan(other, ivec2(0))) || any(greaterThanEqual(other, size)) ||
+                texelFetch(reach, other, 0).x < 0.5) {
+                continue;
+            }
+            for (int y = 0; y < 4; ++y) {
+                for (int x = 0; x < 4; ++x) {
+                    const vec4 four = textureGather(checked, vec2(other * 8 + 2 * ivec2(x, y) + 1) / pixels, 2);
+                    replaced = max(replaced, max(max(four.x, four.y), max(four.z, four.w)));
+                }
+            }
+        }
+    }
+    if (replaced > 0.5) {
+        lists.blocks[lists.blocks.length() / 2 + int(atomicAdd(lists.second_count, 1u))] = uint(tile.y * size.x + tile.x);
+    }
+}

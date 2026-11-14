@@ -1,0 +1,133 @@
+#version 450
+// Motion-vector check, first pass. Some objects come from the game with vectors that have nothing
+// to do with what they do on screen (a hose lying still on a hangar floor: hundreds of pixels a
+// frame). The interpolation believes them and tears the object apart. Here every vector that
+// differs from vectors around it is held against the picture: when the previous frame moved by it
+// does not give this frame, and moved by a neighbour's vector it does, the neighbour's vector is
+// the pixel's motion. A neighbour in front of the pixel does not count: what its vector explains
+// there is background that has just been uncovered, and that is the interpolation's own business.
+// Nor does a neighbour whose vector does not explain the picture where it comes from: it is one of
+// the wrong ones itself, and would be handed on to pixels that have nothing wrong with them.
+//
+// Started once for every 8x8 block near a break in the vectors (mv_reach.comp): one invocation, one
+// of the block's pixels.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D vectors;  // render size; pixels, from this frame to the one before
+layout(binding = 1) uniform sampler2D depth;    // render size; larger is nearer
+layout(binding = 2) uniform sampler2D current;  // display size: this frame (without the HUD)
+layout(binding = 5) uniform sampler2D previous; // display size: the frame before
+layout(binding = 3, rgba16f) uniform writeonly image2D checked; // xy: the vector, z: 1 where it was replaced
+// The 8x8 blocks the check's two passes work on. Each pass is started once for every block in its
+// list (vkCmdDispatchIndirect: the counts with their 1, 1 are its arguments), so that the rest of
+// the frame, which is most of it, costs nothing.
+layout(binding = 6, std430) buffer Lists {
+    uint first_count;    // blocks in the first pass's list
+    uint first_rest[3];
+    uint second_count;   // ... in the second's
+    uint second_rest[3];
+    uint blocks[];       // the first pass's list in the first half, the second's in the other; y * width + x
+} lists;
+layout(push_constant) uniform Constants {
+    float factor;  // a neighbour's vector must explain the picture this many times better ...
+    float margin;  // ... and by this much (differences are 0..1 a channel)
+    float trust;   // ... and explain it this well at the neighbour itself
+    float unknown; // what a vector that points off the screen counts as
+} pc;
+const float NEARER = 0.02; // a neighbour whose depth is more than this share above the pixel's is in front of it
+
+const ivec2 DIRECTIONS[8] = ivec2[8](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1),
+                                     ivec2(1, 1), ivec2(-1, 1), ivec2(1, -1), ivec2(-1, -1));
+// Far ones first: next to a pixel of such an object are mostly more of them.
+const int RADII[3] = int[3](24, 12, 4);
+const vec2 TAPS[9] = vec2[9](vec2(0.0, 0.0), vec2(-1.0, 0.0), vec2(1.0, 0.0), vec2(0.0, -1.0), vec2(0.0, 1.0),
+                             vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0), vec2(1.0, 1.0));
+const int MOST = 6; // different vectors tried for one pixel
+
+/// How badly vector `v` explains the picture around render pixel centre `at`: the mean difference
+/// between this frame and the previous one moved by it. Negative: it points off the screen.
+float Mismatch(vec2 at, vec2 v, vec2 size) {
+    const vec2 from = at + v;
+    if (from.x < 0.0 || from.y < 0.0 || from.x > size.x || from.y > size.y) {
+        return -1.0;
+    }
+    float sum = 0.0;
+    for (int i = 0; i < 9; ++i) {
+        const vec2 tap = at + TAPS[i];
+        const vec3 difference =
+            abs(textureLod(current, tap / size, 0.0).rgb - textureLod(previous, (tap + v) / size, 0.0).rgb);
+        sum += difference.r + difference.g + difference.b;
+    }
+    return sum / 27.0;
+}
+
+/// The vector for `pixel`, whose own is `own`; z is 1 when it is a neighbour's.
+vec3 Checked(ivec2 pixel, vec2 own, ivec2 extent) {
+    const vec2 size = vec2(extent);
+    const float own_length = length(own);
+    const float in_front = texelFetch(depth, pixel, 0).x * (1.0 + NEARER) + 1e-7;
+    const vec2 at = vec2(pixel) + 0.5;
+
+    vec2 tried[MOST];
+    float tried_mismatch[MOST];
+    int count = 0;
+    float own_mismatch = -2.0; // not looked at yet
+    float best = 1e9;
+    vec2 best_vector = own;
+    // Until one is found that explains the picture as well as a right vector would.
+    for (int r = 0; r < 3 && own_mismatch != -3.0 && best > pc.margin; ++r) {
+        for (int k = 0; k < 8 && best > pc.margin; ++k) {
+            const ivec2 other = clamp(pixel + DIRECTIONS[k] * RADII[r], ivec2(0), extent - 1);
+            const vec2 candidate = texelFetch(vectors, other, 0).xy;
+            if (distance(candidate, own) <= max(2.0, 0.2 * max(own_length, length(candidate))) ||
+                texelFetch(depth, other, 0).x > in_front) {
+                continue;
+            }
+            if (own_mismatch == -2.0) {
+                // The pixel's own vector first: one that explains the picture stays, whatever the others do.
+                own_mismatch = Mismatch(at, own, size);
+                if (own_mismatch < 0.0) {
+                    own_mismatch = pc.unknown;
+                }
+                if (own_mismatch <= pc.margin) {
+                    own_mismatch = -3.0;
+                    break;
+                }
+            }
+            int index = -1;
+            for (int i = 0; i < count; ++i) {
+                if (index < 0 && distance(tried[i], candidate) <= 1.0) {
+                    index = i;
+                }
+            }
+            if (index < 0) {
+                if (count == MOST) {
+                    continue;
+                }
+                index = count++;
+                tried[index] = candidate;
+                tried_mismatch[index] = Mismatch(at, candidate, size);
+            }
+            const float mismatch = tried_mismatch[index];
+            if (mismatch < 0.0 || mismatch >= best || mismatch * pc.factor + pc.margin >= own_mismatch) {
+                continue;
+            }
+            // Worth having. Does it explain the picture where it comes from?
+            const float there = Mismatch(vec2(other) + 0.5, candidate, size);
+            if (there >= 0.0 && there <= pc.trust) {
+                best = mismatch;
+                best_vector = candidate;
+            }
+        }
+    }
+    return best < 1e8 ? vec3(best_vector, 1.0) : vec3(own, 0.0);
+}
+
+void main() {
+    const ivec2 extent = textureSize(vectors, 0);
+    const int block = int(lists.blocks[gl_WorkGroupID.x]), across = (extent.x + 7) / 8;
+    const ivec2 pixel = ivec2(block % across, block / across) * 8 + ivec2(gl_LocalInvocationID.xy);
+    if (any(greaterThanEqual(pixel, extent))) {
+        return;
+    }
+    imageStore(checked, pixel, vec4(Checked(pixel, texelFetch(vectors, pixel, 0).xy, extent), 0.0));
+}
