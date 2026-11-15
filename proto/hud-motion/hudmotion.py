@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Reference for the GPU passes (prototype, fourth version; not yet in the layer): the motion of HUD content that moves over the
+"""Reference for the layer's passes (fg/hud_*.comp; tools/hud-motion-check.py compares the two): the motion of HUD content that moves over the
 screen (world markers, a ship's flight display) between two captures of the game's HUD layer,
 and the layer of a generated frame.
 
@@ -24,13 +24,17 @@ Works on the layer's alpha. Tiles of 64x64 pixels, cells of 4x4 and 16x16 pixels
             4x4 block of the capture before at the cell's place plus the shift.
   around    every tile with changed cells tries the answers of the tiles around it (two around),
             each one pixel around, on its own cells. -> its motion, and whether it fits.
-  pieces    tiles with changed content that touch are one piece. A piece counts when most of its
-            arrived content is in tiles whose motion fits.
+  pieces    tiles with changed content that touch are one piece. A piece is looked at further
+            when a quarter of its arrived content is in tiles whose motion fits, and counts when
+            the field then leaves little of what "not moved" leaves (see EXPLAINS).
   field     the motion of each tile of a piece that counts: a plane through the motions that fit
             around it (two tiles around), so the field is smooth, a tile whose search went wrong
             is put right and one without an answer has one.
   reach     per tile, the (up to two) rough motions of content that passes through it.
   layer_at  the layer at time t.
+What layer_at's rules are worth is measured by shapes.py (scenes with a known answer: a marker
+and a filled panel, opaque and half transparent, over nothing and over a field that stands
+still) and explain.py (how much of the change between two of the game's captures they explain).
 """
 import glob, re
 import numpy as np
@@ -57,7 +61,13 @@ ALIAS_NUM, ALIAS_DEN = 3, 2  # a shift that is much smaller is taken when within
 ALIAS_FAR = 8        # ... "much smaller": by more than this, in |x| + |y|
 ALIAS_BAND = 4
 FIRST_NUM, FIRST_DEN = 1, 4   # a piece is looked at further when this share of its arrived content fits
-SHARE_NUM, SHARE_DEN = 7, 10  # ... and counts when this share fits the field in the end
+# ... and counts when, over its tiles, the field leaves at most this share of what "not moved"
+# leaves. In the game's captures pieces that move leave 0.03 to 0.5 of it (the most where they
+# move by two to four pixels, which whole pixels explain less well) and pieces whose content
+# changes where it is 0.8 to 1. (The share of the content in tiles that fit, which was asked
+# for before, is 40 to 65 % for a flight display in a turn with other things over it: around
+# any limit, so that it moved in one frame and stood in the next.)
+EXPLAINS_NUM, EXPLAINS_DEN = 3, 5
 RR = 2               # refine: +- pixels around the field
 SMOOTH = 2           # tiles around that the plane goes through
 OFF = 3.0            # a motion further than this from the plane is left out of it
@@ -233,10 +243,15 @@ def around(f, mine):
     return out
 
 
-def pieces(tiles, num=FIRST_NUM, den=FIRST_DEN, label=None):
-    """-> label[ty, tx] (-1: none), counts[label] = whether the piece counts"""
+def pieces(tiles, label=None):
+    """-> label[ty, tx] (-1: none), counts[label] = whether the piece counts: without `label`
+    (first round, the tiles as around() gives them) the pieces are made, and one counts by the
+    share of its content that fits; with it (the tiles as refine() gives them) by how much of
+    what "not moved" leaves the field leaves. -> also fitting[label], total[label] (content),
+    left[label] = (by the field, by "not moved")"""
     th, tw, _ = tiles.shape
-    changed = label is None
+    second = label is not None
+    changed = not second
     if changed:
         label = np.full((th, tw), -1, dtype=np.int64)
         for ty in range(th):
@@ -258,22 +273,27 @@ def pieces(tiles, num=FIRST_NUM, den=FIRST_DEN, label=None):
                     if least != label[ty, tx]:
                         label[ty, tx] = least
                         changed = True
-    fitting, total = {}, {}
+    fitting, total, left = {}, {}, {}
     for ty in range(th):
         for tx in range(tw):
             l = label[ty, tx]
             if l < 0 or tiles[ty, tx, 2] == LITTLE:
                 continue
             total[l] = total.get(l, 0) + int(tiles[ty, tx, 4])
+            by_field, by_none = left.get(l, (0, 0))
+            left[l] = (by_field + int(tiles[ty, tx, 3]), by_none + int(tiles[ty, tx, 5]))
             if tiles[ty, tx, 2] == FITS:
                 fitting[l] = fitting.get(l, 0) + int(tiles[ty, tx, 4])
-    counts = {l: den * fitting.get(l, 0) >= num * total[l] and fitting.get(l, 0) > 0 for l in total}
-    return label, counts, fitting, total
+    if second:
+        counts = {l: fitting.get(l, 0) > 0 and EXPLAINS_DEN * left[l][0] <= EXPLAINS_NUM * left[l][1] for l in total}
+    else:
+        counts = {l: fitting.get(l, 0) > 0 and FIRST_DEN * fitting.get(l, 0) >= FIRST_NUM * total[l] for l in total}
+    return label, counts, fitting, total, left
 
 
 def plane(samples):
     """Least squares m = a + b*x + c*y through (x, y, mx, my, weight): -> (ax, bx, cx), (ay, by, cy);
-    with too few samples, or all in a line, their mean."""
+    with two samples, or all in a line, the slope along the line only; with one, its motion."""
     w = np.array([s[4] for s in samples], dtype=np.float64)
     x = np.array([s[0] for s in samples], dtype=np.float64)
     y = np.array([s[1] for s in samples], dtype=np.float64)
@@ -289,10 +309,10 @@ def plane(samples):
         if len(samples) >= 3 and det > 1e-3 * max(sxx, syy, 1e-9) ** 2:
             b = (sxv * syy - syv * sxy) / det
             c = (syv * sxx - sxv * sxy) / det
-        elif sxx > 1e-9 and sxx >= syy and len(samples) >= 2:
-            b, c = sxv / sxx, 0.0
-        elif syy > 1e-9 and len(samples) >= 2:
-            b, c = 0.0, syv / syy
+        elif sxx + syy > 1e-9 and len(samples) >= 2:
+            # in a line: the slope along it, none across it (whichever way the line goes; taking
+            # the slope across or down by the greater spread is a toss-up for a diagonal)
+            b, c = sxv / (sxx + syy), syv / (sxx + syy)
         else:
             b, c = 0.0, 0.0
         out.append((mean - b * mx_ - c * my_, b, c))
@@ -327,6 +347,8 @@ def field(tiles, label, counts):
                         mid.append(s[k])
                         break
             samples = [s for s in samples if abs(s[2] - mid[0]) <= WILD and abs(s[3] - mid[1]) <= WILD]
+            if not samples:  # (the middle across and the middle down are different tiles', and none is near both)
+                continue
             (ax, bx, cx), (ay, by, cy) = plane(samples)
             kept = [s for s in samples if abs(ax + bx * s[0] + cx * s[1] - s[2]) <= OFF and abs(ay + by * s[0] + cy * s[1] - s[3]) <= OFF]
             if kept and len(kept) < len(samples):
@@ -420,15 +442,17 @@ def look_up(motion, px, py, rx, ry):
 
 
 SUPPORT = 0.6        # of a pixel's alpha, what the other capture must have at the place it moved from / to
+NEAR = 1             # "right next to" a changed pixel: this many pixels away at most (2 explains the game's captures no better)
+ALIKE = 0.1          # alphas closer than this are the same thing's
 
 
-def spread3(a, fn):
-    """fn (np.maximum / np.logical_or) over each pixel's 3x3."""
-    p = np.pad(a, 1)
+def spread3(a, fn, reach=1):
+    """fn (np.maximum / np.logical_or) over each pixel's 3x3 (reach 2: its 5x5)."""
+    p = np.pad(a, reach)
     h, w = a.shape
-    out = p[1 : 1 + h, 1 : 1 + w]
-    for dy in (0, 1, 2):
-        for dx in (0, 1, 2):
+    out = p[reach : reach + h, reach : reach + w]
+    for dy in range(2 * reach + 1):
+        for dx in range(2 * reach + 1):
             out = fn(out, p[dy : dy + h, dx : dx + w])
     return out
 
@@ -454,7 +478,7 @@ def masks(a_n, a_p, motion):
     mx, my = np.where(valid, mx, 0.0), np.where(valid, my, 0.0)
     rx, ry = np.floor(mx + 0.5).astype(int), np.floor(my + 0.5).astype(int)
     arrived, left = a_n - a_p > EPS, a_p - a_n > EPS
-    near = spread3(arrived | left, np.logical_or)
+    near = spread3(arrived | left, np.logical_or, NEAR)
     most_n = np.pad(spread3(a_n, np.maximum), PAD)
     most_p = np.pad(spread3(a_p, np.maximum), PAD)
     came = most_p[np.clip(ys + ry, -PAD, h + PAD - 1) + PAD, np.clip(xs + rx, -PAD, w + PAD - 1) + PAD] >= SUPPORT * a_n
@@ -464,18 +488,30 @@ def masks(a_n, a_p, motion):
     return in_n, in_p, mx, my
 
 
-def layer_at(a_n, a_p, motion, reached, t):
+def layer_at(a_n, a_p, motion, reached, t, fill=True, alike=True):
     """The layer's alpha for a generated frame at time t, and where it was taken from (0: this
-    capture in place, 1: the capture before in place, 2: moved content, 3: nothing).
+    capture in place, 1: the capture before in place, 2: moved content, 3: nothing, 4: moved
+    content that fills a changed place).
       in place  this capture's, unless that is moving content; then the capture before's, unless
                 that is moving content too; then nothing.
       moved     for each rough motion that reaches the pixel's tile: the place the field brings
-                here by now; what is moving content there goes over what is in place."""
+                here by now; what is moving content there goes over what is in place.
+      fill      a place whose own content moves, in either capture, also takes what the field
+                brings there when that is not seen to move but was, in the capture before, where
+                the field says (as much, at that place or right next to it): the inside of a
+                filled shape is the same in both captures, and its rear and the places beside a
+                moved edge are filled from it. A place that did not change never takes this.
+      alike     moved content does not go over what is in place when that is this capture's,
+                did not change, is the same along the motion (in the capture before where it
+                would have come from, in this one where it would have gone) and is like the moved
+                content: it is the inside of the shape that moves, not something under it.
+    (fill and alike can be left out, to see what they do: proto/hud-motion/shapes.py, explain.py.)"""
     h, w = a_n.shape
     th, tw, _ = motion.shape
     in_n, in_p, _, _ = masks(a_n, a_p, motion)
     out = np.where(~in_n, a_n, np.where(~in_p, a_p, 0.0))
     kind = np.where(~in_n, 0, np.where(~in_p, 1, 3)).astype(np.uint8)
+    pad_n, pad_p = np.pad(a_n, PAD), np.pad(a_p, PAD)
     back = 1.0 - t
     for ty in range(th):
         for tx in range(tw):
@@ -493,8 +529,26 @@ def layer_at(a_n, a_p, motion, reached, t):
                 block = out[y0:y1, x0:x1]
                 kinds = kind[y0:y1, x0:x1]
                 moved = a_n[sy, sx]
+                ix, iy = np.floor(mx + 0.5).astype(int), np.floor(my + 0.5).astype(int)
+                if alike:
+                    here = a_n[y0:y1, x0:x1]
+                    came_from = pad_p[np.clip(ys + iy, -PAD, h + PAD - 1) + PAD, np.clip(xs + ix, -PAD, w + PAD - 1) + PAD]
+                    went_to = pad_n[np.clip(ys - iy, -PAD, h + PAD - 1) + PAD, np.clip(xs - ix, -PAD, w + PAD - 1) + PAD]
+                    inside_shape = (~in_n[y0:y1, x0:x1] & (here > EPS) & (np.abs(here - a_p[y0:y1, x0:x1]) <= EPS)
+                                    & (np.abs(came_from - here) <= ALIKE) & (np.abs(went_to - here) <= ALIKE) & (np.abs(moved - here) <= ALIKE))
+                    hit = hit & ~inside_shape
+                filled = np.zeros(hit.shape, dtype=bool)
+                if fill:
+                    nearest = np.full(hit.shape, 9.0)
+                    for dy in (-1, 0, 1):
+                        for dx in (-1, 0, 1):
+                            was = pad_p[np.clip(sy + iy + dy, -PAD, h + PAD - 1) + PAD, np.clip(sx + ix + dx, -PAD, w + PAD - 1) + PAD]
+                            nearest = np.minimum(nearest, np.abs(was - moved))
+                    filled = inside & ~hit & (in_n | in_p)[y0:y1, x0:x1] & ~in_n[sy, sx] & (moved > EPS) & (nearest <= ALIKE)
                 block[hit] = (moved + (1.0 - moved) * block)[hit]
+                block[filled] = (moved + (1.0 - moved) * block)[filled]
                 kinds[hit] = 2
+                kinds[filled] = 4
     return out, kind
 
 
@@ -503,14 +557,14 @@ def track(a_n, a_p, logs=None):
     log_own = []
     mine, active = own(f, log_own)
     tiles = around(f, mine)
-    label, counts, fitting, total = pieces(tiles)
+    label, counts, fitting, total, _ = pieces(tiles)
     first = field(tiles, label, counts)
     refined = refine(f, tiles, label, counts, first)
-    _, counts2, fitting2, total2 = pieces(refined, SHARE_NUM, SHARE_DEN, label)
+    _, counts2, fitting2, total2, left2 = pieces(refined, label)
     motion = field(refined, label, counts2)
     if logs is not None:
-        logs.update(own=log_own, active=active, tiles=refined, label=label, counts=counts2, fits=fitting2, total=total2, mine=mine,
-                    before=tiles, fits1=fitting, first=first)
+        logs.update(own=log_own, active=active, tiles=refined, label=label, counts=counts2, fits=fitting2, total=total2, left=left2,
+                    mine=mine, before=tiles, fits1=fitting, first=first)
     return motion, reach(motion)
 
 

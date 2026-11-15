@@ -1,0 +1,106 @@
+#version 450
+// HUD content that moves over the screen ("masks" in proto/hud-motion/hudmotion.py): which pixels
+// are content that moves, in this capture (it was at x + m in the one before: bit 0) and in the
+// one before (it is at x - m in this one: bit 1). In tiles with a motion:
+//   this capture's content at a pixel moves when its alpha rose (it arrived); the one before's
+//   when its alpha fell (it left). The weaker side of a changed pixel (the edge of a stroke over
+//   where the middle of one was), and a pixel that did not change but has changed ones right next
+//   to it (text over text), move when the other capture has as much at the place they moved from
+//   or to; otherwise they are HUD that stands still under or beside what moves. A pixel without
+//   change around it stays what it is (the inside of a filled shape is the same in between).
+// One invocation works on one pixel.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D layer;
+layout(binding = 1) uniform sampler2D layer_before;
+layout(binding = 3, r8ui) uniform writeonly uimage2D which;
+struct Tile {
+    ivec4 own;     // its own search's answer: xy; z: 1 when it has one
+    ivec4 around;  // the best of the answers around it, on its own cells: xy; z: state; w: what it leaves unexplained
+    ivec4 sums;    // x: arrived content in its changed cells; y: what "not moved" leaves; z: its piece (-1: none)
+    vec4 piece;    // (of a piece's first tile) x: content that fits, y: all of it, z: 1 when the piece counts
+    vec4 first;    // the field, first round: xy; z: 1 when there is one
+    ivec4 refined; // as around, against the field
+    vec4 motion;   // the field: xy; z: 1 when there is one; w: how many motions reach the tile
+    vec4 reach;    // those motions: xy, zw
+};
+layout(std430, binding = 6) readonly buffer Markers {
+    uint seen, found, pieces, unused;
+    Tile tiles[];
+} markers;
+layout(push_constant) uniform Constants {
+    float tiles_w, tiles_h;
+    float cap, mode;
+} pc;
+
+const float EPS = 0.04;
+const float SAME = 6.0;    // motions closer than this are one piece's
+const float SUPPORT = 0.6; // of a pixel's alpha, what the other capture must have at the place it moved from / to
+
+/// The field at a place: between the centres of the four tiles around, those with a motion within
+/// SAME of the rough one. False: none of them has one.
+bool LookUp(vec2 place, vec2 rough, out vec2 motion) {
+    const ivec2 tiles = ivec2(pc.tiles_w, pc.tiles_h);
+    const vec2 at = (place - 32.0) / 64.0;
+    const ivec2 base = ivec2(floor(at));
+    const vec2 part = at - vec2(base);
+    float weights = 0.0;
+    vec2 sum = vec2(0.0);
+    for (int j = 0; j < 2; ++j) {
+        for (int i = 0; i < 2; ++i) {
+            const ivec2 tile = base + ivec2(i, j);
+            if (any(lessThan(tile, ivec2(0))) || any(greaterThanEqual(tile, tiles))) {
+                continue;
+            }
+            const vec4 field = markers.tiles[tile.y * tiles.x + tile.x].motion;
+            if (field.z <= 0.0 || any(greaterThan(abs(field.xy - rough), vec2(SAME)))) {
+                continue;
+            }
+            const float weight = (i != 0 ? part.x : 1.0 - part.x) * (j != 0 ? part.y : 1.0 - part.y) + 1e-4;
+            weights += weight;
+            sum += weight * field.xy;
+        }
+    }
+    motion = weights > 0.0 ? sum / weights : rough;
+    return weights > 0.0;
+}
+
+float Alpha(sampler2D of, ivec2 at, ivec2 size) {
+    return all(greaterThanEqual(at, ivec2(0))) && all(lessThan(at, size)) ? clamp(texelFetch(of, at, 0).a, 0.0, 1.0) : 0.0;
+}
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = imageSize(which);
+    if (any(greaterThanEqual(pixel, size))) {
+        return;
+    }
+    uint bits = 0u;
+    const vec4 own = markers.tiles[(pixel.y >> 6) * int(pc.tiles_w) + (pixel.x >> 6)].motion;
+    if (own.z > 0.0) {
+        const float now = Alpha(layer, pixel, size), before = Alpha(layer_before, pixel, size);
+        if (now > EPS || before > EPS) {
+            vec2 motion;
+            LookUp(vec2(pixel), own.xy, motion);
+            const ivec2 shift = ivec2(floor(motion + 0.5));
+            const bool arrived = now - before > EPS, left = before - now > EPS;
+            bool near = false; // a changed pixel here or right next to it
+            float most_before = 0.0, most_now = 0.0; // around where it came from, where it went
+            for (int j = -1; j <= 1; ++j) {
+                for (int i = -1; i <= 1; ++i) {
+                    const ivec2 at = pixel + ivec2(i, j);
+                    near = near || abs(Alpha(layer, at, size) - Alpha(layer_before, at, size)) > EPS;
+                    most_before = max(most_before, Alpha(layer_before, at + shift, size));
+                    most_now = max(most_now, Alpha(layer, at - shift, size));
+                }
+            }
+            // (a place outside the picture has nothing, whatever lies next to it inside)
+            const ivec2 from = pixel + shift, to = pixel - shift;
+            const bool came = all(greaterThanEqual(from, ivec2(0))) && all(lessThan(from, size)) && most_before >= SUPPORT * now;
+            const bool went = all(greaterThanEqual(to, ivec2(0))) && all(lessThan(to, size)) && most_now >= SUPPORT * before;
+            const bool moves_now = now > EPS && (arrived || (came && (left || near)));
+            const bool moved_before = before > EPS && (left || (went && (arrived || near)));
+            bits = uint(moves_now) | uint(moved_before) << 1;
+        }
+    }
+    imageStore(which, pixel, uvec4(bits));
+}

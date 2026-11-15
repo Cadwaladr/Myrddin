@@ -1,0 +1,64 @@
+#version 450
+// HUD content that moves over the screen, preparation (with hud_moved.comp): sums of the HUD
+// layer's alpha, in 1023ths, over blocks of 4x4 pixels. A marker is thin text drawn at fractions
+// of a pixel: pixel against pixel no shift maps one capture onto the next, block sums do compare.
+//   blocks  the capture before's: at (x + 3, y + 3) the sum over the 4x4 pixels from (x, y), for
+//           every x, y from -3 on (what lies outside the picture counts as nothing).
+//   cells   this capture's, for the cells of 4x4 pixels that lie wholly in the picture: r the sum,
+//           g the sum of what arrived (alpha that rose by more than 40), b 1 when a pixel of the
+//           cell changed by more than EPS. The cells of the tiles (64x64) past the picture: zeros.
+// One invocation works on one place of `blocks`.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D layer;
+layout(binding = 1) uniform sampler2D layer_before;
+layout(binding = 3, r16ui) uniform writeonly uimage2D blocks;
+layout(binding = 4, rgba16ui) uniform writeonly uimage2D cells;
+
+const float EPS = 0.04;
+
+uvec4 Levels(vec4 alpha) {
+    return uvec4(clamp(alpha, 0.0, 1.0) * 1023.0 + 0.5);
+}
+
+void main() {
+    const ivec2 place = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = textureSize(layer, 0);
+    const ivec2 from = place - 3;
+    const bool whole = all(greaterThanEqual(from, ivec2(0))) && all(lessThanEqual(from + 4, size));
+    if (all(lessThan(place, imageSize(blocks)))) {
+        uint sum = 0u;
+        if (whole) {
+            for (int q = 0; q < 4; ++q) { // four pixels at a time
+                const uvec4 four = Levels(textureGather(layer_before, (vec2(from + 2 * ivec2(q & 1, q >> 1)) + 1.0) / vec2(size), 3));
+                sum += four.x + four.y + four.z + four.w;
+            }
+        } else {
+            for (int j = 0; j < 4; ++j) {
+                for (int i = 0; i < 4; ++i) {
+                    const ivec2 at = from + ivec2(i, j);
+                    if (all(greaterThanEqual(at, ivec2(0))) && all(lessThan(at, size))) {
+                        sum += Levels(vec4(texelFetch(layer_before, at, 0).a)).x;
+                    }
+                }
+            }
+        }
+        imageStore(blocks, place, uvec4(sum));
+    }
+    if (any(lessThan(from, ivec2(0))) || ((from.x | from.y) & 3) != 0 || any(greaterThanEqual(from >> 2, imageSize(cells)))) {
+        return;
+    }
+    uvec4 cell = uvec4(0u);
+    if (whole) {
+        for (int q = 0; q < 4; ++q) {
+            const vec2 corner = (vec2(from + 2 * ivec2(q & 1, q >> 1)) + 1.0) / vec2(size);
+            const vec4 now = clamp(textureGather(layer, corner, 3), 0.0, 1.0);
+            const vec4 before = clamp(textureGather(layer_before, corner, 3), 0.0, 1.0);
+            const uvec4 level = Levels(now), level_before = Levels(before);
+            const uvec4 arrived = uvec4(greaterThan(level, level_before + 40u)) * level;
+            cell.r += level.x + level.y + level.z + level.w;
+            cell.g += arrived.x + arrived.y + arrived.z + arrived.w;
+            cell.b |= uint(any(greaterThan(abs(now - before), vec4(EPS))));
+        }
+    }
+    imageStore(cells, from >> 2, cell);
+}

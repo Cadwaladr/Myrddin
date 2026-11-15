@@ -1,0 +1,101 @@
+#version 450
+// HUD content that moves over the screen ("pieces" in proto/hud-motion/hudmotion.py): tiles with
+// changed content that touch are one piece, named after its first tile. A piece that is moved in
+// part tears, which is worse than a piece that steps: a piece moves as a whole or not at all.
+//   mode 0  the pieces are made; the tiles' states are hud_around.comp's; a piece is looked at
+//           further when a quarter of its arrived content is in tiles whose motion fits
+//   mode 1  the pieces stay; the tiles are hud_refine.comp's; a piece counts as moving when the
+//           field leaves at most three fifths of what "not moved" leaves, over its tiles. (Pieces
+//           that move leave 0.03 to 0.5 of it in the game, pieces whose content changes where it
+//           is 0.8 to 1. The share of the content in tiles that fit, which was asked for before,
+//           is around any limit for a flight display in a turn with other things over it: it
+//           moved in one frame and stood in the next.)
+// One invocation does all of it (the tiles are few).
+layout(local_size_x = 1) in;
+struct Tile {
+    ivec4 own;     // its own search's answer: xy; z: 1 when it has one
+    ivec4 around;  // the best of the answers around it, on its own cells: xy; z: state; w: what it leaves unexplained
+    ivec4 sums;    // x: arrived content in its changed cells; y: what "not moved" leaves; z: its piece (-1: none)
+    vec4 piece;    // (of a piece's first tile) x: content that fits, y: all of it, z: 1 when the piece counts,
+                   // w: (mode 1) what the field leaves unexplained in it
+    vec4 first;    // the field, first round: xy; z: 1 when there is one
+    ivec4 refined; // as around, against the field
+    vec4 motion;   // the field: xy; z: 1 when there is one; w: how many motions reach the tile
+    vec4 reach;    // those motions: xy, zw
+};
+layout(std430, binding = 6) buffer Markers {
+    uint seen, found, pieces, unused;
+    Tile tiles[];
+} markers;
+layout(push_constant) uniform Constants {
+    float tiles_w, tiles_h;
+    float cap, mode;
+} pc;
+
+const int NONE = 0, FITS = 1, NOT = 2, LITTLE = 3;
+const int ROUNDS = 8; // there and back over the tiles, at most this often
+
+void main() {
+    const int w = int(pc.tiles_w), h = int(pc.tiles_h), count = w * h;
+    const bool second = pc.mode != 0.0;
+    if (!second) {
+        const bool over = markers.seen > uint(pc.cap);
+        for (int i = 0; i < count; ++i) {
+            markers.tiles[i].sums.z = markers.tiles[i].around.z != NONE && !over ? i : -1;
+        }
+        bool changed = !over;
+        for (int round = 0; round < ROUNDS && changed; ++round) { // the least name of the tiles that touch
+            changed = false;
+            for (int n = 0; n < 2 * count; ++n) {
+                const int i = n < count ? n : 2 * count - 1 - n;
+                const int name = markers.tiles[i].sums.z;
+                if (name < 0) {
+                    continue;
+                }
+                const int x = i % w, y = i / w;
+                int least = name;
+                for (int j = max(y - 1, 0); j <= min(y + 1, h - 1); ++j) {
+                    for (int k = max(x - 1, 0); k <= min(x + 1, w - 1); ++k) {
+                        const int other = markers.tiles[j * w + k].sums.z;
+                        if (other >= 0) {
+                            least = min(least, other);
+                        }
+                    }
+                }
+                if (least != name) {
+                    markers.tiles[i].sums.z = least;
+                    changed = true;
+                }
+            }
+        }
+    }
+    for (int i = 0; i < count; ++i) {
+        markers.tiles[i].piece = vec4(0.0);
+    }
+    for (int i = 0; i < count; ++i) {
+        const int name = markers.tiles[i].sums.z;
+        const int state = second ? markers.tiles[i].refined.z : markers.tiles[i].around.z;
+        if (name < 0 || state == LITTLE || state == NONE) {
+            continue;
+        }
+        const float content = float(markers.tiles[i].sums.x);
+        markers.tiles[name].piece.y += content;
+        if (state == FITS) {
+            markers.tiles[name].piece.x += content;
+        }
+        if (second) { // until the piece is judged, z: what "not moved" leaves in it
+            markers.tiles[name].piece.z += float(markers.tiles[i].sums.y);
+            markers.tiles[name].piece.w += float(markers.tiles[i].refined.w);
+        }
+    }
+    uint pieces = 0u;
+    for (int i = 0; i < count; ++i) {
+        const vec4 piece = markers.tiles[i].piece;
+        const bool counts = piece.x > 0.0 && (second ? 5.0 * piece.w <= 3.0 * piece.z : 4.0 * piece.x >= piece.y);
+        markers.tiles[i].piece.z = counts ? 1.0 : 0.0;
+        pieces += uint(counts);
+    }
+    if (second) {
+        markers.pieces = pieces;
+    }
+}

@@ -1,0 +1,161 @@
+#version 450
+// HUD content that moves over the screen, after hud_motion.comp ("around" in
+// proto/hud-motion/hudmotion.py): every tile with changed cells tries the answers of the tiles
+// two around it (its own among them), each also one pixel to every side, on its own cells: a piece
+// lies across tiles, and a tile with little of it finds nothing by itself. One work group, 64
+// invocations, works on one tile. -> around (the motion, whether it fits, what it leaves
+// unexplained) and sums (the tile's arrived content, what "not moved" leaves).
+layout(local_size_x = 64) in;
+layout(binding = 0) uniform usampler2D blocks; // hud_blocks.comp
+layout(binding = 1) uniform usampler2D cells;
+struct Tile {
+    ivec4 own;     // its own search's answer: xy; z: 1 when it has one
+    ivec4 around;  // the best of the answers around it, on its own cells: xy; z: state; w: what it leaves unexplained
+    ivec4 sums;    // x: arrived content in its changed cells; y: what "not moved" leaves; z: its piece (-1: none)
+    vec4 piece;    // (of a piece's first tile) x: content that fits, y: all of it, z: 1 when the piece counts
+    vec4 first;    // the field, first round: xy; z: 1 when there is one
+    ivec4 refined; // as around, against the field
+    vec4 motion;   // the field: xy; z: 1 when there is one; w: how many motions reach the tile
+    vec4 reach;    // those motions: xy, zw
+};
+layout(std430, binding = 6) buffer Markers {
+    uint seen, found, pieces, unused;
+    Tile tiles[];
+} markers;
+layout(push_constant) uniform Constants {
+    float tiles_w, tiles_h;
+    float cap, mode;
+} pc;
+
+const int NONE = 0, FITS = 1, NOT = 2, LITTLE = 3;
+const uint LEAST = 2u;      // changed cells a tile must have
+const uint CONTENT = 8192u; // ... and arrived alpha in them, in 1023ths, in sum (8 pixels' worth)
+const int ALIAS_FAR = 8, ALIAS_BAND = 4;
+const int CANDIDATES = 1 + 25 * 9; // "not moved", then nine around the answer of each of the 25 tiles
+const uint NO_COST = 0xffffffffu;
+
+shared uint s_cell[256]; // the tile's cells of 4: sum | changed << 16
+shared uint s_changed[64], s_content[64];
+shared ivec3 s_answers[25]; // xy; z: 1 when that tile has one
+shared uint s_costs[CANDIDATES];
+
+bool Fits(uint cost, uint content, uint zero) {
+    return 10u * cost <= 3u * content && 2u * cost <= zero;
+}
+
+/// False: the tile it would come from has no answer.
+bool Candidate(int k, out ivec2 d) {
+    d = ivec2(0);
+    if (k == 0) {
+        return true;
+    }
+    const ivec3 answer = s_answers[(k - 1) / 9];
+    const int one = (k - 1) % 9;
+    d = answer.xy + ivec2(one % 3 - 1, one / 3 - 1);
+    return answer.z != 0;
+}
+
+int Size(ivec2 d) {
+    return abs(d.x) + abs(d.y);
+}
+
+void main() {
+    const ivec2 tile = ivec2(gl_WorkGroupID.xy);
+    const uint me = gl_LocalInvocationIndex;
+    const ivec2 tiles = ivec2(pc.tiles_w, pc.tiles_h);
+    const uint record = uint(tile.y * tiles.x + tile.x);
+    const ivec2 origin = tile * 64;
+    uint changed = 0u, content = 0u;
+    for (uint k = me * 4u; k < me * 4u + 4u; ++k) {
+        const uvec4 cell = texelFetch(cells, tile * 16 + ivec2(k & 15u, k >> 4), 0);
+        s_cell[k] = cell.r | cell.b << 16;
+        changed += cell.b;
+        content += cell.b != 0u ? cell.g : 0u;
+    }
+    s_changed[me] = changed;
+    s_content[me] = content;
+    if (me < 25u) {
+        const ivec2 other = tile + ivec2(me % 5u, me / 5u) - 2;
+        ivec3 answer = ivec3(0);
+        if (all(greaterThanEqual(other, ivec2(0))) && all(lessThan(other, tiles))) {
+            const ivec4 own = markers.tiles[other.y * tiles.x + other.x].own;
+            answer = ivec3(own.xy, own.z != 0 ? 1 : 0);
+        }
+        s_answers[me] = answer;
+    }
+    barrier();
+    changed = 0u;
+    content = 0u;
+    for (int i = 0; i < 64; ++i) {
+        changed += s_changed[i];
+        content += s_content[i];
+    }
+    if (changed == 0u || markers.seen > uint(pc.cap)) {
+        if (me == 0u) {
+            markers.tiles[record].around = ivec4(0);
+            markers.tiles[record].sums = ivec4(0, 0, -1, 0);
+        }
+        return;
+    }
+    const bool little = changed < LEAST || content < CONTENT;
+    const ivec2 blocks_size = textureSize(blocks, 0);
+    for (int candidate = int(me); candidate < (little ? 1 : CANDIDATES); candidate += 64) {
+        ivec2 d;
+        if (!Candidate(candidate, d)) {
+            s_costs[candidate] = NO_COST;
+            continue;
+        }
+        uint cost = 0u;
+        for (uint k = 0u; k < 256u; ++k) {
+            const uint cell = s_cell[k];
+            if (cell >> 16 == 0u) {
+                continue;
+            }
+            const ivec2 at = origin + 4 * ivec2(k & 15u, k >> 4) + d + 3;
+            uint before = 0u;
+            if (all(greaterThanEqual(at, ivec2(0))) && all(lessThan(at, blocks_size))) {
+                before = texelFetch(blocks, at, 0).r;
+            }
+            cost += uint(abs(int(cell & 0xffffu) - int(before)));
+        }
+        s_costs[candidate] = cost;
+    }
+    barrier();
+    if (me != 0u) {
+        return;
+    }
+    const uint zero = s_costs[0];
+    markers.tiles[record].sums = ivec4(int(content), int(zero), -1, 0);
+    if (little) {
+        markers.tiles[record].around = ivec4(0, 0, LITTLE, 0);
+        return;
+    }
+    // the best; but a much smaller shift that also fits is taken instead (see hud_motion.comp)
+    int best = 0, smallest = 1 << 30;
+    ivec2 d;
+    for (int k = 1; k < CANDIDATES; ++k) {
+        if (!Candidate(k, d)) {
+            continue;
+        }
+        if (s_costs[k] < s_costs[best]) {
+            best = k;
+        }
+        if (d != ivec2(0) && Fits(s_costs[k], content, zero)) {
+            smallest = min(smallest, Size(d));
+        }
+    }
+    Candidate(best, d);
+    if (smallest < 1 << 30 && Size(d) - smallest > ALIAS_FAR) {
+        best = -1;
+        for (int k = 1; k < CANDIDATES; ++k) {
+            if (Candidate(k, d) && d != ivec2(0) && Fits(s_costs[k], content, zero) && Size(d) <= smallest + ALIAS_BAND &&
+                (best < 0 || s_costs[k] < s_costs[best])) {
+                best = k;
+            }
+        }
+        Candidate(best, d);
+    }
+    const uint cost = s_costs[best];
+    const bool good = d != ivec2(0) && Fits(cost, content, zero);
+    markers.tiles[record].around = ivec4(d, good ? FITS : NOT, int(cost));
+}

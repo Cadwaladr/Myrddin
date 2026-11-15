@@ -31,6 +31,8 @@
  *     --early          the hand-over is recorded before the frame's submit (a chain that is one off)
  *     --fifo           FIFO present mode (default: mailbox when there is one)
  *     --unprotected    nothing keeps the shared image from being overwritten before it is copied out
+ *     --engine NAME    the engine's name the instance is made with ("StarEngine": the game's own renderer,
+ *                      whose swapchain the layer must leave as it is)
  *     --stall N MS     the queue thread stops for MS milliseconds at frame N (a hitch)
  *     --gpu-load N     N scaled 4K blits in every frame: a game whose frame rate the GPU sets
  *     --wild           one of the background's stripes, which stands still, comes with vectors that say
@@ -42,7 +44,16 @@
  *                      that moves by (VX, VY) pixels a frame and turns round at the edges, and things that
  *                      stay where they are (two lines and a block, cyan, which the marker's way crosses).
  *                      In the HUD layer the marker is opaque and the rest half transparent; all of it goes
- *                      over the frame after the copy of it
+ *                      over the frame after the copy of it. The scene's top and bottom 56 rows, which the
+ *                      marker never reaches, hold every grey from black to white (see --hud-files)
+ *     --hud-files PREFIX N COUNT   the HUD layer is, in turn, each of COUNT captures of the game's HUD layer
+ *                      (PREFIX-NNN-hud-WxH.bin from NNN = N on, RGBA16F, as "sc-turbo fg-dump COUNT" writes
+ *                      them in a row), at their own size; the scene is one plain grey and the frame that grey
+ *                      with the capture's HUD over it in white, so that the HUD of a generated frame can be
+ *                      read off its picture (tools/hud-motion-check.py). 96 rows of the scene, those
+ *                      where the captures have the least HUD, hold every grey from black to white
+ *                      instead: the layer measures the game's tone curve on the scene and takes the HUD
+ *                      layer only once it has one
  */
 #define _GNU_SOURCE
 #include <glob.h>
@@ -177,6 +188,17 @@ static struct buffer load_ppm(VkDevice dev, const char *path, int w, int h)
     free(row);
     fclose(f);
     return b;
+}
+
+/* a half-precision number */
+static float half_value(unsigned short v)
+{
+    const int exponent = (v >> 10) & 31, mantissa = v & 1023;
+    float value;
+    if (exponent == 0) value = mantissa / 1024.0f / 16384.0f;
+    else if (exponent == 31) value = mantissa ? 0.0f : 65504.0f; /* (not a number: nothing; without end: the largest) */
+    else { value = 1.0f + mantissa / 1024.0f; for (int e = exponent; e > 15; e--) value *= 2; for (int e = exponent; e < 15; e++) value *= 0.5f; }
+    return v & 0x8000 ? -value : value;
 }
 
 static void fill(VkCommandBuffer cb, VkBuffer from, VkImage to, VkImageAspectFlags aspect, int w, int h)
@@ -327,7 +349,8 @@ int main(int argc, char **argv)
     unsigned spike = 0, random_state = 12345;
     int stale_hud = 0;
     int nohud = 0, dup = 0, early = 0, fifo = 0, gpu_load = 0, wild = 0, marker = 0, marker_vx = 0, marker_vy = 0;
-    const char *replay = NULL;
+    const char *replay = NULL, *hud_files = NULL, *engine = NULL;
+    int hud_first = 0, hud_count = 0;
     char replay_inputs[600] = "";
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--game-ms") && i + 1 < argc) game_ms = atof(argv[++i]);
@@ -345,9 +368,11 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--fifo")) fifo = 1;
         else if (!strcmp(argv[i], "--gpu-load") && i + 1 < argc) gpu_load = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--unprotected")) unprotected = 1;
+        else if (!strcmp(argv[i], "--engine") && i + 1 < argc) engine = argv[++i];
         else if (!strcmp(argv[i], "--wild")) wild = 1;
         else if (!strcmp(argv[i], "--replay") && i + 1 < argc) replay = argv[++i];
         else if (!strcmp(argv[i], "--marker") && i + 2 < argc) { marker = 1; marker_vx = atoi(argv[++i]); marker_vy = atoi(argv[++i]); }
+        else if (!strcmp(argv[i], "--hud-files") && i + 3 < argc) { hud_files = argv[++i]; hud_first = atoi(argv[++i]); hud_count = atoi(argv[++i]); }
         else if (!strcmp(argv[i], "--stall") && i + 2 < argc) { stall_frame = (unsigned)atoi(argv[++i]); stall_ms = atof(argv[++i]); }
         else seconds = atof(argv[i]);
     }
@@ -366,6 +391,24 @@ int main(int argc, char **argv)
         printf("replay: %s, %dx%d, inputs %dx%d\n", replay, W, H, RW, RH);
     }
 
+    char hud_paths[16][600];
+    if (hud_files) { /* the size is the captures' */
+        if (hud_count < 2 || hud_count > 16) { fprintf(stderr, "--hud-files: 2 to 16 captures\n"); return 1; }
+        for (int k = 0; k < hud_count; k++) {
+            char path[600];
+            snprintf(path, sizeof path, "%s-%03d-hud-*.bin", hud_files, hud_first + k);
+            glob_t found;
+            const char *size;
+            int w = 0, h = 0;
+            if (glob(path, 0, NULL, &found) || found.gl_pathc != 1 || !(size = strstr(found.gl_pathv[0], "-hud-")) ||
+                sscanf(size, "-hud-%dx%d.bin", &w, &h) != 2 || (k && (w != W || h != H))) { fprintf(stderr, "%s: no capture (of the first one's size)\n", path); return 1; }
+            W = w; H = h; RW = W / 2; RH = H / 2;
+            snprintf(hud_paths[k], sizeof hud_paths[k], "%s", found.gl_pathv[0]);
+            globfree(&found);
+        }
+        printf("hud-files: %d captures from %s, %dx%d\n", hud_count, hud_paths[0], W, H);
+    }
+
     struct wl_display *display = wl_display_connect(NULL);
     if (!display) { fprintf(stderr, "no wayland display\n"); return 1; }
     struct wl_registry *registry = wl_display_get_registry(display);
@@ -382,7 +425,7 @@ int main(int argc, char **argv)
     wl_display_roundtrip(display);
 
     const char *iexts[] = {"VK_KHR_surface", "VK_KHR_wayland_surface"};
-    VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .apiVersion = VK_API_VERSION_1_2};
+    VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pEngineName = engine, .apiVersion = VK_API_VERSION_1_2};
     VkInstanceCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app, .enabledExtensionCount = 2, .ppEnabledExtensionNames = iexts};
     VkInstance inst;
     CHECK(vkCreateInstance(&ici, NULL, &inst));
@@ -474,6 +517,78 @@ int main(int argc, char **argv)
             return 1;
         }
         fclose(f);
+    }
+    /* --hud-files: the captures, and the frames that show them (white over the scene's grey) */
+    struct buffer hud_data[16] = {{0}}, hud_frames[16] = {{0}}, plain_data = {0};
+    static const unsigned char plain[3] = {64, 77, 89};
+    if (hud_files) {
+        /* (worked out in ordinary memory and copied into the buffers: reading a mapped buffer back is slow) */
+        const size_t pixels = (size_t)W * H;
+        unsigned short *captures[16] = {0};
+        unsigned char *scene = malloc(pixels * 4), *shown = malloc(pixels * 4);
+        for (int k = 0; k < hud_count; k++) {
+            captures[k] = malloc(pixels * 8);
+            FILE *f = fopen(hud_paths[k], "rb");
+            if (!f || fread(captures[k], 8, pixels, f) != pixels) { fprintf(stderr, "%s: too short\n", hud_paths[k]); return 1; }
+            fclose(f);
+            hud_data[k] = make_buffer(dev_a, pixels * 8);
+            memcpy(hud_data[k].data, captures[k], pixels * 8);
+        }
+        /* every grey goes into the 96 rows where the captures have the least HUD */
+        int ramp_at = 0;
+        unsigned long least = ~0ul;
+        unsigned *in_row = calloc((size_t)H, sizeof *in_row);
+        for (int k = 0; k < hud_count; k++) {
+            for (size_t i = 0; i < pixels; i++) in_row[i / (size_t)W] += (captures[k][i * 4 + 3] & 0x7fff) != 0;
+        }
+        for (int y = 0; y + 96 <= H; y += 16) {
+            unsigned long sum = 0;
+            for (int j = 0; j < 96; j++) sum += in_row[y + j];
+            if (sum < least) { least = sum; ramp_at = y; }
+        }
+        free(in_row);
+        printf("hud-files: every grey in rows %d to %d (%lu HUD pixels there, all captures)\n", ramp_at, ramp_at + 95, least);
+        for (size_t i = 0; i < pixels; i++) {
+            unsigned char *out = scene + i * 4;
+            const int y = (int)(i / (size_t)W);
+            if (y >= ramp_at && y < ramp_at + 96) out[0] = out[1] = out[2] = (unsigned char)((i % (size_t)W) * 256 / (size_t)W);
+            else { out[0] = plain[0]; out[1] = plain[1]; out[2] = plain[2]; }
+            out[3] = 255;
+        }
+        plain_data = make_buffer(dev_a, pixels * 4);
+        memcpy(plain_data.data, scene, pixels * 4);
+        for (int k = 0; k < hud_count; k++) {
+            const unsigned short *in = captures[k];
+            const unsigned char *under = scene;
+            unsigned char *out = shown;
+            for (size_t i = 0; i < pixels; i++, in += 4, out += 4, under += 4) {
+                float alpha = half_value(in[3]);
+                alpha = alpha < 0 ? 0 : alpha > 1 ? 1 : alpha;
+                for (int c = 0; c < 3; c++) out[c] = (unsigned char)(under[c] * (1 - alpha) + 255 * alpha + 0.5f);
+                out[3] = 255;
+            }
+            hud_frames[k] = make_buffer(dev_a, pixels * 4);
+            memcpy(hud_frames[k].data, shown, pixels * 4);
+            free(captures[k]);
+        }
+        free(scene);
+        free(shown);
+    }
+    if (marker) { /* --marker's scene: the grey with its darker bars, and every grey in the rows the marker never reaches */
+        const size_t pixels = (size_t)W * H;
+        unsigned char *scene = malloc(pixels * 4);
+        for (size_t i = 0; i < pixels; i++) {
+            unsigned char *out = scene + i * 4;
+            const int x = (int)(i % (size_t)W), y = (int)(i / (size_t)W);
+            const int bar_at = x >= 40 ? x - (x - 40) % 160 : -1; /* the bars: 24 wide, every 160 pixels from 40 on */
+            if (y < 56 || y >= H - 56) out[0] = out[1] = out[2] = (unsigned char)((long)x * 256 / W);
+            else if (bar_at >= 0 && x < bar_at + 24 && bar_at + 24 < W) { out[0] = 20; out[1] = 128; out[2] = 31; }
+            else { out[0] = plain[0]; out[1] = plain[1]; out[2] = plain[2]; }
+            out[3] = 255;
+        }
+        plain_data = make_buffer(dev_a, pixels * 4);
+        memcpy(plain_data.data, scene, pixels * 4);
+        free(scene);
     }
     VkMemoryGetFdInfoKHR gfi = {.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR, .memory = shared_a.mem, .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT};
     int fd = -1;
@@ -580,6 +695,7 @@ int main(int argc, char **argv)
         vkCmdClearColorImage(cb, wild_vec.img, VK_IMAGE_LAYOUT_GENERAL, &moving, 1, &colour);
         copy(cb, wild_vec.img, vec.img, 0, 100, 12, RH);
     }
+    if (hud_files || marker) fill(cb, plain_data.buf, bg.img, VK_IMAGE_ASPECT_COLOR_BIT, W, H);
     if (replay) {
         for (int i = 0; i < 2; i++) {
             barrier(cb, pictures[i].img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -597,7 +713,7 @@ int main(int argc, char **argv)
     CHECK(vkBeginCommandBuffer(cb, &bi));
     VkClearColorValue dark = {{0.08f, 0.5f, 0.12f, 1}};
     vkCmdClearColorImage(cb, f1.img, VK_IMAGE_LAYOUT_GENERAL, &dark, 1, &colour);
-    for (int x = 40; x + 24 < W; x += 160) copy(cb, f1.img, bg.img, 0, x, 24, H);
+    for (int x = 40; x + 24 < W && !hud_files && !marker; x += 160) copy(cb, f1.img, bg.img, 0, x, 24, H);
     CHECK(vkEndCommandBuffer(cb));
     CHECK(vkQueueSubmit(queue_a, 1, &si, VK_NULL_HANDLE));
     CHECK(vkQueueWaitIdle(queue_a));
@@ -670,7 +786,7 @@ int main(int argc, char **argv)
             copy(cb, pictures[frame & 1].img, f0.img, 0, 0, W, H);
         } else {
             copy(cb, bg.img, f0.img, 0, 0, W, H);
-            copy(cb, bar.img, f0.img, 0, (int32_t)((frame * 12) % (W - 64)), 64, H);
+            if (!hud_files) copy(cb, bar.img, f0.img, 0, (int32_t)((frame * 12) % (W - 64)), 64, H);
         }
         const int with_hud = !(nohud && frame % nohud == (unsigned)nohud - 1);
         /* --marker: where the marker is in this frame */
@@ -695,6 +811,7 @@ int main(int argc, char **argv)
         } else if (stale_use) {
             copy(cb, f0.img, f1.img, 0, 0, W, H); /* a frame copy with no pass before it in this recording */
         } else if (with_hud) {
+            if (hud_files) fill(cb, hud_data[frame % (unsigned)hud_count].buf, hud.img, VK_IMAGE_ASPECT_COLOR_BIT, W, H);
             if (marker) { /* the HUD layer as the game would have drawn it */
                 vkCmdClearColorImage(cb, hud.img, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &colour);
                 copy_rects(cb, hud_half.img, hud.img, static_rects, static_count, 0, 0);
@@ -704,6 +821,7 @@ int main(int argc, char **argv)
             vkCmdBeginRenderPass(cb, &rb, VK_SUBPASS_CONTENTS_INLINE);
             vkCmdEndRenderPass(cb);
             copy(cb, f0.img, f1.img, 0, 0, W, H); /* the frame set aside before the HUD goes over it */
+            if (hud_files) fill(cb, hud_frames[frame % (unsigned)hud_count].buf, f0.img, VK_IMAGE_ASPECT_COLOR_BIT, W, H);
             if (marker) { /* ... which it does here */
                 copy_rects(cb, static_colour.img, f0.img, static_rects, static_count, 0, 0);
                 copy_rects(cb, marker_colour.img, f0.img, marker_rects, marker_count, marker_x, marker_y);

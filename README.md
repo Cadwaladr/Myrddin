@@ -32,6 +32,12 @@ between each pair of the game's frames, and presents one to three generated fram
 - The HUD stays sharp. The game draws its HUD into a layer of its own; `sc_fg` captures that
   layer and puts it over every generated frame instead of interpolating it. A picture-based
   detection is the fallback.
+- HUD content that moves over the screen (markers pinned to the world, the compass, the map, a
+  ship's flight display) moves at the shown rate too: the layer finds how each group of it
+  moved between two of the game's frames and puts it where it is on its way in every generated
+  frame. This costs about 4 % of the game's own frames where the GPU is the limit.
+  `sc-turbo fg 3 nomarkers` launches without it, and `sc-turbo fg-params markers=0` switches
+  it off in a running game.
 - The game's motion vectors are checked against the picture, which cures thin objects that
   flicker because their vectors are wrong.
 - Real and generated frames are spaced evenly and limited to the display's refresh rate.
@@ -82,10 +88,10 @@ This is the only configuration Myrddin has run on.
   them the game, though it renders with Vulkan, presents its finished frames through
   Direct3D 12, and that is the swapchain Myrddin puts the generated frames into. On a runner
   without vkd3d-proton (`lug-wine-tkg-git-11.21-1`, `lug-wine-tkg-wayland-git-11.22-1`) the
-  game presents through a Vulkan swapchain of its own and does not survive the changes Myrddin
-  makes to it: launched with frame generation, the game closes while starting up. Those
-  runners are not supported. The game has only been played with Wine's Wayland driver; X11 and
-  Proton are untested.
+  game presents through a Vulkan swapchain of its own and does not survive a layer changing
+  it: the game closed while starting up. Myrddin leaves that swapchain as it is, so on those
+  runners the game runs without generated frames, and `sc-turbo` says so at launch. The game
+  has only been played with Wine's Wayland driver; X11 and Proton are untested.
 - **Tied to the current game build.** Finding the HUD layer and matching frames to their
   inputs rely on how Alpha 4.10 builds a frame. A patch can break either; the layer then falls
   back or has to be switched off (`sc-turbo fg-off`).
@@ -97,12 +103,15 @@ This is the only configuration Myrddin has run on.
   On the 12 GB test card the game runs close to the limit: switching the upscaler to native
   resolution in a running session exhausted it, turned generation off, and a driver hang
   followed. Leave headroom and do not change the upscaling mode during a session.
-- **Known gaps.** Markers pinned to the world and the ship's flight display move at the game's
-  frame rate, not the shown one. A first attempt is in the layer, off by default
-  (`sc-turbo fg-params markers=1`); the version meant to replace it is being worked out in
-  [`proto/hud-motion`](proto/hud-motion). In the pause menu, or while the view stands still,
-  the generated rate can drop until the view moves; a fallback for that is in the source and
-  not yet validated.
+- **Known gaps.** Moving HUD content is placed group by group: things that touch are one
+  group, which moves as a whole, by one smooth motion, or not at all. A small part that moves
+  by itself inside a group (a pointer on a scale) is put where the group's motion takes it,
+  and in a very fast turn part of a group can stay at its old place for a frame. In play a
+  little flicker of the flight display is left now and then. About once or twice a minute the
+  game leaves out its HUD layer for half a second; for those frames and a few seconds after,
+  the frames are interpolated as they are presented, HUD included. In the pause menu, or while
+  the view stands still, the generated rate can drop until the view moves; a fallback for that
+  is in the source and not yet validated.
 - **Desktop integration is for KDE Plasma and COSMIC.** Setting up the panel's key, naming the
   display the game should use and reading its refresh rate work there. Elsewhere, bind
   `sc-turbo fg-panel` to a key by hand and set `SC_MONITOR` and `SC_FG_TARGET`.
@@ -167,6 +176,7 @@ And more than the window has:
 
 ```sh
 ./sc-turbo fg 3 hud              # launch with MangoHud: its frame rate is the shown one
+./sc-turbo fg 3 nomarkers        # launch with moving HUD content left at the game's own rate
 ./sc-turbo fg 3 panel            # launch with the layer's own panel available; then:
 ./sc-turbo fg-panel              #   step the panel (off, rate, both rates, with the graph)
 ./sc-turbo fg-panel-key install  #   KDE Plasma, COSMIC: Ctrl+Shift+` steps the panel
@@ -227,7 +237,7 @@ busctl --user call org.kde.KWin /KWin org.kde.KWin reconfigure
 | `gui/` | the launcher window (`myrddin-gui`, GTK 4 and libadwaita) and its list of games |
 | `probe/` | the passive probe layer and the test programs, among them the two-device test chain |
 | `tools/` | tests and validation, in-session comparisons, log readers, thread and display tools, the panel's key |
-| `proto/hud-motion/` | reference prototype for moving world-pinned HUD content on generated frames |
+| `proto/hud-motion/` | the reference that the layer's passes for moving HUD content are checked against, and its test scenes |
 | `third_party/` | AMD FidelityFX SDK 1.1.4 and the recipe that builds it for Linux |
 | `sc-turbo`, `build.sh` | the launcher, and the build |
 

@@ -6,14 +6,19 @@
 #   sc-turbo capture   like probe, and also saves a few frames of DLSS's inputs (colour, motion
 #                      vectors, depth) to logs/capture, but only after "sc-turbo go"
 #   sc-turbo go        start a capture series now: 4 consecutive frames every 10 s for 2 minutes
-#   sc-turbo fg [2|3|4] [hud] [panel] [trace|old|older]  launch with frame generation (DLSS must be the
+#   sc-turbo fg [2|3|4] [hud] [panel] [nomarkers] [trace|old|older|next]  launch with frame generation (DLSS must be the
 #                      upscaler in game); the number is the multiplier, default 2. Log and dumps: logs/fg
 #                      ("hud": with MangoHud, which sits below the layer and so counts every frame that
 #                      is shown, the generated ones too; SC_MANGOHUD=1 in sc-turbo.conf: always.
 #                      "panel": the layer's own performance panel can be shown, see fg-panel; without
 #                      the word there is none.
+#                      "nomarkers": HUD content that moves over the screen (world markers, the compass,
+#                      the map, a flight display) is left at the game's own rate. Without the word it
+#                      is put where it is on its way in every generated frame (SC_FG_MARKERS=0 in
+#                      sc-turbo.conf: never); fg-params markers=0|1 switches it in the running game.
 #                      "old": the build before the last one, kept in build/fg-prev; "older": the one
-#                      before that, build/fg-prev2)
+#                      before that, build/fg-prev2; "next": the newest build, which ./build.sh
+#                      leaves in build/fg-next before it is validated and installed: for a diagnosis)
 #   sc-turbo gui [install|remove]   the launcher window: the game's icon (a click launches it) and - Nx +
 #                      below it for the multiplier, also while the game runs (gui/games.ini lists the
 #                      games). install / remove: its entry in the desktop's application menu.
@@ -70,7 +75,9 @@
 #   sc-turbo fg-where [-a] [PID]   what every thread was doing inside the layer (which hook, since when,
 #                      which of its locks held and waited for): after a game that stood still, or while it runs
 #   sc-turbo fg-dump [N]   save the next real + generated frame pair (and vectors/depth, the HUD layer) to
-#                      logs/fg; N (up to 8): that many frames in a row
+#                      logs/fg; N (up to 8): that many frames in a row (writing one takes 60 to 85 ms and
+#                      holds the game that long: only the first is a frame at the game's own pace, the
+#                      others are that far apart, with three to four times the motion between them)
 #   sc-turbo fg-stat   last frame-rate lines of the running/last fg session
 #   sc-turbo check     run while the game is in a session: ntsync, thread placement, probe stats
 #   sc-turbo report    summarize the newest probe log of StarCitizen.exe
@@ -90,6 +97,20 @@ need_launch() {
     echo "no launch script at $launch"
     echo "set SC_PREFIX or SC_LAUNCH in $here/sc-turbo.conf (see sc-turbo.conf.example)"
     exit 1
+}
+# Said before a launch with frame generation, when the launch script names a runner without
+# vkd3d-proton (its d3d12core.dll is then Wine's own, some 50 KB against 5 MB and more). With
+# vkd3d-proton the game presents through Direct3D 12, and that swapchain is the one generated
+# frames go into; without it the game presents through a swapchain of its own, which it does not
+# let a layer change. (Read off the script's wine_path line; said only when that can be told.)
+runner_note() {
+    local bin dll
+    bin=$(sed -n 's/^[[:space:]]*\(export[[:space:]]\+\)\?wine_path="\(\/[^"$]*\)".*/\2/p' "$launch" 2>/dev/null | head -1)
+    dll="${bin%/bin}/lib/wine/x86_64-windows/d3d12core.dll"
+    [ -n "$bin" ] && [ -f "$dll" ] || return 0
+    [ "$(stat -c %s "$dll")" -lt 1000000 ] || return 0
+    echo "NOTE: the runner $(basename "${bin%/bin}") has no vkd3d-proton, and frame generation needs it:"
+    echo "  the game will not get generated frames. The LUG's experimental runners have it."
 }
 # Said before a launch: desktop settings known to get in the game's way.
 # KDE's Plasma Keyboard (the on-screen keyboard service) offers accented letters when a physical
@@ -168,16 +189,26 @@ fg)
     mkdir -p "$here/logs/fg"; rm -f "$here/logs/fg/OFF" "$here/logs/fg/DUMP" "$here/logs/fg/MULT" "$here/logs/fg/HUDOFF" "$here/logs/fg/HUDLAYEROFF" "$here/logs/fg/HUDSCAN" "$here/logs/fg/TRACE" "$here/logs/fg/LAYER" "$here/logs/fg/SCDON" "$here/logs/fg/NOCAP" "$here/logs/fg/EVENTS" "$here/logs/fg/PARAMS"
     export SC_FG=1 SC_FG_DIR="$here/logs/fg" SC_FG_MULT="${2:-2}"
     layer="$here/build/fg"
+    # HUD content that moves over the screen (markers, the compass, the map, a flight display) is put where it
+    # is on its way in every generated frame, unless "nomarkers" or sc-turbo.conf says otherwise.
+    export SC_FG_MARKERS="${SC_FG_MARKERS:-1}"
     for word in "${@:3}"; do
         case "$word" in
         trace) export SC_FG_TRACE=1 ;;   # lets "sc-turbo fg-trace" record the frame structure
         hud) SC_MANGOHUD=1 ;;
         panel) export SC_FG_PANEL=1 ;;   # the layer's own panel (sc-turbo fg-panel); without the word there is none
+        markers) export SC_FG_MARKERS=1 ;;   # (what the launch does anyway; the word is still taken)
+        nomarkers) export SC_FG_MARKERS=0
+            echo "Moving HUD content stays at the game's own rate (sc-turbo fg-params markers=1 switches it on in the running game)" ;;
         old|older)
             [ "$word" = old ] && layer="$here/build/fg-prev" || layer="$here/build/fg-prev2"
             [ -f "$layer/libsc_fg.so" ] || { echo "$layer/libsc_fg.so is missing"; exit 1; }
             echo "Using an earlier build ($layer)" ;;
-        *) echo "fg: \"$word\" is not known (hud, panel, trace, old, older)"; exit 1 ;;
+        next)   # the newest build, before it is validated and installed: for a diagnosis, not for play
+            layer="$here/build/fg-next"
+            [ -f "$layer/libsc_fg.so" ] || { echo "$layer/libsc_fg.so is missing (./build.sh)"; exit 1; }
+            echo "Using the newest build, which is not validated yet ($layer)" ;;
+        *) echo "fg: \"$word\" is not known (hud, panel, nomarkers, trace, old, older, next)"; exit 1 ;;
         esac
     done
     # (This layer's folder comes first among the implicit layers, which puts it nearest the game:
@@ -195,6 +226,7 @@ fg)
     fi
     desktop_notes
     display_settings
+    runner_note
     echo "Frame generation x$SC_FG_MULT; log: $here/logs/fg"
     exec "$launch"
     ;;
@@ -237,7 +269,14 @@ fg-cap) case "${2:-}" in
              off) touch "$here/logs/fg/NOCAP" && echo "output not limited to the display's rate" ;;
              on) rm -f "$here/logs/fg/NOCAP" && echo "output limited to the display's rate (default)" ;;
              *) echo "fg-cap on|off" ;; esac ;;
-fg-params) shift; printf '%s\n' "$@" > "$here/logs/fg/PARAMS.tmp" && mv "$here/logs/fg/PARAMS.tmp" "$here/logs/fg/PARAMS" && echo "parameters sent: $*" ;;
+fg-params) shift
+    # (read by the layer in the running game; a launch with frame generation clears them)
+    if ! pgrep -x StarCitizen.exe > /dev/null; then
+        echo "the game is not running: nothing to send these to. Parameters are for a game that is running,"
+        echo "launched with \"sc-turbo fg\", and are cleared at the next launch."
+        exit 1
+    fi
+    printf '%s\n' "$@" > "$here/logs/fg/PARAMS.tmp" && mv "$here/logs/fg/PARAMS.tmp" "$here/logs/fg/PARAMS" && echo "parameters sent: $*" ;;
 fg-trace) touch "$here/logs/fg/TRACE" && echo "trace requested" ;;
 fg-scan) touch "$here/logs/fg/HUDSCAN" && echo "pass scan requested (trace launches only)" ;;
 fg-dump) echo "${2:-1}" > "$here/logs/fg/DUMP.tmp" && mv "$here/logs/fg/DUMP.tmp" "$here/logs/fg/DUMP" && echo "dump requested (${2:-1} frame(s))" ;;

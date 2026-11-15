@@ -35,6 +35,11 @@ clang++ -std=c++20 -O2 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-in
     -isystem third_party/ffx/include -o build/fg/libsc_fg.new.so fg/sc_fg.cpp \
     build/ffx/ffx_fg/libffx_fg.a -Wl,--exclude-libs,ALL -Wl,-z,defs -lpthread
 echo "layer: build/fg/libsc_fg.new.so"
+# (also where "sc-turbo fg N next" finds it; put there in one step, in case a game runs on it)
+mkdir -p build/fg-next
+cp -p build/fg/sc_fg.json build/fg-next/
+cp -p build/fg/libsc_fg.new.so build/fg-next/libsc_fg.so.tmp
+mv -f build/fg-next/libsc_fg.so.tmp build/fg-next/libsc_fg.so
 
 xml=/usr/share/wayland-protocols/stable/xdg-shell/xdg-shell.xml
 [ -f "$xml" ] || xml=/usr/share/qt6/wayland/protocols/xdg-shell/xdg-shell.xml

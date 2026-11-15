@@ -81,5 +81,5 @@ echo "exit $?"
 wait
 pkill -x weston; waits 1; pgrep -a weston || echo "weston gone"
 tail -2 "$out/out.txt"
-grep -v STAT "$out"/fg-*.log | grep -v 'device created\|swapchain:\|inputs:\|HUD pass ready\|fg: ready' | cut -c1-240
+grep -v STAT "$out"/fg-*.log | grep -v 'instance created\|device created\|device destroyed\|swapchain:\|inputs:\|HUD pass ready\|fg: ready' | cut -c1-240
 grep STAT "$out"/fg-*.log | tail -1

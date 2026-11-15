@@ -77,6 +77,7 @@
 
 #include <pthread.h>
 #include <sys/stat.h>
+#include <sys/prctl.h>
 #include <sys/syscall.h>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -101,9 +102,14 @@
 #include "hud_panel.h"
 #include "panel.spv.h"
 #include "hud_moved.spv.h"
+#include "hud_blocks.spv.h"
 #include "hud_motion.spv.h"
-#include "hud_spread.spv.h"
+#include "hud_around.spv.h"
+#include "hud_pieces.spv.h"
+#include "hud_field.spv.h"
+#include "hud_refine.spv.h"
 #include "hud_reach.spv.h"
+#include "hud_which.spv.h"
 #include "hud_layer_moving.spv.h"
 
 #define EXPORT __attribute__((visibility("default")))
@@ -709,6 +715,16 @@ void Log(const char* format, ...) {
     std::fputc('\n', g_log);
 }
 
+/// The calling thread's name as the kernel has it: Wine hands the names a game gives its threads
+/// on, so the log can say which part of the game made a call.
+const char* ThreadName() {
+    static thread_local char name[17];
+    if (prctl(PR_GET_NAME, name) != 0) {
+        name[0] = 0;
+    }
+    return name;
+}
+
 bool ControlFile(const char* name, bool remove) {
     char path[600];
     std::snprintf(path, sizeof path, "%s/%s", Dir(), name);
@@ -739,6 +755,7 @@ void ScanWrite();
 
 struct Instance {
     VkInstance handle{};
+    char engine[40]{}; ///< who made it, as it says itself: the game's renderer, DXVK, ...
     PFN_vkGetInstanceProcAddr gipa{};
     PFN_vkDestroyInstance DestroyInstance{};
     PFN_vkGetPhysicalDeviceMemoryProperties GetPhysicalDeviceMemoryProperties{};
@@ -1446,9 +1463,8 @@ std::atomic<float> g_live_chain{1.0f}, g_live_nohud{0.0f}, g_live_wait{1.0f}, g_
 /// The check of the game's vectors against the picture (PARAMS: vectors; see RecordVectorCheck).
 std::atomic<float> g_live_vectors{EnvFloat("SC_FG_FIX_VECTORS", 1.0f)};
 /// HUD content that moves over the screen is put where it is on its way in the generated frames
-/// (PARAMS: markers; see RecordMarkers). Off unless asked for: this first version follows
-/// test shapes but not the game's markers, which are thin text drawn at fractions of a pixel
-/// (the version that does is being worked out in proto/hud-motion).
+/// (PARAMS: markers; see RecordMarkers). Off unless asked for, which sc-turbo does at launch
+/// (proto/hud-motion/hudmotion.py is the reference the passes are checked against).
 std::atomic<float> g_live_markers{EnvFloat("SC_FG_MARKERS", 0.0f)};
 /// The limiter's gate and guard (PARAMS: gate, guard; see Limiter and GuardHandover).
 std::atomic<float> g_live_gate{EnvFloat("SC_FG_GATE", 1.0f)}, g_live_guard{EnvFloat("SC_FG_GUARD", 1.0f)};
@@ -2820,14 +2836,26 @@ constexpr int HUD_PASSES = 9;  ///< the HUD passes' pipelines; one more follows 
 constexpr int PANEL_PASS = 9;  ///< the performance panel's, made when the panel is first shown
 /// The panel's descriptor sets in a command set: one per generated frame, then the real frame's.
 constexpr uint32_t PANEL_SETS = 7 + MAX_GENERATED;
-/// HUD content that moves over the screen (RecordMarkers): its five pipelines follow the panel's
-/// and are made when first needed (the maps, a tile's motion, one taken from a neighbour, the
-/// motions that reach a tile, the composite); its four descriptor sets in a command set follow
-/// the panel's (the composite uses the layer composite's).
+/// HUD content that moves over the screen (RecordMarkers): its pipelines follow the panel's and
+/// are made when first needed; its descriptor sets in a command set, one for every pass that
+/// RecordMarkers runs, follow the panel's (the composite uses the layer composite's).
 constexpr int MARKER_PASS = PANEL_PASS + 1;
-constexpr int MARKER_PASSES = 5;
+enum MarkerPass { // (in the order of PrepareMarkers' table)
+    MARKER_MAPS,    ///< hud_moved.comp: the layer's alpha in cells of 4 and 16, what arrived and what left
+    MARKER_BLOCKS,  ///< hud_blocks.comp: sums over blocks of 4x4 pixels
+    MARKER_OWN,     ///< hud_motion.comp: each tile's own search
+    MARKER_AROUND,  ///< hud_around.comp: the answers around a tile, tried on it
+    MARKER_PIECES,  ///< hud_pieces.comp: tiles that touch are one piece; which pieces move
+    MARKER_FIELD,   ///< hud_field.comp: a smooth field through a piece's motions
+    MARKER_REFINE,  ///< hud_refine.comp: each tile against the field
+    MARKER_REACH,   ///< hud_reach.comp: the motions that pass through a tile
+    MARKER_WHICH,   ///< hud_which.comp: per pixel, whether its content moves
+    MARKER_LAYER,   ///< hud_layer_moving.comp: the composite
+    MARKER_PASSES
+};
 constexpr int ALL_PASSES = MARKER_PASS + MARKER_PASSES;
 constexpr uint32_t MARKER_SETS = PANEL_SETS + MAX_GENERATED + 1;
+constexpr uint32_t MARKER_SET_COUNT = 11; ///< pieces and field run twice
 
 /// One present, kept for a while: what was linked to what, and what it took (EVENTS control file).
 struct Event {
@@ -2854,6 +2882,7 @@ struct Fg {
     VkExtent2D extent{};
     std::vector<VkImage> images;
     bool modified{}; ///< created with the extra images and transfer usages
+    bool presented{}; ///< its first present has been logged
     bool failed{};
     bool ready{};
 
@@ -2926,8 +2955,8 @@ struct Fg {
         VkCommandBuffer main{};
         VkCommandBuffer blit[MAX_GENERATED]{};
         /// detect, apply, one composite per output, the five passes of the vector check, the panel's,
-        /// the four of the moving HUD content
-        VkDescriptorSet hud_sets[MARKER_SETS + 4]{};
+        /// those of the moving HUD content (one for every pass RecordMarkers runs)
+        VkDescriptorSet hud_sets[MARKER_SETS + MARKER_SET_COUNT]{};
         VkFence fence{};
         bool pending{};
     } sets[COMMAND_SETS];
@@ -2975,13 +3004,16 @@ struct Fg {
         bool ready{}, failed{};
         uint32_t tiles_w{}, tiles_h{};      ///< tiles of 64x64 pixels
         Image quarter, sixteenth;           ///< hud_moved.comp's maps
-        VkImageView quarter_view{}, sixteenth_view{};
-        HostBuffer tiles;                   ///< the passes' "Markers": counts, then per tile its motion and what reaches it
+        Image blocks, cells;                ///< hud_blocks.comp's sums
+        Image which;                        ///< hud_which.comp: per pixel, whether its content moves
+        VkImageView quarter_view{}, sixteenth_view{}, blocks_view{}, cells_view{}, which_view{};
+        HostBuffer tiles;                   ///< the passes' "Markers": counts, then per tile what the passes found (TILE_BYTES each)
+        static constexpr VkDeviceSize TILE_BYTES = 128;
         HostBuffer counts[COMMAND_SETS];    ///< the counts as a command set's frame left them, read back
         bool counted[COMMAND_SETS]{};
         HostBuffer dump;                    ///< the whole of it, for a dump
         uint64_t previous_hud{};            ///< the capture that went with the frame in `previous`; 0: none
-        uint32_t frames{}, seen{}, found{}, spread{}, over{}; ///< since the last statistics line
+        uint32_t frames{}, seen{}, found{}, pieces{}, over{}; ///< since the last statistics line
     } markers;
     VkSemaphore real_ready{};
     VkSemaphore acquired[MAX_GENERATED]{};
@@ -3354,7 +3386,7 @@ bool PrepareHud(Device& d, Fg& fg) {
     sampler.magFilter = sampler.minFilter = VK_FILTER_LINEAR;
     sampler.addressModeU = sampler.addressModeV = sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     // (the command sets' own, and one for the panel on frames that pass through)
-    constexpr uint32_t SETS = COMMAND_SETS * (MARKER_SETS + 4) + 1;
+    constexpr uint32_t SETS = COMMAND_SETS * (MARKER_SETS + MARKER_SET_COUNT) + 1;
     const VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 7 * SETS},
                                            {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 * SETS},
                                            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, SETS}};
@@ -3853,10 +3885,11 @@ void MeasureCurve(Fg& fg) {
 }
 
 /// More tiles than this with HUD content that arrived: the HUD as a whole is changing (a menu
-/// opens), and nothing is looked for.
-float MarkerCap() {
-    static const float cap = EnvFloat("SC_FG_MARKER_CAP", 256.0f);
-    return cap;
+/// opens), and nothing is said to move. Four tenths of the tiles (a ship's flight display is a
+/// seventh of them); SC_FG_MARKER_CAP: a number of tiles instead.
+float MarkerCap(const Fg& fg) {
+    static const float cap = EnvFloat("SC_FG_MARKER_CAP", 0.0f);
+    return cap > 0.0f ? cap : 0.4f * static_cast<float>(fg.markers.tiles_w * fg.markers.tiles_h);
 }
 
 /// What the passes for HUD content that moves over the screen need, made when they first run.
@@ -3872,9 +3905,11 @@ bool PrepareMarkers(Device& d, Fg& fg) {
     // The maps: cells of 16 pixels and of 4, with a border of 16 cells of 16 around the tiles.
     const uint32_t cells_w = markers.tiles_w * 4 + 32, cells_h = markers.tiles_h * 4 + 32;
     static const std::pair<const uint32_t*, size_t> code[MARKER_PASSES] = {
-        {HUD_MOVED_SPV, sizeof HUD_MOVED_SPV},   {HUD_MOTION_SPV, sizeof HUD_MOTION_SPV},
-        {HUD_SPREAD_SPV, sizeof HUD_SPREAD_SPV}, {HUD_REACH_SPV, sizeof HUD_REACH_SPV},
-        {HUD_LAYER_MOVING_SPV, sizeof HUD_LAYER_MOVING_SPV}};
+        {HUD_MOVED_SPV, sizeof HUD_MOVED_SPV},   {HUD_BLOCKS_SPV, sizeof HUD_BLOCKS_SPV},
+        {HUD_MOTION_SPV, sizeof HUD_MOTION_SPV}, {HUD_AROUND_SPV, sizeof HUD_AROUND_SPV},
+        {HUD_PIECES_SPV, sizeof HUD_PIECES_SPV}, {HUD_FIELD_SPV, sizeof HUD_FIELD_SPV},
+        {HUD_REFINE_SPV, sizeof HUD_REFINE_SPV}, {HUD_REACH_SPV, sizeof HUD_REACH_SPV},
+        {HUD_WHICH_SPV, sizeof HUD_WHICH_SPV},   {HUD_LAYER_MOVING_SPV, sizeof HUD_LAYER_MOVING_SPV}};
     bool ok = hud.ok && d.CmdFillBuffer && d.CmdCopyBuffer;
     for (int i = 0; ok && i < MARKER_PASSES; ++i) {
         VkShaderModuleCreateInfo shader{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -3890,12 +3925,20 @@ bool PrepareMarkers(Device& d, Fg& fg) {
               d.CreateComputePipelines(d.handle, VK_NULL_HANDLE, 1, &pipeline, nullptr, &hud.pipelines[MARKER_PASS + i])) ==
                  VK_SUCCESS;
     }
-    // (the buffer: four counts, then per tile two vectors of four)
-    markers.tiles.size = 16 + static_cast<VkDeviceSize>(markers.tiles_w) * markers.tiles_h * 32;
+    // (the buffer: four counts, then per tile eight vectors of four)
+    markers.tiles.size = 16 + static_cast<VkDeviceSize>(markers.tiles_w) * markers.tiles_h * Fg::Markers::TILE_BYTES;
+    // The block sums: of the capture before at every pixel from three before the picture on; of this
+    // capture per cell of 4 of the tiles. Whether a pixel's content moves: one byte a pixel.
     ok = ok && CreateOwnImage(d, markers.sixteenth, VK_FORMAT_R16G16B16A16_SFLOAT, cells_w, cells_h) &&
          CreateOwnImage(d, markers.quarter, VK_FORMAT_R16G16B16A16_SFLOAT, cells_w * 4, cells_h * 4) &&
+         CreateOwnImage(d, markers.blocks, VK_FORMAT_R16_UINT, fg.extent.width + 3, fg.extent.height + 3) &&
+         CreateOwnImage(d, markers.cells, VK_FORMAT_R16G16B16A16_UINT, markers.tiles_w * 16, markers.tiles_h * 16) &&
+         CreateOwnImage(d, markers.which, VK_FORMAT_R8_UINT, fg.extent.width, fg.extent.height) &&
          (markers.sixteenth_view = MakeView(d, markers.sixteenth.image, VK_FORMAT_R16G16B16A16_SFLOAT)) &&
          (markers.quarter_view = MakeView(d, markers.quarter.image, VK_FORMAT_R16G16B16A16_SFLOAT)) &&
+         (markers.blocks_view = MakeView(d, markers.blocks.image, VK_FORMAT_R16_UINT)) &&
+         (markers.cells_view = MakeView(d, markers.cells.image, VK_FORMAT_R16G16B16A16_UINT)) &&
+         (markers.which_view = MakeView(d, markers.which.image, VK_FORMAT_R8_UINT)) &&
          CreateBufferWithMemory(d, markers.tiles.size,
                                 VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                                     VK_BUFFER_USAGE_TRANSFER_DST_BIT,
@@ -3910,17 +3953,18 @@ bool PrepareMarkers(Device& d, Fg& fg) {
         Log("fg: the passes for moving HUD content could not be set up; it stays as in the frame that follows");
         return false; // (what was made goes with the swapchain)
     }
-    Log("fg: moving HUD content: %ux%u tiles, at most %.0f of them looked at", markers.tiles_w, markers.tiles_h,
-        MarkerCap());
+    Log("fg: moving HUD content: %ux%u tiles; nothing is said to move when more than %.0f of them changed",
+        markers.tiles_w, markers.tiles_h, MarkerCap(fg));
     markers.failed = false;
     markers.ready = true;
     return true;
 }
 
-/// HUD content that moves over the screen (world markers): where the content of each tile of this
-/// capture's HUD layer was in the capture before (hud_moved.comp, hud_motion.comp,
-/// hud_spread.comp, hud_reach.comp), for the composite (hud_layer_moving.comp) to put it where
-/// it is on its way in each generated frame. False: not this frame.
+/// HUD content that moves over the screen (world markers, a ship's flight display): where the
+/// content of this capture's HUD layer was in the capture before, as a smooth field per piece of
+/// tiles that touch, and which pixels are content that moves; for the composite
+/// (hud_layer_moving.comp) to put it where it is on its way in each generated frame. The passes
+/// are those of proto/hud-motion/hudmotion.py, in its order. False: not this frame.
 bool RecordMarkers(Device& d, Fg& fg, Fg::Set& set, int set_number, VkCommandBuffer cmd, const Image& layer,
                    const Image& layer_before) {
     if (!PrepareMarkers(d, fg)) {
@@ -3933,8 +3977,9 @@ bool RecordMarkers(Device& d, Fg& fg, Fg::Set& set, int set_number, VkCommandBuf
         (!before_view && !(before_view = MakeView(d, layer_before.image, HUD_FORMAT)))) {
         return false;
     }
-    ToGeneral(d, cmd, markers.quarter);
-    ToGeneral(d, cmd, markers.sixteenth);
+    for (Image* image : {&markers.quarter, &markers.sixteenth, &markers.blocks, &markers.cells, &markers.which}) {
+        ToGeneral(d, cmd, *image);
+    }
     const VkBuffer tiles = markers.tiles.buffer;
     d.CmdFillBuffer(cmd, tiles, 0, 16, 0); // the counts; every tile's entry is written by the passes
     VkMemoryBarrier filled{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
@@ -3942,23 +3987,36 @@ bool RecordMarkers(Device& d, Fg& fg, Fg::Set& set, int set_number, VkCommandBuf
     filled.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
     d.CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &filled, 0,
                          nullptr, 0, nullptr);
-    const float constants[4] = {static_cast<float>(markers.tiles_w), static_cast<float>(markers.tiles_h), MarkerCap(), 0.0f};
+    const uint32_t w = markers.tiles_w, h = markers.tiles_h;
+    const float first[4] = {static_cast<float>(w), static_cast<float>(h), MarkerCap(fg), 0.0f};
+    const float second[4] = {first[0], first[1], first[2], 1.0f};
     const VkImageView layers[3] = {layer_view, before_view, VK_NULL_HANDLE};
-    const VkImageView layers_and_map[3] = {layer_view, before_view, markers.quarter_view};
+    const VkImageView sums[3] = {markers.blocks_view, markers.cells_view, VK_NULL_HANDLE};
+    const VkImageView sums_and_map[3] = {markers.blocks_view, markers.cells_view, markers.quarter_view};
     const VkImageView nothing[3]{};
     const VkImageView maps[2] = {markers.quarter_view, markers.sixteenth_view};
+    const VkImageView block_sums[2] = {markers.blocks_view, markers.cells_view};
+    const VkImageView moving[2] = {markers.which_view, VK_NULL_HANDLE};
+    VkDescriptorSet* sets = &set.hud_sets[MARKER_SETS];
+    // (a pass with one work group to a tile is given eight times the tiles: RunHudPass divides by eight)
+    const auto run = [&](uint32_t which_set, MarkerPass pass, const VkImageView* in, const VkImageView* out,
+                         const float* constants, uint32_t width, uint32_t height, VkImageView extra = VK_NULL_HANDLE) {
+        RunHudPass(d, fg, cmd, sets[which_set], MARKER_PASS + pass, in, out, constants, width, height, extra, tiles);
+    };
     // tests only: everything several times over, to measure what it costs
     static const int times = std::max(1, static_cast<int>(EnvFloat("SC_FG_TEST_MARKERS", 1.0f)));
     for (int i = 0; i < times; ++i) {
-        RunHudPass(d, fg, cmd, set.hud_sets[MARKER_SETS], MARKER_PASS, layers, maps, constants, markers.tiles_w * 4 + 32,
-                   markers.tiles_h * 4 + 32);
-        // one work group to a tile: as many groups across and down as there are tiles
-        RunHudPass(d, fg, cmd, set.hud_sets[MARKER_SETS + 1], MARKER_PASS + 1, layers_and_map, nothing, constants,
-                   markers.tiles_w * 8, markers.tiles_h * 8, markers.sixteenth_view, tiles);
-        RunHudPass(d, fg, cmd, set.hud_sets[MARKER_SETS + 2], MARKER_PASS + 2, layers, nothing, constants,
-                   markers.tiles_w * 8, markers.tiles_h * 8, VK_NULL_HANDLE, tiles);
-        RunHudPass(d, fg, cmd, set.hud_sets[MARKER_SETS + 3], MARKER_PASS + 3, nothing, nothing, constants, markers.tiles_w,
-                   markers.tiles_h, VK_NULL_HANDLE, tiles);
+        run(0, MARKER_MAPS, layers, maps, first, w * 4 + 32, h * 4 + 32);
+        run(1, MARKER_BLOCKS, layers, block_sums, first, w * 64 + 3, h * 64 + 3);
+        run(2, MARKER_OWN, sums_and_map, nothing, first, w * 8, h * 8, markers.sixteenth_view);
+        run(3, MARKER_AROUND, sums, nothing, first, w * 8, h * 8);
+        run(4, MARKER_PIECES, nothing, nothing, first, 1, 1);
+        run(5, MARKER_FIELD, nothing, nothing, first, w, h);
+        run(6, MARKER_REFINE, sums, nothing, first, w * 8, h * 8);
+        run(7, MARKER_PIECES, nothing, nothing, second, 1, 1);
+        run(8, MARKER_FIELD, nothing, nothing, second, w, h);
+        run(9, MARKER_REACH, nothing, nothing, first, w, h);
+        run(10, MARKER_WHICH, layers, moving, first, fg.extent.width, fg.extent.height);
     }
     const VkBufferCopy counts{0, 0, 16};
     d.CmdCopyBuffer(cmd, tiles, markers.counts[set_number].buffer, 1, &counts);
@@ -3991,12 +4049,12 @@ bool RecordLayerComposite(Device& d, Fg& fg, Fg::Set& set, VkCommandBuffer cmd, 
     }
     for (uint32_t i = 0; i < fg.generated; ++i) {
         const VkImageView in[3] = {fg.hud.current_view, scene_view, layer_view};
-        const VkImageView out[2] = {fg.hud.output_views[i], VK_NULL_HANDLE};
+        const VkImageView out[2] = {fg.hud.output_views[i], before[0] ? fg.markers.which_view : VK_NULL_HANDLE};
         if (before[0]) {
             const float back = 1.0f - static_cast<float>(i + 1) / static_cast<float>(fg.generated + 1);
             const float constants[4] = {back, g_layer_parameters[1], g_layer_parameters[2],
                                         static_cast<float>(fg.markers.tiles_w)};
-            RunHudPass(d, fg, cmd, set.hud_sets[2 + i], MARKER_PASS + 4, in, out, constants, fg.extent.width,
+            RunHudPass(d, fg, cmd, set.hud_sets[2 + i], MARKER_PASS + MARKER_LAYER, in, out, constants, fg.extent.width,
                        fg.extent.height, fg.curve_view, fg.markers.tiles.buffer, VK_WHOLE_SIZE, before);
         } else {
             RunHudPass(d, fg, cmd, set.hud_sets[2 + i], 3, in, out, g_layer_parameters, fg.extent.width, fg.extent.height,
@@ -4196,7 +4254,7 @@ void Statistics(Device& d, Fg& fg, double now) {
         "game gpu ms=%.1f (late %u) free=%.0f/s of %.0f probes=%u | gate=%u advance ms=%.1f least ms=%.1f own ms=%.1f lead ms=%.1f guard=%u ms=%.1f "
         "failed=%u first=%u ms=%.1f ahead=%u late copies=%u lost=%u | "
         "latency calls sleep=%u marker=%u | kept back for the GPU %u ms=%.1f paced=%u | "
-        "moving hud frames=%u tiles=%u found=%u spread=%u over=%u",
+        "moving hud frames=%u tiles=%u found=%u pieces=%u over=%u",
         fg.too_fast ? 1 : fg.generated + 1, real / span, fg.generated_frames / span, (real + fg.generated_frames) / span,
         fg.passed_frames, game.mean, game.p50, game.p95, game.p99, game.max, output.mean, output.p50, output.p95,
         output.p99, output.max, real ? fg.hook_seconds / real * 1000.0 : 0.0, fg.hud_frames, fg.layer_frames, fg.game_inputs, fg.blank_inputs,
@@ -4217,8 +4275,8 @@ fg.tail_seconds * 1000.0,
         g_lost_copies.exchange(0),
         g_latency_sleeps.exchange(0), g_latency_markers.exchange(0), lag_waits,
         lag_waits ? g_lag_us.exchange(0) / 1000.0 / lag_waits : 0.0, g_limiter.gpu_paced.load(), fg.markers.frames,
-        fg.markers.seen, fg.markers.found, fg.markers.spread, fg.markers.over);
-    fg.markers.frames = fg.markers.seen = fg.markers.found = fg.markers.spread = fg.markers.over = 0;
+        fg.markers.seen, fg.markers.found, fg.markers.pieces, fg.markers.over);
+    fg.markers.frames = fg.markers.seen = fg.markers.found = fg.markers.pieces = fg.markers.over = 0;
     fg.limit_gated = fg.limit_own_frames = fg.guard_waits = fg.guard_timeouts = fg.first_waits = fg.first_ahead = 0;
     fg.limit_own_seconds = fg.guard_seconds = fg.first_seconds = 0.0;
     fg.ahead_frames = fg.stale_frames = fg.held = 0;
@@ -5035,8 +5093,8 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
         ++fg.markers.frames;
         fg.markers.seen += counts[0];
         fg.markers.found += counts[1];
-        fg.markers.spread += counts[2];
-        fg.markers.over += static_cast<float>(counts[0]) > MarkerCap();
+        fg.markers.pieces += counts[2];
+        fg.markers.over += static_cast<float>(counts[0]) > MarkerCap(fg);
         fg.markers.counted[set_number] = false;
     }
     if (fg.measure_set == set_number) {
@@ -5618,7 +5676,7 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
             }
             std::fclose(file);
         }
-        if (markers_ran) { // moving HUD content: four counts, then per tile its motion and the motions that reach it
+        if (markers_ran) { // moving HUD content: four counts, then per tile what the passes found (tools/hud-motion-check.py)
             std::snprintf(path, sizeof path, "%s/dump-%d-%03u-markers-%ux%u.bin", Dir(), getpid(), fg.dumps,
                           fg.markers.tiles_w, fg.markers.tiles_h);
             if (FILE* file = std::fopen(path, "wb")) {
@@ -5943,7 +6001,15 @@ VKAPI_ATTR VkResult VKAPI_CALL HookCreateSwapchainKHR(VkDevice device, const VkS
                                                       VkSwapchainKHR* swapchain) {
     IN_HOOK("CreateSwapchain");
     Device* d = GetDevice(Key(device));
-    const bool wanted = d->nvx || g_test_inputs || EnvFloat("SC_FG_FALLBACK", 0.0f) != 0.0f;
+    // (SC_FG_KEEP_SWAPCHAIN=1, a diagnosis: every swapchain is created as asked for, which leaves no
+    // room for generated frames)
+    static const bool keep = EnvFloat("SC_FG_KEEP_SWAPCHAIN", 0.0f) != 0.0f;
+    // With a runner that ships vkd3d-proton the game presents through Direct3D 12, and the swapchain
+    // is vkd3d-proton's. Without it the game's renderer makes a swapchain of its own, and the game
+    // does not survive a change to that one: it closes a few seconds later, while starting up
+    // (LUG's runners without "experimental" in their name, Alpha 4.10). That one is left as it is.
+    const bool own = d->instance && !std::strcmp(d->instance->engine, "StarEngine");
+    const bool wanted = !keep && !own && (d->nvx || g_test_inputs || EnvFloat("SC_FG_FALLBACK", 0.0f) != 0.0f);
     VkSwapchainCreateInfoKHR changed = *info;
     if (wanted) {
         // Room for the generated frames, and the right to copy from and into the images.
@@ -5974,9 +6040,15 @@ VKAPI_ATTR VkResult VKAPI_CALL HookCreateSwapchainKHR(VkDevice device, const VkS
         fg->modified = modified;
         std::lock_guard lock{d->fg_mutex};
         d->swapchains[U64(*swapchain)] = fg;
-        Log("swapchain: %ux%u format %d present mode %d min images %u -> %u%s", info->imageExtent.width,
-            info->imageExtent.height, info->imageFormat, info->presentMode, info->minImageCount,
-            modified ? changed.minImageCount : info->minImageCount, modified ? "" : " (untouched)");
+        Log("swapchain: %ux%u format %d present mode %d min images %u -> %u%s (device %u, thread %s%s)",
+            info->imageExtent.width, info->imageExtent.height, info->imageFormat, info->presentMode,
+            info->minImageCount, modified ? changed.minImageCount : info->minImageCount, modified ? "" : " (untouched)",
+            d->index, ThreadName(), info->oldSwapchain ? ", replaces one" : "");
+        if (static std::atomic<bool> said{}; own && !said.exchange(true)) {
+            Log("swapchain: this one is the game's own, which it does not let a layer change: no frame generation. The "
+                "runner has no vkd3d-proton, with which the game presents through Direct3D 12 (the LUG's experimental "
+                "runners have it)");
+        }
     }
     return result;
 }
@@ -6016,8 +6088,10 @@ void DestroyFg(Device& d, Fg* fg) {
     }
     hud.retired_views.push_back(fg->curve_view);
     hud.retired_views.push_back(panel.view);
-    hud.retired_views.push_back(fg->markers.quarter_view);
-    hud.retired_views.push_back(fg->markers.sixteenth_view);
+    for (VkImageView view : {fg->markers.quarter_view, fg->markers.sixteenth_view, fg->markers.blocks_view,
+                             fg->markers.cells_view, fg->markers.which_view}) {
+        hud.retired_views.push_back(view);
+    }
     for (VkImageView view : {hud.current_view, hud.previous_view, hud.masked_view, hud.mask_view, hud.grown_view[0],
                              hud.grown_view[1], hud.checked_view, hud.fixed_view, hud.tiles_view, hud.reach_view,
                              hud.output_views[0], hud.output_views[1], hud.output_views[2]}) {
@@ -6051,8 +6125,10 @@ void DestroyFg(Device& d, Fg* fg) {
     DestroyOwnImage(d, fg->previous);
     DestroyOwnImage(d, fg->curve_image);
     DestroyOwnImage(d, panel.image);
-    DestroyOwnImage(d, fg->markers.quarter);
-    DestroyOwnImage(d, fg->markers.sixteenth);
+    for (Image* image : {&fg->markers.quarter, &fg->markers.sixteenth, &fg->markers.blocks, &fg->markers.cells,
+                         &fg->markers.which}) {
+        DestroyOwnImage(d, *image);
+    }
     fg->retired_buffers.push_back(fg->markers.tiles);
     fg->retired_buffers.push_back(fg->markers.dump);
     for (const HostBuffer& buffer : fg->markers.counts) {
@@ -6135,6 +6211,8 @@ VKAPI_ATTR void VKAPI_CALL HookDestroySwapchainKHR(VkDevice device, VkSwapchainK
         }
     }
     if (fg) {
+        Log("swapchain: %ux%u destroyed (device %u, thread %s)", fg->extent.width, fg->extent.height, d->index,
+            ThreadName());
         DestroyFg(*d, fg);
     }
     d->DestroySwapchainKHR(device, swapchain, allocator);
@@ -6163,6 +6241,11 @@ VKAPI_ATTR VkResult VKAPI_CALL HookQueuePresentKHR(VkQueue queue, const VkPresen
     TracePresent(d->index, queue);
     if (!fg) {
         return d->QueuePresentKHR(queue, info);
+    }
+    if (!fg->presented) {
+        fg->presented = true;
+        Log("swapchain: first present of %ux%u (device %u, thread %s)", fg->extent.width, fg->extent.height, d->index,
+            ThreadName());
     }
     const double start = Now();
     VkResult result = VK_SUCCESS;
@@ -6236,6 +6319,13 @@ VKAPI_ATTR VkResult VKAPI_CALL HookCreateInstance(const VkInstanceCreateInfo* in
     auto* in = new Instance;
     in->handle = *instance;
     in->gipa = gipa;
+    {
+        const VkApplicationInfo* app = info->pApplicationInfo;
+        std::snprintf(in->engine, sizeof in->engine, "%s", app && app->pEngineName ? app->pEngineName : "?");
+        Log("instance created: application \"%s\", engine \"%s\", %u extensions (thread %s)",
+            app && app->pApplicationName ? app->pApplicationName : "?", in->engine, info->enabledExtensionCount,
+            ThreadName());
+    }
 #define LOAD(name) in->name = reinterpret_cast<PFN_vk##name>(gipa(*instance, "vk" #name))
     LOAD(DestroyInstance);
     LOAD(GetPhysicalDeviceMemoryProperties);
@@ -6330,8 +6420,21 @@ VKAPI_ATTR VkResult VKAPI_CALL HookCreateDevice(VkPhysicalDevice physical, const
         binary_import |= !std::strcmp(info->ppEnabledExtensionNames[i], "VK_NVX_binary_import");
     }
     d->nvx = view_handle && binary_import && in;
-    Log("device created: %p, %u extensions, DLSS path %s", static_cast<void*>(d), info->enabledExtensionCount,
-        d->nvx ? "available" : "absent");
+    Log("device created: %p, %u extensions, DLSS path %s (device %u, engine \"%s\", thread %s)", static_cast<void*>(d),
+        info->enabledExtensionCount, d->nvx ? "available" : "absent", d->index, in ? in->engine : "?", ThreadName());
+    {
+        // (which extensions: tells the game's renderer from what else makes a device in its process)
+        std::string names;
+        for (uint32_t i = 0; i < info->enabledExtensionCount; ++i) {
+            const char* name = info->ppEnabledExtensionNames[i];
+            names += std::strncmp(name, "VK_", 3) != 0 ? name : name + 3;
+            names += ' ';
+            if (names.size() > 160 || i + 1 == info->enabledExtensionCount) {
+                Log("device created: device %u has %s", d->index, names.c_str());
+                names.clear();
+            }
+        }
+    }
     std::lock_guard lock{g_tables_mutex};
     g_devices[Key(*device)] = d;
     for (DeviceSlot& slot : g_device_slots) {
@@ -6373,6 +6476,7 @@ VKAPI_ATTR void VKAPI_CALL HookDestroyDevice(VkDevice device, const VkAllocation
     if (!d) {
         return;
     }
+    Log("device destroyed: device %u (thread %s)", d->index, ThreadName());
     {
         std::lock_guard global{g_input_mutex};
         if (g_input_device == d) {

@@ -2,9 +2,10 @@
 # What a build of the frame-generation layer has to pass before it is installed. Everything runs
 # headless (tools/test-chain.sh); results are appended to logs/test/_validate.txt and printed.
 #
-#   tools/fg-validate.sh [all | regression | hose | limiter [A|B|C|D] | multiplier | gpuwait | soak | panel]
+#   tools/fg-validate.sh [all | regression | hose | limiter [A|B|C|D] | multiplier | gpuwait | soak | panel | markers]
 #
 #   regression   the frame chain's six cases: chain intact (unlinked=0, shift=0, off=0; "early": shift=1, off=1)
+#                ("own": a swapchain of the game's own renderer, left as it is: presents = frames, nothing generated)
 #                "lost": frames copied out of the shared image only when the game's next frame was
 #                finished, so that the copy took the wrong picture (the layer counts them, from the moment
 #                generation is set up). Nothing but 0 will do, anywhere, except: in the runs of the
@@ -34,6 +35,14 @@
 #                newer ("age") where the GPU is the slower one; frames not fewer than without it by more
 #                than was measured when it was made (steady cases 1-3 %, a hitch every second 5 %).
 #   soak         three minutes of that at the game's own size
+#   markers      HUD content that moves over the screen (SC_FG_MARKERS=1, which sc-turbo sets at launch; not part of "all"):
+#                a test shape (an opaque marker that crosses HUD that stays) must be shown on its way, whole,
+#                with what stays untouched (tools/marker-check.py; shapes with a known answer, filled and half
+#                transparent ones among them, are in proto/hud-motion/shapes.py); captures of the game's HUD layer replayed
+#                (HUD_CAPTURES=PREFIX, seven in a row from "sc-turbo fg-dump 7"; default logs/fg/dump-650085)
+#                must come out as the reference says, pass by pass and in the picture
+#                (tools/hud-motion-check.py); and what the passes cost: a GPU-bound game with them once,
+#                eight times over and not at all, in turn.
 #   FG_TARGET=RATE: the display rate the limiter, multiplier, gpuwait and soak cases run at (120).
 #   panel        the performance panel (off by default; all the above run without it): the chain's cases
 #                with it on, intact as without; frames that pass through from the first one, with the
@@ -74,6 +83,10 @@ regression() {
     # a call that never came back (let go by its thread, with and without another thread waiting).
     reg locks "SC_FG_TEST_LOCKS=1"
     say "locks: $(grep -h 'locks test' logs/test/locks/fg-*.log | sed 's/^ *[0-9.]* locks test//' | tr '\n' ';')"
+    # The game's own swapchain (its renderer's, "StarEngine": what it presents through where the runner
+    # has no vkd3d-proton) is left as the game asked: as many presents as frames, and the one line saying so.
+    reg own "" --engine StarEngine
+    say "own: $(grep -c 'swapchain: .*(untouched)' logs/test/own/fg-*.log) swapchain left as asked, $(grep -c "this one is the game's own" logs/test/own/fg-*.log) line saying so"
 }
 panel() {
     say "## panel: the performance panel on (it is off in everything above)"
@@ -211,9 +224,37 @@ given_up() { # waits that gave themselves up, anywhere but in the runs they belo
 }
 stamp="$here/logs/test/_validate.start"; touch "$stamp"
 say "# $(date '+%F %H:%M') build $(sha256sum "${TEST_LIB:-$( [ -f build/fg/libsc_fg.new.so ] && echo build/fg/libsc_fg.new.so || echo build/fg/libsc_fg.so)}" | cut -c1-16)"
+markers() {
+    say "## markers: HUD content that moves over the screen (SC_FG_MARKERS=1)"
+    local c n v captures=${HUD_CAPTURES:-logs/fg/dump-650085}
+    for c in "mk_across|14 0" "mk_down|0 9" "mk_both|11 7" "mk_fast|90 40"; do
+        IFS='|' read -r n v <<< "$c"
+        # shellcheck disable=SC2086
+        TEST_AT="5:DUMP=3" tools/test-chain.sh "$n" 10 "SC_FG_MARKERS=1" --game-ms 30 --marker $v > "logs/test/_$n.out" 2>&1
+        python3 tools/marker-check.py "logs/test/$n/dump-" 2 | sed "s|$here/||" | tee -a "$out"
+    done
+    if ls "$captures"-000-hud-*.bin > /dev/null 2>&1; then
+        TEST_SIZE=2560x1440 TEST_AT="5:DUMP=8" tools/test-chain.sh mk_game 12 "SC_FG_MARKERS=1 SC_FG_MARKER_CAP=100000" \
+            --game-ms 30 --hud-files "$captures" 0 7 > logs/test/_mk_game.out 2>&1
+        python3 tools/hud-motion-check.py logs/test/mk_game "$captures" 0 7 2 | sed "s|$here/||" | tee -a "$out"
+        # what the passes cost: the game's own size, the GPU the slower one; in turn, twice
+        local names=
+        for n in mc0 mc1 mc8 mc0b mc1b mc8b; do
+            v=0; case "$n" in mc1*) v=1 ;; mc8*) v=8 ;; esac
+            TEST_SIZE=2560x1440 run "$n" 16 "SC_FG_MULT=3 SC_FG_MARKER_CAP=100000 SC_FG_MARKERS=$(( v > 0 )) SC_FG_TEST_MARKERS=$(( v > 0 ? v : 1 ))" \
+                --game-ms 3 --gpu-load 10 --unprotected --hud-files "$captures" 0 7
+            names="$names $n"
+        done
+        # shellcheck disable=SC2086
+        table $names
+        say "moving hud: $(grep -ho 'moving hud frames=[0-9]* tiles=[0-9]* found=[0-9]* pieces=[0-9]* over=[0-9]*' logs/test/mc1/fg-*.log | tail -1)"
+    else
+        say "no captures of the game's HUD layer ($captures-000-hud-*.bin): only the test shape was checked"
+    fi
+}
 case "${1:-all}" in
 all) regression; hose; limiter all; multiplier; gpuwait; soak; panel; given_up ;;
-regression|hose|multiplier|gpuwait|soak|panel) "$1" ;;
+regression|hose|multiplier|gpuwait|soak|panel|markers) "$1" ;;
 limiter) limiter "${2:-all}" ;;
 *) awk 'NR > 1 { if (/^#/) print; else exit }' "$0"; exit 1 ;;
 esac

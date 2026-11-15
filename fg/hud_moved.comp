@@ -42,5 +42,7 @@ void main() {
             sum += mean.xy;
         }
     }
-    imageStore(sixteenth, cell, vec4(sum / 16.0, 0.0, 0.0));
+    // (a cell of 16 that is not wholly in the picture: nothing, like its cells of 4 past the edge)
+    const bool whole = all(greaterThanEqual(origin, ivec2(0))) && all(lessThanEqual(origin + 16, size));
+    imageStore(sixteenth, cell, whole ? vec4(sum / 16.0, 0.0, 0.0) : vec4(0.0));
 }

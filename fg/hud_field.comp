@@ -1,0 +1,170 @@
+#version 450
+// HUD content that moves over the screen ("field" in proto/hud-motion/hudmotion.py): the motion of
+// each tile of a piece that counts: a plane through the motions that fit around it (two tiles
+// around, weighted with their content), so that the field is smooth (a ship's flight display turns
+// with the view: its motion grows towards the screen's edge), a tile whose search went to the
+// wrong place (a scale's next period, another marker) is put right and one without an answer has
+// one. One invocation works on one tile.
+//   mode 0  from hud_around.comp's answers -> first
+//   mode 1  from hud_refine.comp's -> motion
+layout(local_size_x = 8, local_size_y = 8) in;
+struct Tile {
+    ivec4 own;     // its own search's answer: xy; z: 1 when it has one
+    ivec4 around;  // the best of the answers around it, on its own cells: xy; z: state; w: what it leaves unexplained
+    ivec4 sums;    // x: arrived content in its changed cells; y: what "not moved" leaves; z: its piece (-1: none)
+    vec4 piece;    // (of a piece's first tile) x: content that fits, y: all of it, z: 1 when the piece counts,
+                   // w: (second round) what the field leaves unexplained in it
+    vec4 first;    // the field, first round: xy; z: 1 when there is one
+    ivec4 refined; // as around, against the field
+    vec4 motion;   // the field: xy; z: 1 when there is one; w: how many motions reach the tile
+    vec4 reach;    // those motions: xy, zw
+};
+layout(std430, binding = 6) buffer Markers {
+    uint seen, found, pieces, unused;
+    Tile tiles[];
+} markers;
+layout(push_constant) uniform Constants {
+    float tiles_w, tiles_h;
+    float cap, mode;
+} pc;
+
+const int FITS = 1;
+const int SMOOTH = 2;     // tiles around that the plane goes through
+const float OFF = 3.0;    // a motion further than this from the plane is left out of it
+const float WILD = 10.0;  // ... and one further than this from the middle one around, from the start
+
+vec4 g_samples[25]; // where (in tiles from this one), the motion there
+float g_weights[25];
+int g_count;
+
+/// The middle value of component k of the samples, by weight.
+float Middle(int k) {
+    float all = 0.0;
+    for (int i = 0; i < g_count; ++i) {
+        all += g_weights[i];
+    }
+    float middle = 1e30;
+    for (int i = 0; i < g_count; ++i) {
+        float upto = 0.0;
+        for (int j = 0; j < g_count; ++j) {
+            upto += g_samples[j][k] <= g_samples[i][k] ? g_weights[j] : 0.0;
+        }
+        if (upto >= 0.5 * all) {
+            middle = min(middle, g_samples[i][k]);
+        }
+    }
+    return middle;
+}
+
+/// Least squares m = a + b x + c y through the samples; with two, or all in a line, the slope
+/// along the line only; with one, its motion.
+void Plane(out vec2 a, out vec2 b, out vec2 c) {
+    float all = 0.0;
+    for (int i = 0; i < g_count; ++i) {
+        all += g_weights[i];
+    }
+    vec2 at = vec2(0.0), mean = vec2(0.0);
+    for (int i = 0; i < g_count; ++i) {
+        const float weight = g_weights[i] / all;
+        at += weight * g_samples[i].xy;
+        mean += weight * g_samples[i].zw;
+    }
+    float sxx = 0.0, syy = 0.0, sxy = 0.0;
+    vec2 sxv = vec2(0.0), syv = vec2(0.0);
+    for (int i = 0; i < g_count; ++i) {
+        const float weight = g_weights[i] / all;
+        const vec2 from = g_samples[i].xy - at;
+        const vec2 value = g_samples[i].zw - mean;
+        sxx += weight * from.x * from.x;
+        syy += weight * from.y * from.y;
+        sxy += weight * from.x * from.y;
+        sxv += weight * from.x * value;
+        syv += weight * from.y * value;
+    }
+    const float det = sxx * syy - sxy * sxy;
+    const float most = max(max(sxx, syy), 1e-9);
+    if (g_count >= 3 && det > 1e-3 * most * most) {
+        b = (sxv * syy - syv * sxy) / det;
+        c = (syv * sxx - sxv * sxy) / det;
+    } else if (sxx + syy > 1e-9 && g_count >= 2) {
+        // in a line: the slope along it, none across it (whichever way the line goes)
+        b = sxv / (sxx + syy);
+        c = syv / (sxx + syy);
+    } else {
+        b = vec2(0.0);
+        c = vec2(0.0);
+    }
+    a = mean - b * at.x - c * at.y;
+}
+
+void main() {
+    const ivec2 tile = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 tiles = ivec2(pc.tiles_w, pc.tiles_h);
+    if (any(greaterThanEqual(tile, tiles))) {
+        return;
+    }
+    const int record = tile.y * tiles.x + tile.x;
+    const bool second = pc.mode != 0.0;
+    vec4 result = vec4(0.0);
+    const int name = markers.tiles[record].sums.z;
+    g_count = 0;
+    if (name >= 0 && markers.tiles[name].piece.z != 0.0) {
+        for (int j = max(tile.y - SMOOTH, 0); j <= min(tile.y + SMOOTH, tiles.y - 1); ++j) {
+            for (int i = max(tile.x - SMOOTH, 0); i <= min(tile.x + SMOOTH, tiles.x - 1); ++i) {
+                const int other = j * tiles.x + i;
+                if (markers.tiles[other].sums.z != name) {
+                    continue;
+                }
+                const ivec4 answer = second ? markers.tiles[other].refined : markers.tiles[other].around;
+                if (answer.z != FITS) {
+                    continue;
+                }
+                g_samples[g_count] = vec4(vec2(i - tile.x, j - tile.y), vec2(answer.xy));
+                g_weights[g_count] = float(markers.tiles[other].sums.x);
+                ++g_count;
+            }
+        }
+    }
+    if (g_count > 0) {
+        // the middle motion around (by content), and what is near it
+        const vec2 middle = vec2(Middle(2), Middle(3));
+        int kept = 0;
+        for (int i = 0; i < g_count; ++i) {
+            if (all(lessThanEqual(abs(g_samples[i].zw - middle), vec2(WILD)))) {
+                g_samples[kept] = g_samples[i];
+                g_weights[kept] = g_weights[i];
+                ++kept;
+            }
+        }
+        g_count = kept;
+    }
+    if (g_count > 0) {
+        vec2 a, b, c;
+        Plane(a, b, c);
+        int kept = 0;
+        for (int i = 0; i < g_count; ++i) {
+            kept += int(all(lessThanEqual(abs(a + b * g_samples[i].x + c * g_samples[i].y - g_samples[i].zw), vec2(OFF))));
+        }
+        if (kept > 0 && kept < g_count) {
+            kept = 0;
+            for (int i = 0; i < g_count; ++i) {
+                if (all(lessThanEqual(abs(a + b * g_samples[i].x + c * g_samples[i].y - g_samples[i].zw), vec2(OFF)))) {
+                    g_samples[kept] = g_samples[i];
+                    g_weights[kept] = g_weights[i];
+                    ++kept;
+                }
+            }
+            g_count = kept;
+            Plane(a, b, c);
+        }
+        result = vec4(a, 1.0, 0.0);
+    }
+    if (second) {
+        markers.tiles[record].motion = result;
+        if (result.z != 0.0) {
+            atomicAdd(markers.found, 1u);
+        }
+    } else {
+        markers.tiles[record].first = result;
+    }
+}

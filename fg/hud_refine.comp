@@ -1,0 +1,135 @@
+#version 450
+// HUD content that moves over the screen ("refine" in proto/hud-motion/hudmotion.py): every tile
+// of a piece that is looked at further, against the field (hud_field.comp, first round): each of
+// its changed cells shifted by the field at the cell (the field changes within a tile: one shift
+// fits a fast turn badly at the screen's edge), and that two pixels to every side. -> refined:
+// the motion at the tile's centre, whether it fits, what it leaves unexplained. A tile of a piece
+// that does not count no longer fits. One work group, 64 invocations, works on one tile.
+layout(local_size_x = 64) in;
+layout(binding = 0) uniform usampler2D blocks; // hud_blocks.comp
+layout(binding = 1) uniform usampler2D cells;
+struct Tile {
+    ivec4 own;     // its own search's answer: xy; z: 1 when it has one
+    ivec4 around;  // the best of the answers around it, on its own cells: xy; z: state; w: what it leaves unexplained
+    ivec4 sums;    // x: arrived content in its changed cells; y: what "not moved" leaves; z: its piece (-1: none)
+    vec4 piece;    // (of a piece's first tile) x: content that fits, y: all of it, z: 1 when the piece counts
+    vec4 first;    // the field, first round: xy; z: 1 when there is one
+    ivec4 refined; // as around, against the field
+    vec4 motion;   // the field: xy; z: 1 when there is one; w: how many motions reach the tile
+    vec4 reach;    // those motions: xy, zw
+};
+layout(std430, binding = 6) buffer Markers {
+    uint seen, found, pieces, unused;
+    Tile tiles[];
+} markers;
+layout(push_constant) uniform Constants {
+    float tiles_w, tiles_h;
+    float cap, mode;
+} pc;
+
+const int NONE = 0, FITS = 1, NOT = 2, LITTLE = 3;
+const float SAME = 6.0; // motions closer than this are one piece's
+
+shared uint s_cell[256];   // the tile's cells of 4: sum | changed << 16
+shared ivec2 s_shift[256]; // the field at the cell, in whole pixels
+shared uint s_costs[25];
+
+bool Fits(uint cost, uint content, uint zero) {
+    return 10u * cost <= 3u * content && 2u * cost <= zero;
+}
+
+/// The field (first round) at a place: between the centres of the four tiles around, those with
+/// a motion within SAME of the rough one. False: none of them has one.
+bool LookUp(vec2 place, vec2 rough, out vec2 motion) {
+    const ivec2 tiles = ivec2(pc.tiles_w, pc.tiles_h);
+    const vec2 at = (place - 32.0) / 64.0;
+    const ivec2 base = ivec2(floor(at));
+    const vec2 part = at - vec2(base);
+    float weights = 0.0;
+    vec2 sum = vec2(0.0);
+    for (int j = 0; j < 2; ++j) {
+        for (int i = 0; i < 2; ++i) {
+            const ivec2 tile = base + ivec2(i, j);
+            if (any(lessThan(tile, ivec2(0))) || any(greaterThanEqual(tile, tiles))) {
+                continue;
+            }
+            const vec4 field = markers.tiles[tile.y * tiles.x + tile.x].first;
+            if (field.z <= 0.0 || any(greaterThan(abs(field.xy - rough), vec2(SAME)))) {
+                continue;
+            }
+            const float weight = (i != 0 ? part.x : 1.0 - part.x) * (j != 0 ? part.y : 1.0 - part.y) + 1e-4;
+            weights += weight;
+            sum += weight * field.xy;
+        }
+    }
+    motion = weights > 0.0 ? sum / weights : rough;
+    return weights > 0.0;
+}
+
+void main() {
+    const ivec2 tile = ivec2(gl_WorkGroupID.xy);
+    const uint me = gl_LocalInvocationIndex;
+    const ivec2 tiles = ivec2(pc.tiles_w, pc.tiles_h);
+    const uint record = uint(tile.y * tiles.x + tile.x);
+    const ivec4 around = markers.tiles[record].around;
+    const ivec4 sums = markers.tiles[record].sums;
+    const vec4 first = markers.tiles[record].first;
+    const bool counts = sums.z >= 0 && markers.tiles[sums.z].piece.z != 0.0 && first.z > 0.0;
+    if (sums.z < 0 || around.z == NONE || around.z == LITTLE || !counts) {
+        if (me == 0u) {
+            ivec4 same = around;
+            if (sums.z >= 0 && around.z == FITS && !counts) {
+                same.z = NOT;
+            }
+            markers.tiles[record].refined = same;
+        }
+        return;
+    }
+    const ivec2 origin = tile * 64;
+    for (uint k = me * 4u; k < me * 4u + 4u; ++k) {
+        const ivec2 cell = ivec2(k & 15u, k >> 4);
+        const uvec4 sum = texelFetch(cells, tile * 16 + cell, 0);
+        s_cell[k] = sum.r | sum.b << 16;
+        if (sum.b != 0u) {
+            vec2 motion;
+            LookUp(vec2(origin + 4 * cell) + 1.5, first.xy, motion);
+            s_shift[k] = ivec2(floor(motion + 0.5));
+        }
+    }
+    barrier();
+    if (me < 25u) {
+        const ivec2 d = ivec2(me % 5u, me / 5u) - 2;
+        const ivec2 blocks_size = textureSize(blocks, 0);
+        uint cost = 0u;
+        for (uint k = 0u; k < 256u; ++k) {
+            const uint cell = s_cell[k];
+            if (cell >> 16 == 0u) {
+                continue;
+            }
+            const ivec2 at = origin + 4 * ivec2(k & 15u, k >> 4) + s_shift[k] + d + 3;
+            uint before = 0u;
+            if (all(greaterThanEqual(at, ivec2(0))) && all(lessThan(at, blocks_size))) {
+                before = texelFetch(blocks, at, 0).r;
+            }
+            cost += uint(abs(int(cell & 0xffffu) - int(before)));
+        }
+        s_costs[me] = cost;
+    }
+    barrier();
+    if (me != 0u) {
+        return;
+    }
+    // the best; of equals the one nearest the field
+    int best = 12;
+    for (int k = 0; k < 25; ++k) {
+        const ivec2 d = ivec2(k % 5, k / 5) - 2, d_best = ivec2(best % 5, best / 5) - 2;
+        const ivec3 key = ivec3(abs(d.x) + abs(d.y), d.y, d.x), key_best = ivec3(abs(d_best.x) + abs(d_best.y), d_best.y, d_best.x);
+        const bool nearer = key.x != key_best.x ? key.x < key_best.x : key.y != key_best.y ? key.y < key_best.y : key.z < key_best.z;
+        if (s_costs[k] < s_costs[best] || (s_costs[k] == s_costs[best] && nearer)) {
+            best = k;
+        }
+    }
+    const uint cost = s_costs[best];
+    const bool good = Fits(cost, uint(sums.x), uint(sums.y));
+    markers.tiles[record].refined = ivec4(ivec2(floor(first.xy + 0.5)) + ivec2(best % 5, best / 5) - 2, good ? FITS : NOT, int(cost));
+}
