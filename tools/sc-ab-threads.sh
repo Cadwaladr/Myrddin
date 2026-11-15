@@ -4,8 +4,8 @@
 # touched), the frame rate of each taken from the frame-generation layer's event log.
 #
 #   tools/sc-ab-threads.sh A B [SECONDS=20] [CYCLES=4]
-#   A, B:  asis       as the threads are placed now (Wine's CPU sets and sc-hybrid)
-#          all        every thread on every CPU (no placement: stock Wine without sc-hybrid)
+#   A, B:  asis       as the threads are placed now (by a patched runner or a placer, if there is one)
+#          all        every thread on every CPU (no placement: what a stock runner gives)
 #          own-core   as now, but the main thread has one P-core to itself
 #          bg-low     as now, but the game's background workers (loading, streaming) give way to
 #                     everything else: nice 19 (SC_BG_NICE: another value)
@@ -17,8 +17,9 @@
 # The game has to be launched with frame generation (sc-turbo fg ...): that layer is the frame
 # counter. Generation is switched off for the test, so that the game runs at its own speed, and
 # back on after it (KEEP_FG=1: left as it is; then only a game the layer does not hold to a rate
-# shows a difference). sc-hybrid is paused meanwhile, and at the end, however it ends, the
-# threads are put back as they were and sc-hybrid goes on.
+# shows a difference). A thread placer that runs next to the game (sc-hybrid, of the runner
+# work) is paused meanwhile, and at the end, however it ends, the threads are put back as they
+# were and it goes on.
 #
 # Hold a steady view for the whole test: about 2 x SECONDS x CYCLES seconds.
 set -u

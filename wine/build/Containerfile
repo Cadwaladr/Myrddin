@@ -1,6 +1,0 @@
-# Minimal Fedora toolchain for building Wine PE modules (kernelbase.dll) and test programs.
-FROM registry.fedoraproject.org/fedora:44
-RUN dnf -y install --setopt=install_weak_deps=False \
-        gcc make flex bison perl python3 git autoconf \
-        mingw64-gcc mingw64-binutils mingw64-headers mingw64-crt \
-    && dnf clean all

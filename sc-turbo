@@ -138,7 +138,6 @@ display_settings() {
     fi
     echo "Display: ${WAYLANDDRV_PRIMARY_MONITOR:-left to the runner}, ${SC_FG_TARGET:-120} Hz"
 }
-old="$here/wine"
 logs="$here/logs/probe"
 
 newest_log() { ls -t "$here"/logs/probe/probe-StarCitizen*.log "$here"/logs/capture/probe-StarCitizen*.log 2>/dev/null | head -1; }
@@ -291,8 +290,8 @@ check)
     else
         echo "NOT open in the game process (pid $pid)"
     fi
-    echo "== thread placement (20 s) =="
-    "$old/tools/sc-hybrid" status --seconds 20 2>&1 | head -30
+    echo "== thread placement =="
+    "$here/tools/sc-threads" show 2>&1 | head -30
     echo "== C runtime the game has loaded (Bin64: the game's own; lib/wine: Wine's builtin) =="
     grep -Eio '/[^ ]*/(vcruntime140[^/ ]*|ucrtbase|msvcrt|msvcp140[^/ ]*)\.dll' /proc/"$pid"/maps 2>/dev/null | sort -u
     echo "== probe =="

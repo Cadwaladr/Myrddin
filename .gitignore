@@ -8,15 +8,8 @@ __pycache__/
 # this machine's settings and backups of desktop files
 /sc-turbo.conf
 /backups/
-# Wine source trees, build output, test prefix, runner binaries and session records
-/wine/build/wine-*/
-/wine/build/obj-*/
-/wine/build/out/
-/wine/build/test/prefix/
-/wine/build/*.log
-/wine/runners/
-/wine/logs/
-/wine/docs/data/
+# the Wine runner work: not part of this repository (it gets one of its own)
+/wine/
 *.exe
 # never part of the repository: assistant session data and chat records of any kind
 /.claude/

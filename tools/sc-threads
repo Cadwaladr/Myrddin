@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """Where the game's threads may run, changed from outside while the game runs, to compare
 placements within one session (tools/sc-ab-threads.sh). Nothing in the game is touched: this
-calls sched_setaffinity() on its threads, what `taskset -p` does and what wine/tools/sc-hybrid
-has done in every session.
+calls sched_setaffinity() on its threads, what `taskset -p` does.
 
     tools/sc-threads save FILE            note every thread's CPUs, nice value and policy as they are now
     tools/sc-threads restore FILE         put them back (threads that still exist)
     tools/sc-threads all [FILE]           every thread on every CPU: no placement at all, what
-                                          stock Wine without sc-hybrid gives (with FILE: nice
+                                          a stock runner gives (with FILE: nice
                                           values as noted there)
     tools/sc-threads own-core FILE [--core CPU]
                                           as noted, but the main thread has one P-core to itself:

@@ -4,8 +4,8 @@
 
 Myrddin makes Star Citizen run better on Linux without touching the game. It works in the
 layers the game already runs through: a Vulkan layer on the host side of Wine that generates
-frames, a launcher that controls it while the game runs, and a patch and tools for the Wine
-runner underneath.
+frames, and a launcher that controls it while the game runs. The Wine runner is the Star
+Citizen LUG's, as it comes.
 
 > [!WARNING]
 > **Experimental and under active development.** Myrddin has been built and tested on exactly
@@ -40,11 +40,6 @@ On the test machine, a heavy hangar scene that the game renders at 24 to 28 fram
 shown at 97 to 110 with ×4. Generated frames are interpolated: they add smoothness, not
 responsiveness, and each real frame is shown a little later than it would be without them.
 
-**Runner work.** [`wine/`](wine/README.md) holds a Wine patch that implements the CPU-set and
-EcoQoS calls Star Citizen makes on Windows, and tools that place and measure the game's threads
-from outside. Measured in the game, leaving every thread on every CPU was 4 to 6 % faster, so
-the patch is off by default and kept as an option.
-
 **A launcher window.** One entry per game with its icon: a click launches it, and `−  4x  +`
 under it sets the multiplier, before the launch and while the game runs. Everything it does is
 also a command of `sc-turbo`.
@@ -65,9 +60,9 @@ This is the only configuration Myrddin has run on.
 | Desktop | KDE Plasma 6.8.2 (KWin 6.8.2-3), Wayland session; before that COSMIC 1.11.0, where most of the development took place |
 | GPU and driver | NVIDIA GeForce RTX 4070 SUPER, 12 GB; driver 615.78.08 |
 | CPU | Intel Core i5-13600K (6 P-cores with SMT, 8 E-cores) |
-| Wine runner | `lug-wine-tkg-experimental-wayland-git-11.20-2` (Wine 11.20, Wayland driver) |
+| Wine runner | the Star Citizen LUG's, unchanged: `lug-wine-tkg-experimental-wayland-git-11.22-1` and `-11.20-2` (Wine 11.22 and 11.20, Wayland driver) |
 | Game | Star Citizen Alpha 4.10.3 (LIVE), Vulkan renderer, DLSS |
-| Display | 2560×1440 at 120 Hz |
+| Display | 2560×1440 at 143.99 Hz and at 120 Hz, no variable refresh |
 
 ## Requirements and limitations
 
@@ -78,13 +73,17 @@ This is the only configuration Myrddin has run on.
   AMD and Intel GPUs are not supported. A fallback without the game's vectors exists
   (`SC_FG_FALLBACK=1`) and has never been tested.
 - **One renderer, one kind of runner.** The game's Vulkan renderer under Wine with the Wayland
-  driver. X11, Proton and other runners are untested.
+  driver, on the LUG's experimental Wayland runner as it comes. X11, Proton and other runners
+  are untested. With two other LUG runners (`lug-wine-tkg-git-11.21-1`,
+  `lug-wine-tkg-wayland-git-11.22-1`) the game closed while starting up; whether Myrddin has a
+  part in that is not known yet.
 - **Tied to the current game build.** Finding the HUD layer and matching frames to their
   inputs rely on how Alpha 4.10 builds a frame. A patch can break either; the layer then falls
   back or has to be switched off (`sc-turbo fg-off`).
 - **The display's refresh rate** is asked of the desktop at launch on KDE Plasma and COSMIC
   (`sc-turbo displays` shows what was found). Elsewhere 120 Hz is assumed: set `SC_FG_TARGET`.
-  The game has been played at 120 Hz only; other rates and variable refresh are untested.
+  The game has been played at 120 Hz and at 143.99 Hz; other rates and variable refresh are
+  untested.
 - **GPU memory.** The layer keeps buffers of its own, and their size has not been reduced yet.
   On the 12 GB test card the game runs close to the limit: switching the upscaler to native
   resolution in a running session exhausted it, turned generation off, and a driver hang
@@ -98,7 +97,6 @@ This is the only configuration Myrddin has run on.
 - **Desktop integration is for KDE Plasma and COSMIC.** Setting up the panel's key, naming the
   display the game should use and reading its refresh rate work there. Elsewhere, bind
   `sc-turbo fg-panel` to a key by hand and set `SC_MONITOR` and `SC_FG_TARGET`.
-- **The Wine patch** applies to Wine 11.20 and acts only on hybrid CPUs.
 - **No installer, no packages.** x86_64 only.
 
 ## Building from source
@@ -117,8 +115,7 @@ cd Myrddin
 
 `build.sh` writes only into `build/`. The Wayland packages are needed for the test program
 alone; the tests themselves (`tools/test-chain.sh`, `tools/fg-validate.sh`) run in a headless
-Weston and need `weston`, `python3-numpy` and `python3-pillow`. Building the Wine patch is
-described in [`wine/README.md`](wine/README.md) and needs `podman`.
+Weston and need `weston`, `python3-numpy` and `python3-pillow`.
 
 ## Running
 
@@ -220,8 +217,7 @@ busctl --user call org.kde.KWin /KWin org.kde.KWin reconfigure
 | `fg/` | the frame-generation layer (`sc_fg.cpp`), its compute shaders and the panel |
 | `gui/` | the launcher window (`myrddin-gui`, GTK 4 and libadwaita) and its list of games |
 | `probe/` | the passive probe layer and the test programs, among them the two-device test chain |
-| `tools/` | tests and validation, in-session comparisons, log readers, thread tools, the panel's key |
-| `wine/` | the Wine patch, its build and test scripts, an example launch script, thread and display tools |
+| `tools/` | tests and validation, in-session comparisons, log readers, thread and display tools, the panel's key |
 | `proto/hud-motion/` | reference prototype for moving world-pinned HUD content on generated frames |
 | `third_party/` | AMD FidelityFX SDK 1.1.4 and the recipe that builds it for Linux |
 | `sc-turbo`, `build.sh` | the launcher, and the build |
@@ -239,8 +235,6 @@ are listed below.
 |---|---|
 | AMD FidelityFX SDK 1.1.4, with changes that yield several generated frames per pair | MIT (`third_party/ffx_src/FidelityFX-SDK/LICENSE.txt`) |
 | Linux build recipe for the SDK and Vulkan test helpers, from the Lichii project | GPL-3.0-or-later |
-| `wine/patches/` | LGPL-2.1-or-later, as Wine |
-| `wine/config/sc-launch.sh`, derived from the LUG Helper's launch script | GPL-3.0 |
 | Adwaita Sans, the panel's letters, baked into `fg/hud_font.h` | SIL Open Font License 1.1 |
 
 Star Citizen is a trademark of Cloud Imperium Games; FidelityFX and FSR are AMD's; DLSS is
