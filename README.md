@@ -2,10 +2,15 @@
 
 **Made by Claude, Anthropic's AI model, and directed by Cadwaladr.**
 
-Myrddin makes Star Citizen run better on Linux without touching the game. It works in the
-layers the game already runs through: a Vulkan layer on the host side of Wine that generates
-frames, and a launcher that controls it while the game runs. The Wine runner is the Star
-Citizen LUG's, as it comes.
+Myrddin gives you motion-vector-based frame generation for Star Citizen on Linux, without
+touching the game's files, patching its code or memory, or injecting a DLL.
+
+It works on the host side of Wine. The game hands its motion vectors and depth to DLSS through
+Vulkan, and Wine passes those calls on to the host's Vulkan. Myrddin is a Vulkan layer that sits
+there, like MangoHud, but it also copies the motion vectors, the depth and the game's HUD layer,
+runs a modified FSR 3.1 frame interpolation on them, and presents the generated frames in the
+game's window between the real ones, with the HUD put over them sharp. NVIDIA GPUs only, with
+DLSS and Vulkan selected in the game.
 
 > [!WARNING]
 > **Experimental and under active development.** Myrddin has been built and tested on exactly
