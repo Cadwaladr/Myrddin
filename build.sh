@@ -49,7 +49,8 @@ else
 fi
 
 if [ "${1:-}" = install ]; then
-    if pgrep -f 'StarCitizen\.exe' >/dev/null; then
+    # (by the process's own name: a match on command lines also finds a shell or an editor that names it)
+    if pgrep -x StarCitizen.exe >/dev/null; then
         echo "the game is running: not installed"; exit 1
     fi
     if [ -f build/fg/libsc_fg.so ] && ! cmp -s build/fg/libsc_fg.so build/fg/libsc_fg.new.so; then

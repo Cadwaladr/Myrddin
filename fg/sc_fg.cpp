@@ -36,7 +36,10 @@
 //   SC_FG_FIX_VECTORS  the game's vectors are checked against the picture (mv_check.comp): 1 where the
 //                      scene without the HUD is known (default), 2 also on the presented frame, 0 never
 //                      (SC_FG_VECTOR_FACTOR, SC_FG_VECTOR_MARGIN: how much better a neighbour's vector must be)
-//   SC_FG_TEST_INPUTS=1, SC_FG_TEST_LAYER, SC_FG_TEST_WAIT_MS, SC_FG_TEST_CHECKS   tests only (probe/test_chain.c)
+//   SC_FG_PANEL=1      the layer's own performance panel can be shown (control file PANEL); without it
+//                      there is none, whatever that file says
+//   SC_FG_TEST_INPUTS=1, SC_FG_TEST_LAYER, SC_FG_TEST_WAIT_MS, SC_FG_TEST_CHECKS, SC_FG_TEST_LOCKS   tests only
+//                      (probe/test_chain.c)
 // Control files in SC_FG_DIR, looked at once a second:
 //   OFF     while it exists, frames pass through untouched
 //   DUMP    removed when seen; the next generated frame and its real frame are written as .ppm
@@ -44,6 +47,12 @@
 //   PARAMS  name=value lines, removed when read: HUD detection, and chain / nohud / wait / shift / vectors /
 //           gate / guard / first / gpuwait / fill / probe
 //   (sc-turbo has a command for each of these and for the others)
+// Files the layer keeps there for when something goes wrong (see Crumb, Lock, Stage):
+//   STAGE-<pid>    where the present hook is
+//   THREADS-<pid>  every thread that calls into the layer: its hook, the locks it holds and waits for
+//                  ("sc-turbo fg-where" reads both, also after the game has ended)
+//   and in the log: "lock ..." lines when a thread waited for one of the layer's locks for a second,
+//   or when a lock was left behind by a call that never returned and has been taken over.
 
 #include <algorithm>
 #include <functional>
@@ -51,11 +60,14 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <csetjmp>
 #include <cstdarg>
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -63,6 +75,7 @@
 #include <utility>
 #include <vector>
 
+#include <pthread.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <fcntl.h>
@@ -120,7 +133,561 @@ double Now() {
     return std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
 }
 
-std::mutex g_log_mutex;
+// ----------------------------------------------------------------------------- who is where
+
+/// Every thread that calls into the layer keeps a line about itself: the hook it is in and since
+/// when, how far it has come in it, the locks it holds and the one it waits for. The lines are in
+/// a file (THREADS-<pid> in the log directory; "sc-turbo fg-where" reads it), so that a game that
+/// stood still can be asked afterwards what each of its threads was doing in here. A line is
+/// written by its own thread only.
+struct Crumb {
+    std::atomic<int32_t> tid;
+    std::atomic<int32_t> waiting;   ///< the lock it waits for (its number plus one); 0: none
+    std::atomic<uint32_t> held;     ///< the locks it holds, a bit each
+    std::atomic<uint32_t> step;     ///< how far it is in the hook: a line of this file; 0: just entered
+    std::atomic<uint64_t> calls;    ///< calls into the layer so far (a hook entered from inside one is the same call)
+    std::atomic<double> since;      ///< when the hook was entered; 0: in none (the name is then the last one's)
+    std::atomic<double> wait_since; ///< when the wait for the lock began
+    std::atomic<uint64_t> hook[2];  ///< the hook's name
+    std::atomic<uint64_t> lost;     ///< calls of this thread that never came back (see InHook)
+};
+static_assert(sizeof(Crumb) == 64, "a cache line each");
+/// (The first line is the file's head; the last is shared by the threads beyond that many.)
+constexpr uint32_t CRUMBS = 256;
+
+enum : uint8_t {
+    LOCK_LOG, LOCK_INPUTS, LOCK_MARK, LOCK_FG, LOCK_TABLES, LOCK_RECORDS, LOCK_INPUT, LOCK_CHAIN, LOCK_LIMITER,
+    LOCK_GATE, LOCK_TRACE, LOCK_SCAN, LOCK_HUD_PASS, LOCK_COUNT
+};
+const char* const LOCK_NAMES[LOCK_COUNT] = {"log",   "inputs",  "mark", "fg",    "tables", "records", "input",
+                                            "chain", "limiter", "gate", "trace", "scan",   "hud-pass"};
+
+Crumb* Crumbs() {
+    static Crumb* const table = [] {
+        static Crumb fallback[CRUMBS];
+        const size_t size = sizeof(Crumb) * CRUMBS + 512;
+        char path[600];
+        std::snprintf(path, sizeof path, "%s/THREADS-%d", Dir(), getpid());
+        const int fd = open(path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+        void* memory = fd >= 0 && ftruncate(fd, static_cast<off_t>(size)) == 0
+                           ? mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)
+                           : MAP_FAILED;
+        if (fd >= 0) {
+            close(fd);
+        }
+        if (memory == MAP_FAILED) {
+            return static_cast<Crumb*>(fallback);
+        }
+        // The head: what a reader needs to make sense of the rest (the times are Now()'s).
+        struct Head {
+            char magic[8];
+            int32_t pid;
+            uint32_t slots;
+            double wall_at_zero;
+        } head{{'S', 'C', 'F', 'G', 'T', 'H', 'R', '1'}, getpid(), CRUMBS, 0.0};
+        timespec wall{};
+        clock_gettime(CLOCK_REALTIME, &wall);
+        head.wall_at_zero = static_cast<double>(wall.tv_sec) + static_cast<double>(wall.tv_nsec) * 1e-9 - Now();
+        std::memcpy(memory, &head, sizeof head);
+        char* text = static_cast<char*>(memory) + sizeof(Crumb) * CRUMBS;
+        int n = std::snprintf(text, 512, "locks:");
+        for (const char* name : LOCK_NAMES) {
+            n += std::snprintf(text + n, static_cast<size_t>(512 - n), " %s", name);
+        }
+        return static_cast<Crumb*>(memory);
+    }();
+    return table;
+}
+
+class Lock;
+class InHook;
+/// What a thread knows about itself.
+struct Self {
+    Crumb* crumb{};
+    InHook* top{};  ///< the hook it is in (the innermost one)
+    Lock* held[8]{}; ///< the locks it holds
+    uint32_t held_count{};
+};
+constinit thread_local Self t_self{};
+std::atomic<uint32_t> g_crumbs_used{1};
+
+Self& Me() {
+    Self& self = t_self;
+    if (!self.crumb) [[unlikely]] {
+        const uint32_t slot = g_crumbs_used.fetch_add(1);
+        self.crumb = &Crumbs()[std::min(slot, CRUMBS - 1)];
+        self.crumb->tid.store(static_cast<int32_t>(syscall(SYS_gettid)), std::memory_order_relaxed);
+    }
+    return self;
+}
+
+/// A line into the log that takes no lock (one write): for what is said about the locks themselves.
+__attribute__((format(printf, 1, 2))) void RawLog(const char* format, ...) {
+    static const int fd = [] {
+        char path[600];
+        std::snprintf(path, sizeof path, "%s/fg-%d.log", Dir(), getpid());
+        return open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    }();
+    char line[900];
+    int n = std::snprintf(line, sizeof line, "%10.3f ", Now());
+    va_list args;
+    va_start(args, format);
+    const int more = std::vsnprintf(line + n, sizeof line - static_cast<size_t>(n) - 1, format, args);
+    va_end(args);
+    n = std::min(n + std::max(more, 0), static_cast<int>(sizeof line) - 2);
+    line[n++] = '\n';
+    if (fd >= 0 && write(fd, line, static_cast<size_t>(n)) < 0) {
+        // (nowhere to say it)
+    }
+}
+
+void HookName(const Crumb& c, char name[17]) {
+    const uint64_t words[2] = {c.hook[0].load(std::memory_order_relaxed), c.hook[1].load(std::memory_order_relaxed)};
+    std::memcpy(name, words, 16);
+    name[16] = 0;
+    if (!name[0]) {
+        std::strcpy(name, "-");
+    }
+}
+
+void LockNames(uint32_t held, char* text, size_t size) {
+    int n = 0;
+    text[0] = 0;
+    for (uint32_t i = 0; i < LOCK_COUNT && n < static_cast<int>(size) - 16; ++i) {
+        if (held & (1u << i)) {
+            n += std::snprintf(text + n, size - static_cast<size_t>(n), "%s%s", n ? "+" : "", LOCK_NAMES[i]);
+        }
+    }
+    if (!n) {
+        std::snprintf(text, size, "none");
+    }
+}
+
+/// A thread in words: its name and state as the system has them, and its line here. False: there is
+/// no such thread any more.
+bool Describe(int32_t tid, char* text, size_t size) {
+    char comm[32] = "?";
+    char state = '?';
+    bool there = true;
+    {
+        char path[64], stat[256];
+        std::snprintf(path, sizeof path, "/proc/self/task/%d/stat", tid);
+        const int fd = open(path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0) {
+            there = errno != ENOENT && errno != ESRCH;
+        } else {
+            const ssize_t n = read(fd, stat, sizeof stat - 1);
+            close(fd);
+            if (n > 0) {
+                stat[n] = 0;
+                const char* open_at = std::strchr(stat, '(');
+                const char* close_at = std::strrchr(stat, ')');
+                if (open_at && close_at && close_at > open_at) {
+                    const size_t length = std::min(static_cast<size_t>(close_at - open_at - 1), sizeof comm - 1);
+                    std::memcpy(comm, open_at + 1, length);
+                    comm[length] = 0;
+                    state = close_at[1] == ' ' ? close_at[2] : '?';
+                }
+            }
+        }
+    }
+    const Crumb* crumb = nullptr;
+    Crumb* const table = Crumbs();
+    const uint32_t used = std::min(g_crumbs_used.load(), CRUMBS);
+    for (uint32_t i = 1; i < used; ++i) {
+        if (table[i].tid.load(std::memory_order_relaxed) == tid) {
+            crumb = &table[i];
+        }
+    }
+    if (!there) {
+        std::snprintf(text, size, "thread %d, which no longer exists", tid);
+    } else if (!crumb) {
+        std::snprintf(text, size, "thread %d (%s, state %c), which has no line here", tid, comm, state);
+    } else {
+        char name[17], held[160];
+        HookName(*crumb, name);
+        LockNames(crumb->held.load(std::memory_order_relaxed), held, sizeof held);
+        const double since = crumb->since.load(std::memory_order_relaxed);
+        const int32_t waiting = crumb->waiting.load(std::memory_order_relaxed);
+        char in[80];
+        if (since > 0.0) {
+            std::snprintf(in, sizeof in, "in %s for %.3f s (line %u)", name, Now() - since,
+                          crumb->step.load(std::memory_order_relaxed));
+        } else {
+            std::snprintf(in, sizeof in, "in no hook (last: %s)", name);
+        }
+        std::snprintf(text, size, "thread %d (%s, state %c) %s, holding %s, waiting for %s", tid, comm, state, in, held,
+                      waiting > 0 && waiting <= LOCK_COUNT ? LOCK_NAMES[waiting - 1] : "none");
+    }
+    return there;
+}
+
+/// The layer's lock: a mutex that knows who holds it. A thread that waits for one for a second
+/// says so in the log, with what the holder is doing. A holder that will never let go (a thread
+/// that no longer exists, or one whose call into the layer never came back: see InHook) is found
+/// out by the thread that waits, which then takes the lock over: the game is not to stand still
+/// for good on a lock nobody holds.
+class Lock {
+public:
+    constexpr explicit Lock(uint8_t id) : id_{id} {}
+    Lock(const Lock&) = delete;
+    Lock& operator=(const Lock&) = delete;
+
+    void lock() {
+        Self& self = Me();
+        if (pthread_mutex_trylock(&mutex_) != 0) {
+            Wait(self, -1.0);
+        }
+        Got(self);
+    }
+    bool try_lock() {
+        Self& self = Me();
+        if (pthread_mutex_trylock(&mutex_) != 0) {
+            return false;
+        }
+        Got(self);
+        return true;
+    }
+    /// False: not to be had in that time; nothing is held then.
+    bool lock_for(double seconds) {
+        Self& self = Me();
+        if (pthread_mutex_trylock(&mutex_) != 0 && !Wait(self, seconds)) {
+            return false;
+        }
+        Got(self);
+        return true;
+    }
+    void unlock() {
+        Self& self = t_self;
+        Crumb& c = *self.crumb;
+        for (uint32_t i = self.held_count; i-- > 0;) {
+            if (self.held[i] == this) {
+                self.held[i] = self.held[--self.held_count];
+                break;
+            }
+        }
+        c.held.store(c.held.load(std::memory_order_relaxed) & ~(1u << id_), std::memory_order_relaxed);
+        owner_.store(0, std::memory_order_release);
+        pthread_mutex_unlock(&mutex_);
+    }
+    /// The thread that holds it lost the call it was taken in (see InHook): let go for it, by itself.
+    void LetGoLost(int32_t tid) {
+        int32_t expected = tid;
+        if (owner_.compare_exchange_strong(expected, 0)) {
+            pthread_mutex_unlock(&mutex_);
+            RawLog("lock %s: let go, for the call that never came back", LOCK_NAMES[id_]);
+        }
+    }
+    const char* name() const {
+        return LOCK_NAMES[id_];
+    }
+
+private:
+    void Got(Self& self) {
+        Crumb& c = *self.crumb;
+        owner_calls_.store(c.calls.load(std::memory_order_relaxed), std::memory_order_relaxed);
+        turns_.store(turns_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        owner_.store(c.tid.load(std::memory_order_relaxed), std::memory_order_release);
+        if (self.held_count < 8) {
+            self.held[self.held_count++] = this;
+        }
+        c.held.store(c.held.load(std::memory_order_relaxed) | (1u << id_), std::memory_order_relaxed);
+    }
+    bool Wait(Self& self, double limit);
+
+    pthread_mutex_t mutex_ = PTHREAD_MUTEX_INITIALIZER;
+    std::atomic<int32_t> owner_{};        ///< the thread that holds it; 0: nobody; below 0: being taken over
+    std::atomic<uint32_t> turns_{};       ///< how often it has been taken
+    std::atomic<uint64_t> owner_calls_{}; ///< the holder's count of calls into the layer when it took it
+    const uint8_t id_;
+};
+
+/// The lock is held. `limit` >= 0: for at most that long (false: not got).
+__attribute__((noinline)) bool Lock::Wait(Self& self, double limit) {
+    Crumb& c = *self.crumb;
+    const int32_t me = c.tid.load(std::memory_order_relaxed);
+    const double start = Now();
+    c.wait_since.store(start, std::memory_order_relaxed);
+    c.waiting.store(id_ + 1, std::memory_order_relaxed);
+    double say_at = 1.0;
+    bool got = false, said = false;
+    int32_t lost_owner = 0; // the holder found lost at the last look, with the lock not taken since
+    uint32_t lost_turn = 0;
+    bool lost_seen = false;
+    for (;;) {
+        double slice = 0.25;
+        if (limit >= 0.0) {
+            const double left = start + limit - Now();
+            if (left <= 0.0) {
+                break;
+            }
+            slice = std::min(slice, left);
+        }
+        timespec until{};
+        clock_gettime(CLOCK_MONOTONIC, &until);
+        const long nanoseconds = until.tv_nsec + static_cast<long>(slice * 1e9);
+        until.tv_sec += nanoseconds / 1000000000L;
+        until.tv_nsec = nanoseconds % 1000000000L;
+        if (pthread_mutex_clocklock(&mutex_, CLOCK_MONOTONIC, &until) == 0) {
+            got = true;
+            break;
+        }
+        const double waited = Now() - start;
+        const int32_t owner = owner_.load(std::memory_order_acquire);
+        const uint32_t turn = turns_.load(std::memory_order_relaxed);
+        const uint64_t owner_calls = owner_calls_.load(std::memory_order_relaxed);
+        // Will the holder ever let go? Not if there is none (a thread torn out of the middle of
+        // taking it), if it is this very thread (in a call that never came back), if it no
+        // longer exists, or if it has begun another call into the layer since it took the lock:
+        // locks are let go before a call returns.
+        const char* lost = nullptr;
+        char holder[400] = "nobody";
+        if (owner == 0) {
+            lost = "held by nobody";
+        } else if (owner == me) {
+            lost = "held by this very thread, from a call that never came back";
+        } else if (owner > 0) {
+            if (!Describe(owner, holder, sizeof holder)) {
+                lost = "its holder no longer exists";
+            } else {
+                Crumb* const table = Crumbs();
+                const uint32_t used = std::min(g_crumbs_used.load(), CRUMBS - 1);
+                for (uint32_t i = 1; i < used; ++i) {
+                    if (table[i].tid.load(std::memory_order_relaxed) == owner &&
+                        table[i].calls.load(std::memory_order_relaxed) != owner_calls) {
+                        lost = "its holder left the call it took it in without letting go";
+                    }
+                }
+            }
+        }
+        if (waited >= say_at) {
+            char mine[400];
+            Describe(me, mine, sizeof mine);
+            RawLog("lock %s: waited for %.1f s by %s. Held by %s%s%s", LOCK_NAMES[id_], waited, mine, holder,
+                   lost ? ": " : "", lost ? lost : "");
+            say_at = say_at < 4.0 ? 5.0 : say_at < 19.0 ? 20.0 : say_at + 60.0;
+            said = true;
+        }
+        // Taken over when that was found twice in a row, a quarter of a second apart, with the
+        // lock not taken by anybody in between. One thread does it (the others go on waiting).
+        if (lost && lost_seen && lost_owner == owner && lost_turn == turn && waited >= 0.45) {
+            int32_t expected = owner;
+            if (owner_.compare_exchange_strong(expected, -me)) {
+                RawLog("lock %s: %s (%s). Taken over by thread %d after %.2f s", LOCK_NAMES[id_], lost, holder, me,
+                       waited);
+                pthread_mutex_unlock(&mutex_);
+                said = true;
+            }
+            lost_seen = false;
+        } else {
+            lost_seen = lost != nullptr;
+            lost_owner = owner;
+            lost_turn = turn;
+        }
+    }
+    c.waiting.store(0, std::memory_order_relaxed);
+    if (said || (!got && limit >= 0.0)) {
+        static std::atomic<uint32_t> told{};
+        if (said || told.fetch_add(1) < 40) {
+            char holder[400] = "nobody";
+            const int32_t owner = owner_.load(std::memory_order_acquire);
+            if (!got && owner > 0) {
+                Describe(owner, holder, sizeof holder);
+            }
+            if (got) {
+                RawLog("lock %s: thread %d has it after %.2f s", LOCK_NAMES[id_], me, Now() - start);
+            } else {
+                RawLog("lock %s: thread %d went on without it after %.2f s. Held by %s", LOCK_NAMES[id_], me,
+                       Now() - start, holder);
+            }
+        }
+    }
+    return got;
+}
+
+/// A lock held for a scope if it can be had in time (see Lock::lock_for), for what is better left
+/// out than waited for: `if (HeldFor lock{mutex, 0.25}; lock) { ... }`.
+class HeldFor {
+public:
+    HeldFor(Lock& lock, double seconds) : lock_{lock}, held_{lock.lock_for(seconds)} {}
+    ~HeldFor() {
+        if (held_) {
+            lock_.unlock();
+        }
+    }
+    HeldFor(const HeldFor&) = delete;
+    HeldFor& operator=(const HeldFor&) = delete;
+    explicit operator bool() const {
+        return held_;
+    }
+
+private:
+    Lock& lock_;
+    const bool held_;
+};
+
+struct Name16 {
+    uint64_t a{}, b{};
+};
+consteval Name16 Tag(const char* text) {
+    Name16 name;
+    for (int i = 0; i < 16 && text[i]; ++i) {
+        (i < 8 ? name.a : name.b) |= static_cast<uint64_t>(static_cast<unsigned char>(text[i])) << (8 * (i % 8));
+    }
+    return name;
+}
+
+/// A hook is being run, from its first line to its return: the thread's line says which.
+///
+/// Wine can take a thread out of a call for good: when something goes wrong in it (a fault), the
+/// call "returns" to the game with an error and whatever it was doing here is simply dropped,
+/// with the locks it held still locked. The next hook the thread enters finds that out: it begins
+/// at or above the place on the stack where the hook that never returned was, which a hook entered
+/// from inside one never does. The locks are then let go, and it is said in the log.
+class InHook {
+public:
+    explicit InHook(Name16 name) : self_{Me()} {
+        Crumb& c = *self_.crumb;
+        InHook* outer = self_.top;
+        if (outer && reinterpret_cast<uintptr_t>(this) >= reinterpret_cast<uintptr_t>(outer)) [[unlikely]] {
+            Lost();
+            outer = nullptr;
+        }
+        outer_ = outer;
+        self_.top = this;
+        if (outer) {
+            name_[0] = c.hook[0].load(std::memory_order_relaxed);
+            name_[1] = c.hook[1].load(std::memory_order_relaxed);
+            since_ = c.since.load(std::memory_order_relaxed);
+            step_ = c.step.load(std::memory_order_relaxed);
+        } else {
+            c.calls.store(c.calls.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        }
+        c.hook[0].store(name.a, std::memory_order_relaxed);
+        c.hook[1].store(name.b, std::memory_order_relaxed);
+        c.step.store(0, std::memory_order_relaxed);
+        c.since.store(Now(), std::memory_order_relaxed);
+    }
+    ~InHook() {
+        Crumb& c = *self_.crumb;
+        self_.top = outer_;
+        if (outer_) {
+            c.hook[0].store(name_[0], std::memory_order_relaxed);
+            c.hook[1].store(name_[1], std::memory_order_relaxed);
+            c.step.store(step_, std::memory_order_relaxed);
+            c.since.store(since_, std::memory_order_relaxed);
+        } else {
+            c.since.store(0.0, std::memory_order_relaxed);
+        }
+    }
+    InHook(const InHook&) = delete;
+    InHook& operator=(const InHook&) = delete;
+
+private:
+    __attribute__((noinline)) void Lost() {
+        Crumb& c = *self_.crumb;
+        char name[17], held[160];
+        HookName(c, name);
+        LockNames(c.held.load(std::memory_order_relaxed), held, sizeof held);
+        const int32_t waiting = c.waiting.load(std::memory_order_relaxed);
+        RawLog("thread %d: its call into %s, entered %.3f s ago (line %u), never came back. It held: %s; it waited "
+               "for: %s",
+               c.tid.load(std::memory_order_relaxed), name, Now() - c.since.load(std::memory_order_relaxed),
+               c.step.load(std::memory_order_relaxed), held,
+               waiting > 0 && waiting <= LOCK_COUNT ? LOCK_NAMES[waiting - 1] : "none");
+        const int32_t tid = c.tid.load(std::memory_order_relaxed);
+        for (uint32_t i = self_.held_count; i-- > 0;) {
+            self_.held[i]->LetGoLost(tid);
+        }
+        self_.held_count = 0;
+        c.held.store(0, std::memory_order_relaxed);
+        c.waiting.store(0, std::memory_order_relaxed);
+        c.lost.store(c.lost.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+    }
+
+    Self& self_;
+    InHook* outer_{};
+    uint64_t name_[2]{};
+    double since_{};
+    uint32_t step_{};
+};
+#define IN_HOOK(name) InHook in_hook_{Tag(name)}
+/// How far the hook has come: this line.
+#define STEP() Me().crumb->step.store(__LINE__, std::memory_order_relaxed)
+
+Lock g_log_mutex{LOCK_LOG};
+
+/// Tests only (SC_FG_TEST_LOCKS=1, run once when the first instance is made): the ways out of a
+/// lock whose holder never lets go, and that a holder at work is waited for and left alone.
+__attribute__((noinline)) void TestLostCall(Lock& lock, jmp_buf& out) {
+    IN_HOOK("TestLost");
+    lock.lock();
+    STEP();
+    longjmp(out, 1); // (as Wine does it: the call is dropped where it stands)
+}
+void TestLocks() {
+    static Lock gone{LOCK_SCAN}, busy{LOCK_TRACE}, lost{LOCK_HUD_PASS};
+    std::thread{[] { gone.lock(); }}.join();
+    double start = Now();
+    gone.lock();
+    RawLog("locks test 1: the lock of a thread that ended was had after %.2f s", Now() - start);
+    gone.unlock();
+
+    std::thread worker{[] {
+        IN_HOOK("TestWork");
+        busy.lock();
+        usleep(1600000);
+        busy.unlock();
+    }};
+    usleep(100000);
+    start = Now();
+    const bool at_once = busy.lock_for(0.25);
+    RawLog("locks test 2: the lock of a thread at work was %s in 0.25 s", at_once ? "HAD" : "not had");
+    if (at_once) {
+        busy.unlock();
+    }
+    busy.lock();
+    RawLog("locks test 2: ... and had after %.2f s", Now() - start);
+    busy.unlock();
+    worker.join();
+
+    std::thread{[] {
+        jmp_buf out;
+        if (!setjmp(out)) {
+            TestLostCall(lost, out);
+        }
+        const double begun = Now();
+        {
+            IN_HOOK("TestNext");
+            lost.lock();
+            RawLog("locks test 3: the lock of a call that never came back was had by its own thread after %.2f s",
+                   Now() - begun);
+            lost.unlock();
+        }
+    }}.join();
+
+    // The same, with another thread waiting before the one that lost its call comes back.
+    std::atomic<bool> held{false};
+    std::thread again{[&held] {
+        jmp_buf out;
+        if (!setjmp(out)) {
+            TestLostCall(lost, out);
+        }
+        held = true;
+        usleep(700000);
+        IN_HOOK("TestNext");
+    }};
+    while (!held) {
+        usleep(1000);
+    }
+    start = Now();
+    lost.lock();
+    RawLog("locks test 4: the lock of a call that never came back was had by a waiting thread after %.2f s",
+           Now() - start);
+    lost.unlock();
+    again.join();
+    RawLog("locks test: done");
+}
 FILE* g_log{};
 
 void Log(const char* format, ...) {
@@ -161,6 +728,9 @@ const bool g_trace = EnvFloat("SC_FG_TRACE", 0.0f) != 0.0f;
 const bool g_hud_capture = EnvFloat("SC_FG_HUD_CAPTURE", 1.0f) != 0.0f;
 std::atomic<double> g_trace_until{0.0};
 void TraceCount(VkCommandBuffer cmd, int kind);
+struct Device;
+void ForgetHudPass(VkCommandBuffer cmd);
+void ForgetImage(Device& d, VkImage image);
 void TracePresent(uint32_t device, VkQueue queue);
 extern std::atomic<bool> g_scan_armed;
 void ScanWrite();
@@ -230,7 +800,7 @@ struct Candidate {
 
 /// DLSS's inputs as last seen, and this layer's copies of the vectors and the depth.
 struct Inputs {
-    std::mutex mutex;
+    Lock mutex{LOCK_INPUTS};
     uint64_t depth{};
     uint32_t width{}, height{};
     VkFormat depth_format{};
@@ -321,7 +891,7 @@ struct Device {
     Imports imports;
     ChainFrame chain; ///< the frame whose hand-over was submitted last on this device (g_chain_mutex)
     // A fence behind the frame's submit tells when the GPU is done with it (MarkGpu).
-    std::mutex mark_mutex;
+    Lock mark_mutex{LOCK_MARK};
     VkFence mark_fences[4]{};
     bool mark_busy[4]{};
     int mark_current{-1};
@@ -337,7 +907,7 @@ struct Device {
         uint32_t serial{};
     } drawn[8];
     double mark_time{};
-    std::mutex fg_mutex;
+    Lock fg_mutex{LOCK_FG};
     std::unordered_map<uint64_t, Fg*> swapchains;
     uint32_t index{}; ///< order of creation, for the trace
 #define X(name) PFN_vk##name Trace##name{};
@@ -357,16 +927,16 @@ struct ViewRecord {
     VkImageAspectFlags aspect{};
 };
 
-std::mutex g_tables_mutex;
+Lock g_tables_mutex{LOCK_TABLES};
 std::unordered_map<void*, Instance*> g_instances;
 std::unordered_map<void*, Device*> g_devices;
 std::unordered_map<uint64_t, std::pair<Device*, uint32_t>> g_queues; ///< queue -> device, family
 std::unordered_map<uint64_t, Device*> g_command_buffers;
-std::mutex g_records_mutex;
+Lock g_records_mutex{LOCK_RECORDS};
 std::unordered_map<uint64_t, ImageRecord> g_images;
 std::unordered_map<uint64_t, ViewRecord> g_views;
 /// The device DLSS runs on (the last one that copied inputs).
-std::mutex g_input_mutex;
+Lock g_input_mutex{LOCK_INPUT};
 Device* g_input_device{};
 std::atomic<Device*> g_input_device_hint{};
 /// The device FidelityFX works on: AMD's backend calls a few Vulkan functions by name (below).
@@ -377,8 +947,22 @@ Instance* GetInstance(void* key) {
     const auto it = g_instances.find(key);
     return it == g_instances.end() ? nullptr : it->second;
 }
+/// The devices once more, for the look every hook begins with: read without a lock, so that no
+/// hook waits for another thread (or for one that is being kept from running) before it has begun.
+struct DeviceSlot {
+    std::atomic<void*> key{};
+    std::atomic<Device*> device{};
+};
+DeviceSlot g_device_slots[16];
 Device* GetDevice(void* key) {
-    std::lock_guard lock{g_tables_mutex};
+    for (const DeviceSlot& slot : g_device_slots) {
+        if (slot.key.load(std::memory_order_acquire) == key) {
+            if (Device* const d = slot.device.load(std::memory_order_acquire)) {
+                return d;
+            }
+        }
+    }
+    std::lock_guard lock{g_tables_mutex}; // (more devices than slots, or none such)
     const auto it = g_devices.find(key);
     return it == g_devices.end() ? nullptr : it->second;
 }
@@ -559,6 +1143,9 @@ VkImageCopy WholeCopy(uint32_t width, uint32_t height) {
 
 // ----------------------------------------------------------------------------- DLSS inputs
 
+/// How long a call of the game's that only passes through here waits for one of the layer's locks.
+constexpr double PATIENCE = 0.25;
+
 /// Every view the game hands to the driver. `handle32`: asked through vkGetImageViewHandleNVX.
 /// An evaluation is a run of 32-bit handle requests, the input views, kernel launches (with more
 /// view requests in between) and one closing 32-bit request; so the first 32-bit request after
@@ -567,7 +1154,12 @@ void NoteView(Device& d, VkImageView view, VkDescriptorType type, bool handle32)
     ViewRecord view_record;
     ImageRecord image_record;
     {
-        std::lock_guard lock{g_records_mutex};
+        // (DLSS is in the middle of the game's frame: what is noted here is not worth holding it
+        // for. A lock that is not to be had at once costs this evaluation's inputs, no more.)
+        const HeldFor lock{g_records_mutex, PATIENCE};
+        if (!lock) {
+            return;
+        }
         const auto view_it = g_views.find(U64(view));
         if (view_it == g_views.end()) {
             ++d.inputs.n_unknown_view;
@@ -582,7 +1174,10 @@ void NoteView(Device& d, VkImageView view, VkDescriptorType type, bool handle32)
     }
     Inputs& in = d.inputs;
     ++(handle32 ? in.n_handle32 : in.n_handle64);
-    std::lock_guard lock{in.mutex};
+    const HeldFor lock{in.mutex, PATIENCE};
+    if (!lock) {
+        return;
+    }
     if (handle32 && in.launched) {
         ++in.n_fresh;
         in.fresh = true;
@@ -616,7 +1211,10 @@ void CopyInputs(Device& d, VkCommandBuffer cmd) {
         g_input_device = &d;
         g_input_device_hint = &d;
     }
-    std::lock_guard lock{in.mutex};
+    const HeldFor lock{in.mutex, PATIENCE};
+    if (!lock) {
+        return;
+    }
     ++in.n_copy_calls;
     if (!in.fresh) {
         ++in.n_not_fresh;
@@ -753,6 +1351,7 @@ void Stage(int stage) {
     if (map) {
         std::snprintf(map, 64, "stage %d since %.3f\n", stage, Now());
     }
+    Me().crumb->step.store(900000u + static_cast<uint32_t>(stage), std::memory_order_relaxed); // (see Crumb)
 }
 
 /// The copy to use at a present: the newest submitted one, or (when submits are not seen, or it
@@ -833,7 +1432,7 @@ bool NoteSubmitted(Device& d, const VkCommandBuffer* buffers, size_t count) {
 // copy is recorded are that frame's; the copy's command buffer carries them to its submit, and the
 // last hand-over submitted before a present is the frame that present shows.
 
-std::mutex g_chain_mutex;
+Lock g_chain_mutex{LOCK_CHAIN};
 std::unordered_map<uint64_t, ChainFrame> g_chain_tags; ///< command buffer of a hand-over copy -> its frame
 std::atomic<bool> g_chain_pending{};
 std::atomic<uint64_t> g_chain_count{};
@@ -933,7 +1532,7 @@ struct Limiter {
     /// behind the presents (after a hitch, say), each of them a frame time of delay. (For where
     /// the timer is all there is; where the gate is at work nothing queues.)
     std::atomic<double> queued{};
-    std::mutex mutex;
+    Lock mutex{LOCK_LIMITER};
     double last_release{};
     double last_on{}; ///< when the last frame went on, held or not
     /// The frame let on last was held by the timer and went on at the timer's moment: the game
@@ -961,8 +1560,8 @@ struct Limiter {
     uint32_t own_count{};
 
     // The present hook's progress, for the gate.
-    std::mutex gate_mutex;
-    std::condition_variable gate;
+    Lock gate_mutex{LOCK_GATE};
+    std::condition_variable_any gate;
     uint64_t hook_frame{}; ///< the frame (its hand-over's number) whose present hook was entered last
     bool in_hook{};        ///< ... and has not returned yet
     bool hook_generating{}; ///< ... and has frames of its own to show
@@ -1301,6 +1900,9 @@ void LimitFrame(Device& input, ChainFrame& frame) {
             const double usual = target(now);
             // (A probe is not for a frame that waits for a hook to begin: that is no time of day.)
             when = probe > 0.0 && !for_hook ? std::max(usual - probe, start) : usual;
+            if (!(when <= deadline + 0.001)) {
+                when = now; // (not a number, or past the longest wait there is: the frame goes on)
+            }
             by_gate = usual > due + 0.0002;
             if (now >= when - 0.00005) {
                 early = probe > 0.0 && !for_hook ? std::max(usual - now, 0.0) : 0.0;
@@ -1517,6 +2119,9 @@ bool WaitForGenerated(Device& d) {
         // the wait may take what the limiter would make the game wait, and no more.
         std::lock_guard lock{l.mutex};
         until = std::min(l.last_release + interval - 0.0005 - l.lead.load(), limit);
+        if (!(until <= limit)) {
+            until = limit; // (not a number)
+        }
         by_timer = l.last_timed;
     }
     const bool gpu_tells = start >= g_gpu_wait_off_until.load(); // (see GpuWaited)
@@ -3662,6 +4267,13 @@ float PanelRate(const float* ring, uint32_t count, uint32_t size) {
 /// so that a key press shows at once; read only when it has changed. It is left where it is: the
 /// panel comes back as it was with the next launch.
 void ReadPanelRequest(Fg& fg, double now) {
+    // Only where it was asked for at launch (SC_FG_PANEL=1). Without that the control file is not
+    // even looked at and the panel never comes into being: a frame-rate display that sits below
+    // this layer (MangoHud) counts the generated frames as well and needs nothing from here.
+    static const bool wanted = EnvFloat("SC_FG_PANEL", 0.0f) != 0.0f;
+    if (!wanted) {
+        return;
+    }
     Fg::Panel& panel = fg.panel;
     if (now - panel.checked < 0.05) {
         return;
@@ -4245,9 +4857,10 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
                                       ? fg.ready_seconds + fg.generated * refresh * (gate ? 0.97 : 1.0) + fg.tail_seconds +
                                             (gate ? 0.0 : 0.0005)
                                       : 0.0;
-        g_limiter.interval = cap && !fg.no_cap && !fg.off && !fg.failed && fg.modified
-                                 ? std::max(shown_per_frame * refresh, hook_least)
-                                 : 0.0;
+        const double wanted = cap && !fg.no_cap && !fg.off && !fg.failed && fg.modified
+                                    ? std::max(shown_per_frame * refresh, hook_least)
+                                    : 0.0;
+        g_limiter.interval = wanted > 0.0 && wanted < 1.0 ? wanted : 0.0; // (and no number that is none)
         g_limiter.published = now;
     }
     const bool fallback = EnvFloat("SC_FG_FALLBACK", 0.0f) != 0.0f;
@@ -5121,6 +5734,7 @@ bool PassWithPanel(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPr
 // ----------------------------------------------------------------------------- hooks
 
 VKAPI_ATTR void VKAPI_CALL HookGetDeviceQueue(VkDevice device, uint32_t family, uint32_t index, VkQueue* queue) {
+    IN_HOOK("GetDeviceQueue");
     Device* d = GetDevice(Key(device));
     d->GetDeviceQueue(device, family, index, queue);
     if (*queue) {
@@ -5130,6 +5744,7 @@ VKAPI_ATTR void VKAPI_CALL HookGetDeviceQueue(VkDevice device, uint32_t family, 
 }
 
 VKAPI_ATTR void VKAPI_CALL HookGetDeviceQueue2(VkDevice device, const VkDeviceQueueInfo2* info, VkQueue* queue) {
+    IN_HOOK("GetDeviceQueue2");
     Device* d = GetDevice(Key(device));
     d->GetDeviceQueue2(device, info, queue);
     if (*queue) {
@@ -5140,6 +5755,7 @@ VKAPI_ATTR void VKAPI_CALL HookGetDeviceQueue2(VkDevice device, const VkDeviceQu
 
 VKAPI_ATTR VkResult VKAPI_CALL HookAllocateCommandBuffers(VkDevice device, const VkCommandBufferAllocateInfo* info,
                                                           VkCommandBuffer* buffers) {
+    IN_HOOK("AllocCmdBuffers");
     Device* d = GetDevice(Key(device));
     const VkResult result = d->AllocateCommandBuffers(device, info, buffers);
     if (result == VK_SUCCESS) {
@@ -5153,11 +5769,17 @@ VKAPI_ATTR VkResult VKAPI_CALL HookAllocateCommandBuffers(VkDevice device, const
 
 VKAPI_ATTR void VKAPI_CALL HookFreeCommandBuffers(VkDevice device, VkCommandPool pool, uint32_t count,
                                                   const VkCommandBuffer* buffers) {
+    IN_HOOK("FreeCmdBuffers");
     Device* d = GetDevice(Key(device));
     if (buffers) {
-        std::lock_guard lock{g_tables_mutex};
+        {
+            std::lock_guard lock{g_tables_mutex};
+            for (uint32_t i = 0; i < count; ++i) {
+                g_command_buffers.erase(U64(buffers[i]));
+            }
+        }
         for (uint32_t i = 0; i < count; ++i) {
-            g_command_buffers.erase(U64(buffers[i]));
+            ForgetHudPass(buffers[i]);
         }
     }
     d->FreeCommandBuffers(device, pool, count, buffers);
@@ -5165,6 +5787,7 @@ VKAPI_ATTR void VKAPI_CALL HookFreeCommandBuffers(VkDevice device, VkCommandPool
 
 VKAPI_ATTR VkResult VKAPI_CALL HookCreateImage(VkDevice device, const VkImageCreateInfo* info,
                                                const VkAllocationCallbacks* allocator, VkImage* image) {
+    IN_HOOK("CreateImage");
     Device* d = GetDevice(Key(device));
     const VkResult result = d->CreateImage(device, info, allocator, image);
     if (result == VK_SUCCESS && info->imageType == VK_IMAGE_TYPE_2D) {
@@ -5179,16 +5802,21 @@ VKAPI_ATTR VkResult VKAPI_CALL HookCreateImage(VkDevice device, const VkImageCre
 }
 
 VKAPI_ATTR void VKAPI_CALL HookDestroyImage(VkDevice device, VkImage image, const VkAllocationCallbacks* allocator) {
+    IN_HOOK("DestroyImage");
     Device* d = GetDevice(Key(device));
     {
         std::lock_guard lock{g_records_mutex};
         g_images.erase(U64(image));
+    }
+    if (image) {
+        ForgetImage(*d, image);
     }
     d->DestroyImage(device, image, allocator);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL HookCreateImageView(VkDevice device, const VkImageViewCreateInfo* info,
                                                    const VkAllocationCallbacks* allocator, VkImageView* view) {
+    IN_HOOK("CreateImageView");
     Device* d = GetDevice(Key(device));
     const VkResult result = d->CreateImageView(device, info, allocator, view);
     if (result == VK_SUCCESS) {
@@ -5207,6 +5835,7 @@ VKAPI_ATTR VkResult VKAPI_CALL HookCreateImageView(VkDevice device, const VkImag
 
 VKAPI_ATTR void VKAPI_CALL HookDestroyImageView(VkDevice device, VkImageView view,
                                                 const VkAllocationCallbacks* allocator) {
+    IN_HOOK("DestroyImageView");
     Device* d = GetDevice(Key(device));
     {
         std::lock_guard lock{g_records_mutex};
@@ -5221,6 +5850,7 @@ VKAPI_ATTR void VKAPI_CALL HookCmdPipelineBarrier(VkCommandBuffer cmd, VkPipelin
                                                   uint32_t memory_count, const VkMemoryBarrier* memory,
                                                   uint32_t buffer_count, const VkBufferMemoryBarrier* buffers,
                                                   uint32_t image_count, const VkImageMemoryBarrier* images) {
+    IN_HOOK("PipelineBarrier");
     Device* d = DeviceOfCommandBuffer(cmd);
     if (!memory_count && !buffer_count && !image_count) {
         CopyInputs(*d, cmd);
@@ -5230,26 +5860,31 @@ VKAPI_ATTR void VKAPI_CALL HookCmdPipelineBarrier(VkCommandBuffer cmd, VkPipelin
 }
 
 VKAPI_ATTR uint32_t VKAPI_CALL HookGetImageViewHandleNVX(VkDevice device, const VkImageViewHandleInfoNVX* info) {
+    IN_HOOK("ViewHandle32");
     Device* d = GetDevice(Key(device));
     NoteView(*d, info->imageView, info->descriptorType, true);
+    STEP(); // (from here on it is the driver's)
     return d->GetImageViewHandleNVX(device, info);
 }
 
 VKAPI_ATTR uint64_t VKAPI_CALL HookGetImageViewHandle64NVX(VkDevice device, const VkImageViewHandleInfoNVX* info) {
+    IN_HOOK("ViewHandle64");
     Device* d = GetDevice(Key(device));
     NoteView(*d, info->imageView, info->descriptorType, false);
+    STEP();
     return d->GetImageViewHandle64NVX(device, info);
 }
 
 VKAPI_ATTR void VKAPI_CALL HookCmdCuLaunchKernelNVX(VkCommandBuffer cmd, const VkCuLaunchInfoNVX* info) {
+    IN_HOOK("LaunchKernel");
     Device* d = DeviceOfCommandBuffer(cmd);
     CopyInputs(*d, cmd);
     TraceCount(cmd, 2);
-    {
-        std::lock_guard lock{d->inputs.mutex};
+    if (const HeldFor lock{d->inputs.mutex, PATIENCE}; lock) {
         d->inputs.launched = true;
         ++d->inputs.n_launch;
     }
+    STEP();
     d->CmdCuLaunchKernelNVX(cmd, info);
 }
 
@@ -5258,6 +5893,7 @@ VKAPI_ATTR void VKAPI_CALL HookCmdCuLaunchKernelNVX(VkCommandBuffer cmd, const V
 // its input, not after the frame is drawn.
 VKAPI_ATTR VkResult VKAPI_CALL HookSetLatencySleepModeNV(VkDevice device, VkSwapchainKHR swapchain,
                                                          const VkLatencySleepModeInfoNV* info) {
+    IN_HOOK("LatencySleepMode");
     Device* d = GetDevice(Key(device));
     static std::atomic<uint32_t> logged{};
     if (logged.fetch_add(1) < 16) {
@@ -5274,6 +5910,7 @@ VKAPI_ATTR VkResult VKAPI_CALL HookSetLatencySleepModeNV(VkDevice device, VkSwap
 
 VKAPI_ATTR VkResult VKAPI_CALL HookLatencySleepNV(VkDevice device, VkSwapchainKHR swapchain,
                                                   const VkLatencySleepInfoNV* info) {
+    IN_HOOK("LatencySleep");
     Device* d = GetDevice(Key(device));
     if (g_latency_sleeps.fetch_add(1) == 0) {
         static std::atomic<uint32_t> logged{};
@@ -5287,6 +5924,7 @@ VKAPI_ATTR VkResult VKAPI_CALL HookLatencySleepNV(VkDevice device, VkSwapchainKH
 
 VKAPI_ATTR void VKAPI_CALL HookSetLatencyMarkerNV(VkDevice device, VkSwapchainKHR swapchain,
                                                   const VkSetLatencyMarkerInfoNV* info) {
+    IN_HOOK("LatencyMarker");
     Device* d = GetDevice(Key(device));
     g_latency_markers.fetch_add(1);
     static std::atomic<uint32_t> seen{};
@@ -5303,6 +5941,7 @@ VKAPI_ATTR void VKAPI_CALL HookSetLatencyMarkerNV(VkDevice device, VkSwapchainKH
 VKAPI_ATTR VkResult VKAPI_CALL HookCreateSwapchainKHR(VkDevice device, const VkSwapchainCreateInfoKHR* info,
                                                       const VkAllocationCallbacks* allocator,
                                                       VkSwapchainKHR* swapchain) {
+    IN_HOOK("CreateSwapchain");
     Device* d = GetDevice(Key(device));
     const bool wanted = d->nvx || g_test_inputs || EnvFloat("SC_FG_FALLBACK", 0.0f) != 0.0f;
     VkSwapchainCreateInfoKHR changed = *info;
@@ -5485,6 +6124,7 @@ void DestroyFg(Device& d, Fg* fg) {
 
 VKAPI_ATTR void VKAPI_CALL HookDestroySwapchainKHR(VkDevice device, VkSwapchainKHR swapchain,
                                                    const VkAllocationCallbacks* allocator) {
+    IN_HOOK("DestroySwapchain");
     Device* d = GetDevice(Key(device));
     Fg* fg = nullptr;
     {
@@ -5501,6 +6141,7 @@ VKAPI_ATTR void VKAPI_CALL HookDestroySwapchainKHR(VkDevice device, VkSwapchainK
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL HookQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* info) {
+    IN_HOOK("QueuePresent");
     Device* d = nullptr;
     uint32_t family = 0;
     {
@@ -5567,6 +6208,14 @@ VKAPI_ATTR VkResult VKAPI_CALL HookQueuePresentKHR(VkQueue queue, const VkPresen
 
 VKAPI_ATTR VkResult VKAPI_CALL HookCreateInstance(const VkInstanceCreateInfo* info,
                                                   const VkAllocationCallbacks* allocator, VkInstance* instance) {
+    IN_HOOK("CreateInstance");
+    static const bool tested = [] {
+        if (EnvFloat("SC_FG_TEST_LOCKS", 0.0f) != 0.0f) {
+            TestLocks();
+        }
+        return true;
+    }();
+    (void)tested;
     auto* link = static_cast<VkLayerInstanceCreateInfo*>(const_cast<void*>(info->pNext));
     while (link && !(link->sType == VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO && link->function == VK_LAYER_LINK_INFO)) {
         link = static_cast<VkLayerInstanceCreateInfo*>(const_cast<void*>(link->pNext));
@@ -5602,6 +6251,7 @@ VKAPI_ATTR VkResult VKAPI_CALL HookCreateInstance(const VkInstanceCreateInfo* in
 }
 
 VKAPI_ATTR void VKAPI_CALL HookDestroyInstance(VkInstance instance, const VkAllocationCallbacks* allocator) {
+    IN_HOOK("DestroyInstance");
     if (!instance) {
         return;
     }
@@ -5621,6 +6271,7 @@ VKAPI_ATTR void VKAPI_CALL HookDestroyInstance(VkInstance instance, const VkAllo
 
 VKAPI_ATTR VkResult VKAPI_CALL HookCreateDevice(VkPhysicalDevice physical, const VkDeviceCreateInfo* info,
                                                 const VkAllocationCallbacks* allocator, VkDevice* device) {
+    IN_HOOK("CreateDevice");
     PFN_vkGetInstanceProcAddr gipa{};
     PFN_vkGetDeviceProcAddr gdpa{};
     PFN_vkSetDeviceLoaderData set_loader_data{};
@@ -5683,10 +6334,18 @@ VKAPI_ATTR VkResult VKAPI_CALL HookCreateDevice(VkPhysicalDevice physical, const
         d->nvx ? "available" : "absent");
     std::lock_guard lock{g_tables_mutex};
     g_devices[Key(*device)] = d;
+    for (DeviceSlot& slot : g_device_slots) {
+        if (!slot.key.load(std::memory_order_relaxed)) {
+            slot.device.store(d, std::memory_order_release);
+            slot.key.store(Key(*device), std::memory_order_release);
+            break;
+        }
+    }
     return VK_SUCCESS;
 }
 
 VKAPI_ATTR void VKAPI_CALL HookDestroyDevice(VkDevice device, const VkAllocationCallbacks* allocator) {
+    IN_HOOK("DestroyDevice");
     if (!device) {
         return;
     }
@@ -5701,6 +6360,12 @@ VKAPI_ATTR void VKAPI_CALL HookDestroyDevice(VkDevice device, const VkAllocation
         if (const auto it = g_devices.find(Key(device)); it != g_devices.end()) {
             d = it->second;
             g_devices.erase(it);
+        }
+        for (DeviceSlot& slot : g_device_slots) {
+            if (slot.key.load(std::memory_order_relaxed) == Key(device)) {
+                slot.key.store(nullptr, std::memory_order_release);
+                slot.device.store(nullptr, std::memory_order_release);
+            }
         }
         std::erase_if(g_queues, [d](const auto& entry) { return entry.second.first == d; });
         std::erase_if(g_command_buffers, [d](const auto& entry) { return entry.second == d; });
@@ -5773,7 +6438,7 @@ VKAPI_ATTR void VKAPI_CALL HookDestroyDevice(VkDevice device, const VkAllocation
 // TRACE appears: render passes with their targets and draw counts, copies between images, compute
 // work, submits and presents. Nothing is changed; every hook passes its call on.
 
-std::mutex g_trace_mutex;
+Lock g_trace_mutex{LOCK_TRACE};
 FILE* g_trace_file{};
 struct CbTrace {
     std::string pass;
@@ -5914,7 +6579,7 @@ struct ScanEntry {
     bool ended{};
 };
 constexpr size_t SCAN_PASSES = 32;
-std::mutex g_scan_mutex;
+Lock g_scan_mutex{LOCK_SCAN};
 std::vector<ScanEntry> g_scan;
 std::unordered_map<uint64_t, size_t> g_scan_open; ///< command buffer -> entry of its open pass
 std::atomic<bool> g_scan_armed{};
@@ -6029,7 +6694,7 @@ struct HudPass {
     VkImage image{};
     uint32_t width{}, height{};
 };
-std::mutex g_hud_pass_mutex;
+Lock g_hud_pass_mutex{LOCK_HUD_PASS};
 std::unordered_map<uint64_t, HudPass> g_hud_passes; ///< command buffer -> the HUD layer its open pass draws into
 
 /// A pass begins. The HUD layer is a display-size RGBA16F target drawn into without depth; the last
@@ -6061,6 +6726,41 @@ void NotePassTarget(VkCommandBuffer cmd, uint64_t view, VkAttachmentLoadOp load,
     g_hud_passes[U64(cmd)] = {reinterpret_cast<VkImage>(static_cast<uintptr_t>(image)), record.width, record.height};
 }
 
+/// What is known about a command buffer's open HUD pass holds for one recording of it. A command
+/// buffer that is begun again (or freed) starts with none: a pass whose frame copy never came (in
+/// the game's menus, with the HUD hidden, in some cameras) would otherwise wait for a copy in some
+/// later frame, and hand that frame an image the game may long have destroyed.
+void ForgetHudPass(VkCommandBuffer cmd) {
+    std::lock_guard lock{g_hud_pass_mutex};
+    if (!g_hud_passes.empty()) {
+        g_hud_passes.erase(U64(cmd));
+    }
+}
+
+std::atomic<uint32_t> g_stale_passes{};
+
+/// The game destroys an image: nothing kept here may name it any longer. (Copies are recorded
+/// from what is kept: from a destroyed image that is a fault inside the driver, in the middle
+/// of a call of the game's.)
+void ForgetImage(Device& d, VkImage image) {
+    {
+        std::lock_guard lock{g_hud_pass_mutex};
+        if (!g_hud_passes.empty()) {
+            std::erase_if(g_hud_passes, [image](const auto& entry) { return entry.second.image == image; });
+        }
+    }
+    Inputs& in = d.inputs;
+    std::lock_guard lock{in.mutex};
+    if (in.depth == U64(image)) {
+        in.depth = 0;
+    }
+    for (Candidate& candidate : in.vectors) {
+        if (candidate.image == U64(image)) {
+            candidate.image = 0;
+        }
+    }
+}
+
 /// A pass has ended (the end is already recorded).
 void PassEnded(Device& d, VkCommandBuffer cmd) {
     if (g_trace) {
@@ -6075,6 +6775,7 @@ void NoteFrameCopy(VkCommandBuffer cmd, VkImage source, VkImageLayout source_lay
         return;
     }
     HudPass pass;
+    bool stale = false;
     {
         std::lock_guard lock{g_hud_pass_mutex};
         const auto it = g_hud_passes.find(U64(cmd));
@@ -6095,10 +6796,20 @@ void NoteFrameCopy(VkCommandBuffer cmd, VkImage source, VkImageLayout source_lay
                 return;
             }
         }
+        // (The layer itself must still be what the pass drew into.)
+        const auto layer = g_images.find(U64(pass.image));
+        stale = layer == g_images.end() || layer->second.format != HUD_FORMAT || layer->second.width != pass.width ||
+                layer->second.height != pass.height;
     }
     {
         std::lock_guard lock{g_hud_pass_mutex};
         g_hud_passes.erase(U64(cmd));
+    }
+    if (stale) {
+        if (g_stale_passes.fetch_add(1) < 8) {
+            Log("fg: a frame copy met a HUD pass whose layer no longer exists: not captured");
+        }
+        return;
     }
     ++g_frame_copy_count;
     Device& d = *DeviceOfCommandBuffer(cmd);
@@ -6169,6 +6880,7 @@ std::string PassOfRenderPass(const VkRenderPassBeginInfo* begin) {
 
 VKAPI_ATTR VkResult VKAPI_CALL TraceCreateRenderPass(VkDevice device, const VkRenderPassCreateInfo* info,
                                                      const VkAllocationCallbacks* allocator, VkRenderPass* pass) {
+    IN_HOOK("RenderPassNew");
     Device* d = GetDevice(Key(device));
     const VkResult result = d->TraceCreateRenderPass(device, info, allocator, pass);
     if (result == VK_SUCCESS) {
@@ -6184,6 +6896,7 @@ VKAPI_ATTR VkResult VKAPI_CALL TraceCreateRenderPass(VkDevice device, const VkRe
 
 VKAPI_ATTR VkResult VKAPI_CALL TraceCreateRenderPass2(VkDevice device, const VkRenderPassCreateInfo2* info,
                                                       const VkAllocationCallbacks* allocator, VkRenderPass* pass) {
+    IN_HOOK("RenderPassNew2");
     Device* d = GetDevice(Key(device));
     const VkResult result = d->TraceCreateRenderPass2(device, info, allocator, pass);
     if (result == VK_SUCCESS) {
@@ -6199,6 +6912,7 @@ VKAPI_ATTR VkResult VKAPI_CALL TraceCreateRenderPass2(VkDevice device, const VkR
 
 VKAPI_ATTR VkResult VKAPI_CALL TraceCreateFramebuffer(VkDevice device, const VkFramebufferCreateInfo* info,
                                                       const VkAllocationCallbacks* allocator, VkFramebuffer* framebuffer) {
+    IN_HOOK("FramebufferNew");
     Device* d = GetDevice(Key(device));
     const VkResult result = d->TraceCreateFramebuffer(device, info, allocator, framebuffer);
     if (result == VK_SUCCESS) {
@@ -6216,6 +6930,7 @@ VKAPI_ATTR VkResult VKAPI_CALL TraceCreateFramebuffer(VkDevice device, const VkF
 
 VKAPI_ATTR void VKAPI_CALL TraceCmdBeginRenderPass(VkCommandBuffer cmd, const VkRenderPassBeginInfo* begin,
                                                    VkSubpassContents contents) {
+    IN_HOOK("BeginRenderPass");
     if (Tracing()) {
         TraceBeginPass(cmd, PassOfRenderPass(begin));
     }
@@ -6226,6 +6941,7 @@ VKAPI_ATTR void VKAPI_CALL TraceCmdBeginRenderPass(VkCommandBuffer cmd, const Vk
 
 VKAPI_ATTR void VKAPI_CALL TraceCmdBeginRenderPass2(VkCommandBuffer cmd, const VkRenderPassBeginInfo* begin,
                                                     const VkSubpassBeginInfo* subpass) {
+    IN_HOOK("BeginRenderPass2");
     if (Tracing()) {
         TraceBeginPass(cmd, PassOfRenderPass(begin));
     }
@@ -6235,6 +6951,7 @@ VKAPI_ATTR void VKAPI_CALL TraceCmdBeginRenderPass2(VkCommandBuffer cmd, const V
 }
 
 VKAPI_ATTR void VKAPI_CALL TraceCmdEndRenderPass(VkCommandBuffer cmd) {
+    IN_HOOK("EndRenderPass");
     if (g_trace) {
         TraceEndPass(cmd);
     }
@@ -6244,6 +6961,7 @@ VKAPI_ATTR void VKAPI_CALL TraceCmdEndRenderPass(VkCommandBuffer cmd) {
 }
 
 VKAPI_ATTR void VKAPI_CALL TraceCmdEndRenderPass2(VkCommandBuffer cmd, const VkSubpassEndInfo* end) {
+    IN_HOOK("EndRenderPass2");
     if (g_trace) {
         TraceEndPass(cmd);
     }
@@ -6253,6 +6971,7 @@ VKAPI_ATTR void VKAPI_CALL TraceCmdEndRenderPass2(VkCommandBuffer cmd, const VkS
 }
 
 VKAPI_ATTR void VKAPI_CALL TraceCmdBeginRendering(VkCommandBuffer cmd, const VkRenderingInfo* info) {
+    IN_HOOK("BeginRendering");
     if (Tracing()) {
         std::string pass = "[";
         {
@@ -6282,6 +7001,7 @@ VKAPI_ATTR void VKAPI_CALL TraceCmdBeginRendering(VkCommandBuffer cmd, const VkR
 }
 
 VKAPI_ATTR void VKAPI_CALL TraceCmdEndRendering(VkCommandBuffer cmd) {
+    IN_HOOK("EndRendering");
     if (g_trace) {
         TraceEndPass(cmd);
     }
@@ -6333,6 +7053,7 @@ VKAPI_ATTR void VKAPI_CALL TraceCmdDispatchIndirect(VkCommandBuffer cmd, VkBuffe
 VKAPI_ATTR void VKAPI_CALL TraceCmdCopyImage(VkCommandBuffer cmd, VkImage source, VkImageLayout source_layout,
                                              VkImage destination, VkImageLayout destination_layout, uint32_t count,
                                              const VkImageCopy* regions) {
+    IN_HOOK("CopyImage");
     TraceTransfer(cmd, "COPY", U64(source), U64(destination));
     Device* d = DeviceOfCommandBuffer(cmd);
     d->CmdCopyImage(cmd, source, source_layout, destination, destination_layout, count, regions);
@@ -6340,6 +7061,7 @@ VKAPI_ATTR void VKAPI_CALL TraceCmdCopyImage(VkCommandBuffer cmd, VkImage source
     NoteHandover(*d, cmd, source, destination);
 }
 VKAPI_ATTR void VKAPI_CALL TraceCmdCopyImage2(VkCommandBuffer cmd, const VkCopyImageInfo2* info) {
+    IN_HOOK("CopyImage2");
     TraceTransfer(cmd, "COPY", U64(info->srcImage), U64(info->dstImage));
     Device* d = DeviceOfCommandBuffer(cmd);
     d->TraceCmdCopyImage2(cmd, info);
@@ -6388,7 +7110,9 @@ VKAPI_ATTR void VKAPI_CALL TraceCmdExecuteCommands(VkCommandBuffer cmd, uint32_t
     DeviceOfCommandBuffer(cmd)->TraceCmdExecuteCommands(cmd, count, buffers);
 }
 VKAPI_ATTR VkResult VKAPI_CALL TraceBeginCommandBuffer(VkCommandBuffer cmd, const VkCommandBufferBeginInfo* info) {
+    IN_HOOK("BeginCmdBuffer");
     Device* d = DeviceOfCommandBuffer(cmd);
+    ForgetHudPass(cmd);
     if (Tracing()) {
         std::lock_guard lock{g_trace_mutex};
         g_cb_trace[U64(cmd)] = {};
@@ -6448,6 +7172,7 @@ VkResult Submitted(VkQueue queue, const std::vector<VkCommandBuffer>& buffers, c
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL TraceQueueSubmit(VkQueue queue, uint32_t count, const VkSubmitInfo* submits, VkFence fence) {
+    IN_HOOK("QueueSubmit");
     thread_local std::vector<VkCommandBuffer> buffers;
     buffers.clear();
     for (uint32_t i = 0; i < count; ++i) {
@@ -6457,6 +7182,7 @@ VKAPI_ATTR VkResult VKAPI_CALL TraceQueueSubmit(VkQueue queue, uint32_t count, c
 }
 VKAPI_ATTR VkResult VKAPI_CALL TraceQueueSubmit2(VkQueue queue, uint32_t count, const VkSubmitInfo2* submits,
                                                  VkFence fence) {
+    IN_HOOK("QueueSubmit2");
     thread_local std::vector<VkCommandBuffer> buffers;
     buffers.clear();
     for (uint32_t i = 0; i < count; ++i) {
@@ -6509,7 +7235,7 @@ const TraceHook TRACE_HOOKS[] = {
     TRACE_HOOK("vkCmdCopyImageToBuffer", TraceCmdCopyImageToBuffer),
     TRACE_HOOK("vkCmdCopyBufferToImage", TraceCmdCopyBufferToImage),
     TRACE_HOOK("vkCmdExecuteCommands", TraceCmdExecuteCommands),
-    TRACE_HOOK("vkBeginCommandBuffer", TraceBeginCommandBuffer),
+    PASS_HOOK("vkBeginCommandBuffer", TraceBeginCommandBuffer),
     PASS_HOOK("vkQueueSubmit", TraceQueueSubmit),
     PASS_HOOK("vkQueueSubmit2", TraceQueueSubmit2),
     PASS_HOOK("vkQueueSubmit2KHR", TraceQueueSubmit2),

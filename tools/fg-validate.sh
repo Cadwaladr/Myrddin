@@ -34,6 +34,7 @@
 #                newer ("age") where the GPU is the slower one; frames not fewer than without it by more
 #                than was measured when it was made (steady cases 1-3 %, a hitch every second 5 %).
 #   soak         three minutes of that at the game's own size
+#   FG_TARGET=RATE: the display rate the limiter, multiplier, gpuwait and soak cases run at (120).
 #   panel        the performance panel (off by default; all the above run without it): the chain's cases
 #                with it on, intact as without; frames that pass through from the first one, with the
 #                panel on them, then generation on (the panel must be seen in the dumps of both); and at
@@ -46,7 +47,7 @@ out="$here/logs/test/_validate.txt"; mkdir -p "$here/logs/test"
 say() { echo "$@" | tee -a "$out"; }
 replay="--replay logs/fg/dump-236448-000"   # a dump of the game (sc-turbo fg-dump): any will do
 old="SC_FG_GATE=0 SC_FG_GUARD=0 SC_FG_FIRST=0 SC_FG_GPUWAIT=0"
-run() { local n=$1 secs=$2 e=$3; shift 3; tools/test-chain.sh "$n" "$secs" "SC_FG_TARGET=120 $e" "$@" > "logs/test/_$n.out" 2>&1; }
+run() { local n=$1 secs=$2 e=$3; shift 3; tools/test-chain.sh "$n" "$secs" "SC_FG_TARGET=${FG_TARGET:-120} $e" "$@" > "logs/test/_$n.out" 2>&1; }
 late() { grep -ho 'late copies=[0-9]* lost=[0-9]*' logs/test/$1/fg-*.log | awk -F'[= ]' '{ l += $3; x += $5 } END { printf "%d/%d", x, l }'; } # lost/late
 line() { local n=$1; printf "%-10s %s | %s off, %s lost/late | %s\n" "$n" "$(tail -1 logs/test/$n/out.txt)" "$(grep -c 'CHAIN OFF' logs/test/$n/fg-*.log)" "$(late "$n")" \
     "$(grep STAT logs/test/$n/fg-*.log | tail -1 | grep -o 'gate=.*first=[0-9]* ms=[0-9.]*' | sed 's/ own ms=[0-9.]*//')"; }
@@ -61,6 +62,18 @@ regression() {
     say "## regression"
     reg plain ""; reg dup "" --dup 70; reg nohud "SC_FG_TEST_LAYER=1" --nohud 50; reg early "" --early
     reg stall "" --stall 150 900; reg wild "" --wild
+    # A HUD pass left without its frame copy, its layer destroyed, and a copy without a pass in the same
+    # command buffer later: the copy must not be captured as that old pass's frame (nothing but "0 taken").
+    reg stale "" --stale-hud 7
+    say "stale: $(grep -h 'stale-hud' logs/test/stale/out.txt); $(grep -c 'layer no longer exists' logs/test/stale/fg-*.log) taken for an old pass, $(grep -c 'never came back\|^ *[0-9.]* lock ' logs/test/stale/fg-*.log) lock lines"
+    # Captures that come with gaps (every third frame without one): interpolated as presented, so the
+    # generated rate stays near the real one's; one "come with gaps" line.
+    reg gaps "SC_FG_TEST_LAYER=1" --nohud 3
+    say "gaps: $(grep -c 'captures come with gaps' logs/test/gaps/fg-*.log) hold(s) begun, $(grep -c 'every frame has its HUD capture again' logs/test/gaps/fg-*.log) ended"
+    # The locks' own test: a holder that ended (taken over), one at work (waited for, not taken over),
+    # a call that never came back (let go by its thread, with and without another thread waiting).
+    reg locks "SC_FG_TEST_LOCKS=1"
+    say "locks: $(grep -h 'locks test' logs/test/locks/fg-*.log | sed 's/^ *[0-9.]* locks test//' | tr '\n' ';')"
 }
 panel() {
     say "## panel: the performance panel on (it is off in everything above)"

@@ -9,19 +9,48 @@ WAYLANDDRV_PRIMARY_MONITOR, and falls back to its own pick when no display has t
 This finds the name to give it; sc-launch.sh asks at every start. In this order:
 
     1. SC_MONITOR=NAME, if that display is on
-    2. the display COSMIC has as primary (cosmic-randr: "Xwayland primary")
+    2. the display the desktop has as primary: KDE Plasma (kscreen-doctor: priority 1) or
+       COSMIC (cosmic-randr: "Xwayland primary"), whichever is running
     3. the one with the highest refresh rate; of several, the one with the most pixels
 
-    wine/tools/sc-monitor         the name; nothing when the displays cannot be read (no
-                                  cosmic-randr) or with SC_MONITOR=off: the runner then picks
+    wine/tools/sc-monitor         the name; nothing when the displays cannot be read (neither
+                                  desktop's tool answers) or with SC_MONITOR=off: the runner then picks
     wine/tools/sc-monitor rate    that display's refresh rate, Hz
     wine/tools/sc-monitor show    all displays, the choice and why
 """
-import os, re, subprocess, sys
+import json, os, re, subprocess, sys
 
 
-def displays():
-    """The displays that are on, from `cosmic-randr list --kdl`."""
+def kde_displays():
+    """The displays that are on, from `kscreen-doctor -j` (KDE Plasma)."""
+    try:
+        text = subprocess.run(["kscreen-doctor", "-j"], capture_output=True, text=True, timeout=5).stdout
+        outputs = json.loads(text).get("outputs", [])
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+    found = []
+    for o in outputs:
+        if not o.get("enabled") or not o.get("connected"):
+            continue
+        mode = next((m for m in o.get("modes", []) if str(m.get("id")) == str(o.get("currentModeId"))), None)
+        if not mode:
+            continue
+        place = o.get("pos") or {}
+        found.append({
+            "name": o.get("name", "?"),
+            "width": int(mode["size"]["width"]),
+            "height": int(mode["size"]["height"]),
+            "rate": float(mode.get("refreshRate", 0.0)),
+            "primary": o.get("priority") == 1,
+            "place": f"{place.get('x', '?')},{place.get('y', '?')}",
+            "scale": float(o.get("scale", 1.0)),
+            "what": "",
+        })
+    return sorted(found, key=lambda d: d["name"])
+
+
+def cosmic_displays():
+    """The displays that are on, from `cosmic-randr list --kdl` (COSMIC)."""
     try:
         text = subprocess.run(["cosmic-randr", "list", "--kdl"], capture_output=True, text=True, timeout=5).stdout
     except (OSError, subprocess.SubprocessError):
@@ -48,7 +77,19 @@ def displays():
     return sorted(found, key=lambda d: d["name"]) # (cosmic-randr's order changes from call to call)
 
 
-def choose(found):
+def displays():
+    """The displays that are on and the desktop that told: the running desktop's tool first."""
+    readers = [("KDE Plasma", kde_displays), ("COSMIC", cosmic_displays)]
+    if "COSMIC" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper():
+        readers.reverse()
+    for desktop, read in readers:
+        found = read()
+        if found:
+            return found, desktop
+    return [], None
+
+
+def choose(found, desktop):
     wanted = os.environ.get("SC_MONITOR", "auto") or "auto"
     if wanted == "off":
         return None, "SC_MONITOR=off: left to the runner (the display with the most pixels)"
@@ -60,18 +101,18 @@ def choose(found):
         missing = f"SC_MONITOR={wanted} is not among the displays that are on; "
     for d in found:
         if d["primary"]:
-            return d, missing + "COSMIC's primary display"
+            return d, missing + f"{desktop}'s primary display"
     if found:
         return max(found, key=lambda d: (d["rate"], d["width"] * d["height"])), missing + "the highest refresh rate"
-    return None, missing + "the displays could not be read (cosmic-randr): left to the runner"
+    return None, missing + "the displays could not be read (kscreen-doctor, cosmic-randr): left to the runner"
 
 
 def main():
     what = sys.argv[1] if len(sys.argv) > 1 else "name"
     if what not in ("name", "rate", "show"):
         sys.exit(__doc__)
-    found = displays()
-    chosen, why = choose(found)
+    found, desktop = displays()
+    chosen, why = choose(found, desktop)
     if what == "name":
         if chosen:
             print(chosen["name"])
@@ -82,7 +123,7 @@ def main():
         for d in found:
             mark = "  <- the game's main display" if d is chosen else ""
             print(f"{d['name']:<10} {d['width']}x{d['height']} at {d['rate']:.3f} Hz, scale {100 * d['scale']:.0f} %, at {d['place']}"
-                  f"{', COSMIC primary' if d['primary'] else ''}  [{d['what']}]{mark}")
+                  f"{', ' + desktop + ' primary' if d['primary'] else ''}{'  [' + d['what'] + ']' if d['what'] else ''}{mark}")
         print(f"choice: {chosen['name'] if chosen else 'none'} ({why})")
         most = max(found, key=lambda d: (d["width"], d["height"]), default=None)
         if chosen and most is not chosen and (most["width"], most["height"]) != (chosen["width"], chosen["height"]):

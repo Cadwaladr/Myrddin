@@ -60,7 +60,7 @@ debug=; [ -n "${TEST_SHOT:-}" ] && debug=--debug   # (screen pictures are only a
 waits 2
 ( waits $(( secs - 2 )); touch "$out/EVENTS" ) &
 [ -n "${TEST_DUMP:-}" ] && ( waits $(( TEST_DUMP + 2 )); touch "$out/DUMP" ) &
-[ -n "${TEST_PANEL:-}" ] && echo "$TEST_PANEL" > "$out/PANEL"
+[ -n "${TEST_PANEL:-}" ] && { echo "$TEST_PANEL" > "$out/PANEL"; export SC_FG_PANEL=1; }   # (the panel is off unless asked for)
 for at in ${TEST_AT:-}; do
     file=${at#*:}; text=; case "$file" in *=*) text=${file#*=}; file=${file%%=*} ;; esac
     text=${text//,/ }   # (a comma for a space: PANEL=3,br)

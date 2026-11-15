@@ -7,5 +7,11 @@
 # The script that starts the game through Wine. Default: the LUG Helper's sc-launch.sh in the prefix.
 #SC_LAUNCH="$SC_PREFIX/sc-launch.sh"
 
-# The stock runner that wine/build/test compares the patched copy against.
-#SC_RUNNER="$SC_PREFIX/runners/lug-wine-tkg-experimental-wayland-git-11.20-2"
+# The display the game runs on and its refresh rate are asked of the desktop at every launch
+# (KDE Plasma, COSMIC: "sc-turbo displays"). To name them instead:
+#SC_MONITOR=HDMI-A-1
+#SC_FG_TARGET=120
+
+# MangoHud at every launch with frame generation ("sc-turbo fg N hud" does it for one launch).
+# It sits below the layer, so its frame rate counts the generated frames too.
+#SC_MANGOHUD=1

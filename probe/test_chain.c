@@ -23,6 +23,10 @@
  *     --sim-dip S L MS every S seconds, for L milliseconds, its frames take MS milliseconds more
  *     --worker-ms N    extra time the queue thread spends per frame (default 0)
  *     --nohud N        every Nth frame comes without the HUD pass and the frame copy
+ *     --stale-hud N    every Nth frame draws its HUD pass into a layer of its own and comes without the
+ *                      frame copy; that layer is destroyed, and the next frame recorded into the same
+ *                      command buffer brings a frame copy without a pass (what the game does when the HUD
+ *                      goes away between two frames: the copy must not be taken for that old pass's)
  *     --dup N          every Nth frame is presented twice
  *     --early          the hand-over is recorded before the frame's submit (a chain that is one off)
  *     --fifo           FIFO present mode (default: mailbox when there is one)
@@ -321,6 +325,7 @@ int main(int argc, char **argv)
 {
     double seconds = 12, game_ms = 4, jitter_ms = 0, spike_ms = 0;
     unsigned spike = 0, random_state = 12345;
+    int stale_hud = 0;
     int nohud = 0, dup = 0, early = 0, fifo = 0, gpu_load = 0, wild = 0, marker = 0, marker_vx = 0, marker_vy = 0;
     const char *replay = NULL;
     char replay_inputs[600] = "";
@@ -334,6 +339,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--sim-change") && i + 2 < argc) { sim_change_s = atof(argv[++i]); sim_change_ms = atof(argv[++i]); }
         else if (!strcmp(argv[i], "--sim-dip") && i + 3 < argc) { sim_dip_s = atof(argv[++i]); sim_dip_length_ms = atof(argv[++i]); sim_dip_ms = atof(argv[++i]); }
         else if (!strcmp(argv[i], "--nohud") && i + 1 < argc) nohud = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--stale-hud") && i + 1 < argc) stale_hud = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dup") && i + 1 < argc) dup = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--early")) early = 1;
         else if (!strcmp(argv[i], "--fifo")) fifo = 1;
@@ -614,6 +620,11 @@ int main(int argc, char **argv)
     sim_start = start;
     if (sim_ms > 0) pthread_create(&sim_thread, NULL, simulation, NULL);
     unsigned frame = 0;
+    struct image stale_img = {0}; /* --stale-hud: the layer of a pass that was left without its frame copy */
+    VkImageView stale_view = VK_NULL_HANDLE;
+    VkFramebuffer stale_fb = VK_NULL_HANDLE;
+    int stale_slot = -1;
+    unsigned stale_count = 0;
     double last_report = start;
     unsigned last_frames = 0;
     while (now_s() - start < seconds) {
@@ -635,6 +646,17 @@ int main(int argc, char **argv)
         /* --- device A: the frame --- */
         CHECK(vkWaitForFences(dev_a, 1, &fences[slot], VK_TRUE, UINT64_MAX));
         CHECK(vkResetFences(dev_a, 1, &fences[slot]));
+        /* --stale-hud: this command buffer's pass of RING frames ago has no layer any more */
+        const int stale_use = stale_slot == (int)slot;
+        const int stale_now = !stale_use && stale_hud && stale_slot < 0 && frame % stale_hud == (unsigned)stale_hud - 1;
+        if (stale_use) {
+            vkDestroyFramebuffer(dev_a, stale_fb, NULL);
+            vkDestroyImageView(dev_a, stale_view, NULL);
+            vkDestroyImage(dev_a, stale_img.img, NULL);
+            vkFreeMemory(dev_a, stale_img.mem, NULL);
+            stale_slot = -1;
+            stale_count++;
+        }
         VkImageView depth_view; /* a new evaluation begins */
         CHECK(vkCreateImageView(dev_a, &dvi, NULL, &depth_view));
         cb = cbs_a[slot];
@@ -654,7 +676,25 @@ int main(int argc, char **argv)
         /* --marker: where the marker is in this frame */
         const int marker_x = 60 + bounce((long)frame * marker_vx, W - 72 - 120), marker_y = 60 + bounce((long)frame * marker_vy, H - 48 - 120);
         const int marker_count = (int)(sizeof marker_rects / sizeof *marker_rects), static_count = (int)(sizeof static_rects / sizeof *static_rects);
-        if (with_hud) {
+        if (stale_now) { /* the HUD pass into a layer of its own, and no frame copy after it */
+            stale_img = make_image(dev_a, VK_FORMAT_R16G16B16A16_SFLOAT, W, H, xfer | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 0, -1, 0);
+            hvi.image = stale_img.img;
+            CHECK(vkCreateImageView(dev_a, &hvi, NULL, &stale_view));
+            hvi.image = hud.img;
+            fci.pAttachments = &stale_view;
+            CHECK(vkCreateFramebuffer(dev_a, &fci, NULL, &stale_fb));
+            fci.pAttachments = &hud_view;
+            VkImageMemoryBarrier sb = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = stale_img.img, .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1}};
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &sb);
+            VkRenderPassBeginInfo rb = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = stale_fb, .renderArea = {{0, 0}, {W, H}}};
+            vkCmdBeginRenderPass(cb, &rb, VK_SUBPASS_CONTENTS_INLINE);
+            vkCmdEndRenderPass(cb);
+            stale_slot = (int)slot;
+        } else if (stale_use) {
+            copy(cb, f0.img, f1.img, 0, 0, W, H); /* a frame copy with no pass before it in this recording */
+        } else if (with_hud) {
             if (marker) { /* the HUD layer as the game would have drawn it */
                 vkCmdClearColorImage(cb, hud.img, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &colour);
                 copy_rects(cb, hud_half.img, hud.img, static_rects, static_count, 0, 0);
@@ -714,6 +754,7 @@ int main(int argc, char **argv)
     if (sim_ms > 0) pthread_join(sim_thread, NULL);
     vkDeviceWaitIdle(dev_a);
     vkDeviceWaitIdle(dev_b);
+    if (stale_hud) printf("stale-hud: %u passes left without their frame copy, their layers destroyed\n", stale_count);
     printf("%u frames, %u presents\n", frame, presents);
     vkDestroySwapchainKHR(dev_b, swapchain, NULL);
     vkDestroyDevice(dev_b, NULL);

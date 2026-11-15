@@ -6,24 +6,33 @@
 #   sc-turbo capture   like probe, and also saves a few frames of DLSS's inputs (colour, motion
 #                      vectors, depth) to logs/capture, but only after "sc-turbo go"
 #   sc-turbo go        start a capture series now: 4 consecutive frames every 10 s for 2 minutes
-#   sc-turbo fg [2|3|4] [trace|old|older]  launch with frame generation (DLSS must be the upscaler in game);
-#                      the number is the multiplier, default 2. Log and dumps: logs/fg
-#                      ("old": the build before the last one, kept in build/fg-prev; "older": the one
+#   sc-turbo fg [2|3|4] [hud] [panel] [trace|old|older]  launch with frame generation (DLSS must be the
+#                      upscaler in game); the number is the multiplier, default 2. Log and dumps: logs/fg
+#                      ("hud": with MangoHud, which sits below the layer and so counts every frame that
+#                      is shown, the generated ones too; SC_MANGOHUD=1 in sc-turbo.conf: always.
+#                      "panel": the layer's own performance panel can be shown, see fg-panel; without
+#                      the word there is none.
+#                      "old": the build before the last one, kept in build/fg-prev; "older": the one
 #                      before that, build/fg-prev2)
+#   sc-turbo gui [install|remove]   the launcher window: the game's icon (a click launches it) and - Nx +
+#                      below it for the multiplier, also while the game runs (gui/games.ini lists the
+#                      games). install / remove: its entry in the desktop's application menu.
+#   sc-turbo run       launch the game as it is, with none of this project's layers
 #   sc-turbo fg-off / fg-on   switch generation off / on while the game runs
 #   sc-turbo fg-mult N change the multiplier (2, 3 or 4) while the game runs
 #   sc-turbo fg-hud on|off   switch the HUD handling (keeps the HUD in place) while the game runs
 #   sc-turbo fg-layer on|off|mode M [GAIN] [FLOOR]   exact HUD separation (the game's own HUD layer)
 #   sc-turbo fg-scd on|off   FSR's scene-change detector (off by default: it stops interpolation in fast turns)
 #   sc-turbo fg-cap on|off   limit shown frames to the display's rate (on by default; holds the game at rate/multiplier)
-#   sc-turbo fg-panel [next|off|1|2|3] [tl|tr|bl|br]   the performance panel over the picture. Without a word
+#   sc-turbo fg-panel [next|off|1|2|3] [tl|tr|bl|br]   the performance panel over the picture (only in a game
+#                      launched with the word "panel": sc-turbo fg 4 panel). Without a word
 #                      (or "next") it goes one step on, so that one key can be bound to it (a desktop
 #                      shortcut that runs "sc-turbo fg-panel"): off -> 1 the frame rate that is shown ("FG")
 #                      -> 2 that and the game's own ("BASE"), with the multiplier -> 3 both and a graph of
 #                      the time between shown frames (even pacing is a flat line) -> off. tl tr bl br: the
 #                      corner it sits in. It stays as it was left, also for the next launch.
 #   sc-turbo fg-panel-key [install [KEYS] | remove]   the desktop shortcut for that (default Ctrl+Shift+`;
-#                      KEYS like Ctrl+Shift+F10). Set up on COSMIC; elsewhere it says what to bind by hand.
+#                      KEYS like Ctrl+Shift+F10). Set up on KDE Plasma and COSMIC; elsewhere it says what to bind by hand.
 #   sc-turbo fg-params name=value ...   tune the HUD detection while the game runs
 #                      (bias ratio motion up down level grow), or switch parts of the frame
 #                      matching to compare in place: chain=0|1 (frames matched to their captures by
@@ -53,11 +62,13 @@
 #   sc-turbo threads-ab A B [SECONDS] [CYCLES]   two thread placements compared within the running session
 #                      (asis | all | own-core | bg-low | all-bg-low | main-p; generation is off meanwhile, so the
 #                      game runs at its own speed)
-#   sc-turbo displays [check]   the displays and which one the game takes as its main one (COSMIC's
-#                      primary display; another one: SC_MONITOR=NAME ./sc-turbo fg 4). check: what
-#                      Wine then tells a program (a small test program without a window)
+#   sc-turbo displays  the displays and which one the game takes as its main one (the desktop's primary
+#                      display; another one: SC_MONITOR=NAME ./sc-turbo fg 4). Its refresh rate is what
+#                      the layer fills (another rate: SC_FG_TARGET=RATE)
 #   sc-turbo fg-events   write the last ~4000 presents (which captures, timings) to logs/fg/events-*.txt
 #   sc-turbo fg-scan  (trace launches) save the display-size passes before/after, to find the HUD pass
+#   sc-turbo fg-where [-a] [PID]   what every thread was doing inside the layer (which hook, since when,
+#                      which of its locks held and waited for): after a game that stood still, or while it runs
 #   sc-turbo fg-dump [N]   save the next real + generated frame pair (and vectors/depth, the HUD layer) to
 #                      logs/fg; N (up to 8): that many frames in a row
 #   sc-turbo fg-stat   last frame-rate lines of the running/last fg session
@@ -69,8 +80,9 @@ here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 # or the same names in the environment, which win.
 #   SC_PREFIX  the Wine prefix Star Citizen is installed in (default: ~/Games/star-citizen)
 #   SC_LAUNCH  the script that starts the game through Wine (default: sc-launch.sh in the prefix)
-env_prefix="${SC_PREFIX:-}"; env_launch="${SC_LAUNCH:-}"
+env_prefix="${SC_PREFIX:-}"; env_launch="${SC_LAUNCH:-}"; env_hud="${SC_MANGOHUD:-}"
 [ -f "$here/sc-turbo.conf" ] && . "$here/sc-turbo.conf"
+SC_MANGOHUD="${env_hud:-${SC_MANGOHUD:-0}}"
 SC_PREFIX="${env_prefix:-${SC_PREFIX:-$HOME/Games/star-citizen}}"
 launch="${env_launch:-${SC_LAUNCH:-$SC_PREFIX/sc-launch.sh}}"
 need_launch() {
@@ -78,6 +90,53 @@ need_launch() {
     echo "no launch script at $launch"
     echo "set SC_PREFIX or SC_LAUNCH in $here/sc-turbo.conf (see sc-turbo.conf.example)"
     exit 1
+}
+# Said before a launch: desktop settings known to get in the game's way.
+# KDE's Plasma Keyboard (the on-screen keyboard service) offers accented letters when a physical
+# key is held. It does that for every program that takes text input, which Wine's Wayland driver
+# always does: the letters that have accents (A, S, D, C, E ...) then reach the game as text and
+# not as held keys, and only the others (W, F, Q ...) act.
+# KWin lets a fullscreen window tear (its default). Seen with this game on Plasma 6.8: the picture
+# tore, generated frames included, until that was switched off.
+desktop_notes() {
+    command -v kreadconfig6 >/dev/null 2>&1 || return 0
+    if pgrep -x plasma-keyboard >/dev/null 2>&1 &&
+       [ "$(kreadconfig6 --file plasmakeyboardrc --group General --key diacriticsPopupEnabled --default true 2>/dev/null)" != false ]; then
+        echo "NOTE: KDE's on-screen keyboard offers accented letters on a held key. While it does, held"
+        echo "  A, S, D, C, E ... do not reach the game as keys (W does). To switch that off:"
+        echo "  kwriteconfig6 --file plasmakeyboardrc --group General --key diacriticsPopupEnabled --type bool --notify false"
+        echo "  (or System Settings > On-Screen Keyboard)"
+    fi
+    case "${XDG_CURRENT_DESKTOP:-}" in *KDE*)
+        if [ "$(kreadconfig6 --file kwinrc --group Compositing --key AllowTearing --default true 2>/dev/null)" != false ]; then
+            echo "NOTE: KWin allows tearing in fullscreen windows. If the picture tears, switch that off:"
+            echo "  kwriteconfig6 --file kwinrc --group Compositing --key AllowTearing --type bool false"
+            echo "  busctl --user call org.kde.KWin /KWin org.kde.KWin reconfigure"
+            echo "  (or System Settings > Display & Monitor > Screen tearing)"
+        fi ;;
+    esac
+}
+# The display the game is on, asked of the desktop (tools/sc-monitor) at every launch: its name
+# for the runner's Wayland driver, which left to itself takes the display with the most pixels (a
+# TV beside the monitor), and its refresh rate for the layer, which does not read it. Each only
+# when it is not given: SC_MONITOR=NAME|off, SC_FG_TARGET=RATE (environment or sc-turbo.conf).
+display_settings() {
+    local monitor rate
+    [ -n "${SC_MONITOR:-}" ] && export SC_MONITOR
+    if [ "${SC_MONITOR:-auto}" != off ] && [ -z "${WAYLANDDRV_PRIMARY_MONITOR:-}" ]; then
+        monitor="$("$here/tools/sc-monitor" 2>/dev/null)"
+        [ -n "$monitor" ] && export WAYLANDDRV_PRIMARY_MONITOR="$monitor"
+    fi
+    if [ -n "${SC_FG_TARGET:-}" ]; then
+        export SC_FG_TARGET
+    else
+        rate="$("$here/tools/sc-monitor" rate 2>/dev/null)"
+        case "$rate" in
+        ''|*[!0-9.]*) ;;
+        *) [ "${rate%%.*}" -ge 30 ] 2>/dev/null && [ "${rate%%.*}" -le 600 ] && export SC_FG_TARGET="$rate" ;;
+        esac
+    fi
+    echo "Display: ${WAYLANDDRV_PRIMARY_MONITOR:-left to the runner}, ${SC_FG_TARGET:-120} Hz"
 }
 old="$here/wine"
 logs="$here/logs/probe"
@@ -100,6 +159,7 @@ probe|capture)
     export DISABLE_LSFGVK=1     # keep lsfg-vk out of this run so the numbers are the game's own
     export WINE_SCHED_LOG=0     # the scheduling-call log is not needed and costs time
     need_launch
+    desktop_notes
     echo "Probe logs: $logs"
     exec "$launch"
     ;;
@@ -108,19 +168,57 @@ fg)
     need_launch
     mkdir -p "$here/logs/fg"; rm -f "$here/logs/fg/OFF" "$here/logs/fg/DUMP" "$here/logs/fg/MULT" "$here/logs/fg/HUDOFF" "$here/logs/fg/HUDLAYEROFF" "$here/logs/fg/HUDSCAN" "$here/logs/fg/TRACE" "$here/logs/fg/LAYER" "$here/logs/fg/SCDON" "$here/logs/fg/NOCAP" "$here/logs/fg/EVENTS" "$here/logs/fg/PARAMS"
     export SC_FG=1 SC_FG_DIR="$here/logs/fg" SC_FG_MULT="${2:-2}"
-    [ "${3:-}" = trace ] && export SC_FG_TRACE=1   # lets "sc-turbo fg-trace" record the frame structure
     layer="$here/build/fg"
-    case "${3:-}" in
-    old|older)
-        [ "$3" = old ] && layer="$here/build/fg-prev" || layer="$here/build/fg-prev2"
-        [ -f "$layer/libsc_fg.so" ] || { echo "$layer/libsc_fg.so is missing"; exit 1; }
-        echo "Using an earlier build ($layer)" ;;
-    esac
+    for word in "${@:3}"; do
+        case "$word" in
+        trace) export SC_FG_TRACE=1 ;;   # lets "sc-turbo fg-trace" record the frame structure
+        hud) SC_MANGOHUD=1 ;;
+        panel) export SC_FG_PANEL=1 ;;   # the layer's own panel (sc-turbo fg-panel); without the word there is none
+        old|older)
+            [ "$word" = old ] && layer="$here/build/fg-prev" || layer="$here/build/fg-prev2"
+            [ -f "$layer/libsc_fg.so" ] || { echo "$layer/libsc_fg.so is missing"; exit 1; }
+            echo "Using an earlier build ($layer)" ;;
+        *) echo "fg: \"$word\" is not known (hud, panel, trace, old, older)"; exit 1 ;;
+        esac
+    done
+    # (This layer's folder comes first among the implicit layers, which puts it nearest the game:
+    # every other layer, MangoHud among them, sees what this one presents.)
     export VK_ADD_IMPLICIT_LAYER_PATH="$layer${VK_ADD_IMPLICIT_LAYER_PATH:+:$VK_ADD_IMPLICIT_LAYER_PATH}"
     export DISABLE_LSFGVK=1 WINE_SCHED_LOG=0
+    if [ "$SC_MANGOHUD" = 1 ]; then
+        if ls /usr/share/vulkan/implicit_layer.d/MangoHud*.json "$HOME"/.local/share/vulkan/implicit_layer.d/MangoHud*.json >/dev/null 2>&1; then
+            export MANGOHUD=1
+            echo "MangoHud on: the frame rate it shows is the shown one, generated frames included"
+            echo "  (its own frame limit must stay off: fps_limit in MangoHud's settings would hold the layer's presents)"
+        else
+            echo "MangoHud is not installed: launched without it"
+        fi
+    fi
+    desktop_notes
+    display_settings
     echo "Frame generation x$SC_FG_MULT; log: $here/logs/fg"
     exec "$launch"
     ;;
+run)
+    # The game as it is, with none of this project's layers (the launcher window's 1x).
+    need_launch
+    desktop_notes
+    display_settings
+    export WINE_SCHED_LOG=0
+    exec "$launch"
+    ;;
+gui)
+    entry="${XDG_DATA_HOME:-$HOME/.local/share}/applications/net.local.myrddin.desktop"
+    case "${2:-}" in
+    install)
+        mkdir -p "$(dirname "$entry")"
+        printf '%s\n' '[Desktop Entry]' 'Type=Application' 'Name=Myrddin' \
+            'Comment=Launch games with frame generation' "Exec=\"$here/sc-turbo\" gui" \
+            'Icon=applications-games' 'Terminal=false' 'Categories=Game;' 'StartupWMClass=net.local.myrddin' > "$entry"
+        echo "Myrddin is in the application menu ($entry)" ;;
+    remove) rm -f "$entry" && echo "removed from the application menu" ;;
+    *) shift; exec "$here/gui/myrddin-gui" "$@" ;;
+    esac ;;
 fg-off)  touch "$here/logs/fg/OFF" && echo "generation off" ;;
 fg-on)   rm -f "$here/logs/fg/OFF" && echo "generation on" ;;
 fg-hud)  case "${2:-}" in
@@ -145,6 +243,7 @@ fg-trace) touch "$here/logs/fg/TRACE" && echo "trace requested" ;;
 fg-scan) touch "$here/logs/fg/HUDSCAN" && echo "pass scan requested (trace launches only)" ;;
 fg-dump) echo "${2:-1}" > "$here/logs/fg/DUMP.tmp" && mv "$here/logs/fg/DUMP.tmp" "$here/logs/fg/DUMP" && echo "dump requested (${2:-1} frame(s))" ;;
 fg-panel-key) shift; exec "$here/tools/sc-panel-key" "$@" ;;
+fg-where) shift; exec "$here/tools/fg-where.py" "$@" ;;
 fg-panel)
     file="$here/logs/fg/PANEL"; step=0; corner=tl
     [ -f "$file" ] && read -r step corner < "$file"
@@ -162,7 +261,14 @@ fg-panel)
     [ $# -lt 2 ] && step=$(( (step + 1) % 4 ))
     mkdir -p "$here/logs/fg" && echo "$step $corner" > "$file.tmp" && mv "$file.tmp" "$file" || exit 1
     case "$step" in 0) echo "panel off" ;; 1) echo "panel: shown rate ($corner)" ;; 2) echo "panel: shown rate and the game's ($corner)" ;;
-        3) echo "panel: both rates and the pacing graph ($corner)" ;; esac ;;
+        3) echo "panel: both rates and the pacing graph ($corner)" ;; esac
+    # (the layer shows it only where the game was launched with the word "panel")
+    if [ "$step" != 0 ]; then
+        pid="$(pgrep -x StarCitizen.exe | head -1)"
+        if [ -n "$pid" ] && ! tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -q '^SC_FG_PANEL=1$'; then
+            echo "  (not shown in this session: the game was not launched with the panel, \"sc-turbo fg N panel\")"
+        fi
+    fi ;;
 fg-events) touch "$here/logs/fg/EVENTS" && echo "event log requested (logs/fg/events-*.txt)" ;;
 fg-mult) echo "${2:?multiplier 2, 3 or 4}" > "$here/logs/fg/MULT" && echo "multiplier x$2 requested" ;;
 fg-stat) log="$(ls -t "$here"/logs/fg/fg-*.log 2>/dev/null | head -1)"; [ -n "$log" ] && { grep -v 'STAT' "$log" | tail -8; grep 'STAT' "$log" | tail -4; } ;;
@@ -171,11 +277,7 @@ fg-ab) shift; exec "$here/tools/fg-ab.sh" "$@" ;;
 threads) exec "$here/tools/sc-threads" show ;;
 threads-ab) shift; exec "$here/tools/sc-ab-threads.sh" "$@" ;;
 displays)
-    "$here/wine/tools/sc-monitor" show
-    if [ "${2:-}" = check ]; then
-        echo "-- what Wine tells a program with that choice (a test program, it opens no window):"
-        WAYLANDDRV_PRIMARY_MONITOR="$("$here/wine/tools/sc-monitor")" "$here/wine/build/test/run_displays.sh"
-    fi ;;
+    "$here/tools/sc-monitor" show ;;
 go)
     pgrep -f 'StarCitizen\.exe' >/dev/null || { echo "StarCitizen.exe is not running"; exit 1; }
     touch "$here/logs/capture/GO" && echo "capture series requested"
