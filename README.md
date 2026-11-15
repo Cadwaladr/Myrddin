@@ -77,11 +77,15 @@ This is the only configuration Myrddin has run on.
   dxvk-nvapi) and the driver's NGX libraries in the prefix; the LUG Helper can set both up.
   AMD and Intel GPUs are not supported. A fallback without the game's vectors exists
   (`SC_FG_FALLBACK=1`) and has never been tested.
-- **One renderer, one kind of runner.** The game's Vulkan renderer under Wine with the Wayland
-  driver, on the LUG's experimental Wayland runner as it comes. X11, Proton and other runners
-  are untested. With two other LUG runners (`lug-wine-tkg-git-11.21-1`,
-  `lug-wine-tkg-wayland-git-11.22-1`) the game closed while starting up; whether Myrddin has a
-  part in that is not known yet.
+- **A runner that ships vkd3d-proton.** The Star Citizen LUG's "experimental" runners do
+  (`lug-wine-tkg-experimental-wayland-git-…`), and they are the ones Myrddin works with. On
+  them the game, though it renders with Vulkan, presents its finished frames through
+  Direct3D 12, and that is the swapchain Myrddin puts the generated frames into. On a runner
+  without vkd3d-proton (`lug-wine-tkg-git-11.21-1`, `lug-wine-tkg-wayland-git-11.22-1`) the
+  game presents through a Vulkan swapchain of its own and does not survive the changes Myrddin
+  makes to it: launched with frame generation, the game closes while starting up. Those
+  runners are not supported. The game has only been played with Wine's Wayland driver; X11 and
+  Proton are untested.
 - **Tied to the current game build.** Finding the HUD layer and matching frames to their
   inputs rely on how Alpha 4.10 builds a frame. A patch can break either; the layer then falls
   back or has to be switched off (`sc-turbo fg-off`).
