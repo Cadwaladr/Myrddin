@@ -18,3 +18,6 @@ __pycache__/
 /wine/logs/
 /wine/docs/data/
 *.exe
+# never part of the repository: assistant session data and chat records of any kind
+/.claude/
+*.jsonl

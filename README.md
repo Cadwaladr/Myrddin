@@ -1,8 +1,6 @@
-<p align="center">
-  <img src="docs/banner.svg" width="100%" alt="Myrddin: frame generation and runtime tuning for Star Citizen on Linux">
-</p>
-
 # Myrddin
+
+**Made by Claude, Anthropic's AI model, and directed by Cadwaladr.**
 
 Myrddin makes Star Citizen run better on Linux without touching the game. It works in the
 layers the game already runs through: a Vulkan layer on the host side of Wine that generates
@@ -32,7 +30,9 @@ between each pair of the game's frames, and presents one to three generated fram
 - The game's motion vectors are checked against the picture, which cures thin objects that
   flicker because their vectors are wrong.
 - Real and generated frames are spaced evenly and limited to the display's refresh rate.
-- A performance panel over the picture: the shown rate, the game's own rate, a pacing graph.
+- The shown frame rate, generated frames included, in MangoHud (`sc-turbo fg 3 hud`): the layer
+  sits above it, so MangoHud counts every frame that goes out. The layer also has a panel of its
+  own (the shown rate, the game's own rate, a pacing graph), off unless asked for at launch.
 - Everything is switched from outside while the game runs, and frame dumps and an event
   record are there for diagnosis.
 
@@ -45,28 +45,13 @@ EcoQoS calls Star Citizen makes on Windows, and tools that place and measure the
 from outside. Measured in the game, leaving every thread on every CPU was 4 to 6 % faster, so
 the patch is off by default and kept as an option.
 
+**A launcher window.** One entry per game with its icon: a click launches it, and `−  4x  +`
+under it sets the multiplier, before the launch and while the game runs. Everything it does is
+also a command of `sc-turbo`.
+
 **Measurement.** A passive probe layer, comparisons of two settings within one session
 (`sc-turbo fg-ab`, `sc-turbo threads-ab`), and a headless test chain that exercises the
 frame-generation layer without the game.
-
-## How it works
-
-```
- Star Citizen        Vulkan renderer, DLSS as the upscaler
-      │
- Wine (winevulkan)   Windows calls become host Vulkan calls
-      │
- sc_fg               · the views handed to DLSS  ->  copies of motion vectors and depth
-                     · the game's HUD pass       ->  copies of the HUD layer and the scene under it
-                     · at present: FSR 3.1 interpolation on a Vulkan device of its own,
-                       HUD put over the result, frames paced into the swapchain
-      │
- NVIDIA driver  ->  compositor  ->  display
-```
-
-The layer adds copies into images of its own to the game's command stream, asks for more
-swapchain images and holds the game's present call to pace frames. It changes none of the
-game's data. `sc-turbo` talks to it through control files, never through the game.
 
 ## Tested configuration
 
@@ -74,10 +59,10 @@ This is the only configuration Myrddin has run on.
 
 | | |
 |---|---|
-| Distribution | Fedora Linux 44 (COSMIC) |
+| Distribution | Fedora Linux 44 |
 | Kernel | 7.2.15-200.fc44.x86_64 |
 | Architecture | x86_64 |
-| Desktop | COSMIC 1.11.0, Wayland session |
+| Desktop | KDE Plasma 6.8.2 (KWin 6.8.2-3), Wayland session; before that COSMIC 1.11.0, where most of the development took place |
 | GPU and driver | NVIDIA GeForce RTX 4070 SUPER, 12 GB; driver 615.78.08 |
 | CPU | Intel Core i5-13600K (6 P-cores with SMT, 8 E-cores) |
 | Wine runner | `lug-wine-tkg-experimental-wayland-git-11.20-2` (Wine 11.20, Wayland driver) |
@@ -97,8 +82,9 @@ This is the only configuration Myrddin has run on.
 - **Tied to the current game build.** Finding the HUD layer and matching frames to their
   inputs rely on how Alpha 4.10 builds a frame. A patch can break either; the layer then falls
   back or has to be switched off (`sc-turbo fg-off`).
-- **120 Hz is assumed.** The layer does not read the display's refresh rate: set
-  `SC_FG_TARGET` for another one. Other rates and variable refresh are untested.
+- **The display's refresh rate** is asked of the desktop at launch on KDE Plasma and COSMIC
+  (`sc-turbo displays` shows what was found). Elsewhere 120 Hz is assumed: set `SC_FG_TARGET`.
+  The game has been played at 120 Hz only; other rates and variable refresh are untested.
 - **GPU memory.** The layer keeps buffers of its own, and their size has not been reduced yet.
   On the 12 GB test card the game runs close to the limit: switching the upscaler to native
   resolution in a running session exhausted it, turned generation off, and a driver hang
@@ -109,8 +95,9 @@ This is the only configuration Myrddin has run on.
   [`proto/hud-motion`](proto/hud-motion). In the pause menu, or while the view stands still,
   the generated rate can drop until the view moves; a fallback for that is in the source and
   not yet validated.
-- **Desktop integration is for COSMIC.** Setting up the panel's key and naming the display the
-  game should use work there. Elsewhere, bind `sc-turbo fg-panel` to a key by hand.
+- **Desktop integration is for KDE Plasma and COSMIC.** Setting up the panel's key, naming the
+  display the game should use and reading its refresh rate work there. Elsewhere, bind
+  `sc-turbo fg-panel` to a key by hand and set `SC_MONITOR` and `SC_FG_TARGET`.
 - **The Wine patch** applies to Wine 11.20 and acts only on hybrid CPUs.
 - **No installer, no packages.** x86_64 only.
 
@@ -142,25 +129,96 @@ Helper's `sc-launch.sh` in `~/Games/star-citizen`. If your game is somewhere els
 cp sc-turbo.conf.example sc-turbo.conf     # then set SC_PREFIX in it
 ```
 
-In the game, select DLSS as the upscaler. Then:
+In the game, select DLSS as the upscaler.
+
+### With the launcher window
+
+```sh
+./sc-turbo gui            # open it
+./sc-turbo gui install    # put it in the desktop's application menu ("Myrddin")
+```
+
+One entry per game. `−  4x  +` under the icon sets the multiplier (1x: no frame generation), and
+a click on the icon launches the game with it. While the game runs the buttons act at once, and
+the line under them says what the layer is doing: its multiplier at the moment, the shown frame
+rate and the game's own. The games are listed in [`gui/games.ini`](gui/games.ini); the icon is
+looked up on the machine (the LUG Helper installs one for Star Citizen), none is part of this
+project. The window needs GTK 4, libadwaita and PyGObject (Fedora: `python3-gobject gtk4
+libadwaita`).
+
+### From a terminal
+
+The window does nothing that these do not:
 
 ```sh
 ./sc-turbo fg 3                  # launch with frame generation, ×3 (2, 3 or 4)
+./sc-turbo run                   # launch without it
 ./sc-turbo fg-mult 4             # change the multiplier while the game runs
 ./sc-turbo fg-off                # frames pass through untouched;  fg-on  brings it back
-./sc-turbo fg-panel              # step the performance panel
-./sc-turbo fg-panel-key install  # COSMIC: Ctrl+Shift+` steps the panel
+```
+
+And more than the window has:
+
+```sh
+./sc-turbo fg 3 hud              # launch with MangoHud: its frame rate is the shown one
+./sc-turbo fg 3 panel            # launch with the layer's own panel available; then:
+./sc-turbo fg-panel              #   step the panel (off, rate, both rates, with the graph)
+./sc-turbo fg-panel-key install  #   KDE Plasma, COSMIC: Ctrl+Shift+` steps the panel
+./sc-turbo displays              # the displays, the one the game takes and its refresh rate
 ./sc-turbo fg-watch              # the session's log at a glance
+./sc-turbo fg-where              # after a freeze: what each thread was doing inside the layer
 ./sc-turbo                       # every command
 ```
 
+At every launch `sc-turbo` asks the desktop which display is the primary one and at what rate
+it runs, names that display to the runner (left to itself, the LUG runner's Wayland driver takes
+the display with the most pixels: a TV beside the monitor) and tells the layer the rate.
+`SC_MONITOR` and `SC_FG_TARGET`, in the environment or in `sc-turbo.conf`, override both.
+
 Logs and dumps go to `logs/` inside the project.
+
+### If the game stands still or closes by itself
+
+The layer keeps a record that outlives the game: the session's log (`logs/fg/fg-<pid>.log`) and,
+for every thread that called into it, the hook it was in and the locks it held or waited for.
+
+```sh
+./sc-turbo fg-where     # the last session: where each thread was inside the layer
+```
+
+A line in the log that begins with `lock` means a thread waited more than a second for one of
+the layer's locks, or that a lock left behind by a call that never returned was taken over.
+Both, with the output of `fg-where`, are what a bug report needs. `./sc-turbo fg-off` (or
+launching without `fg`) tells whether the layer is involved at all.
+
+### If only some keys act in the game (KDE Plasma)
+
+Seen on Plasma 6.8: W moved the character, A, S and D did not, while all of them typed into
+the chat. The cause is not this project: Plasma's on-screen keyboard service offers accented
+letters when a physical key is held, and it holds those keys back from any program that takes
+text input, which Wine's Wayland driver always does. Letters with accents then arrive as text.
+`sc-turbo` says so at launch when it finds the option on. To switch it off:
+
+```sh
+kwriteconfig6 --file plasmakeyboardrc --group General --key diacriticsPopupEnabled --type bool --notify false
+```
+
+### If the picture tears (KDE Plasma)
+
+KWin allows fullscreen windows to tear by default. On Plasma 6.8 the game's picture tore,
+generated frames included, until that was switched off (`sc-turbo` says so at launch):
+
+```sh
+kwriteconfig6 --file kwinrc --group Compositing --key AllowTearing --type bool false
+busctl --user call org.kde.KWin /KWin org.kde.KWin reconfigure
+```
 
 ## Repository
 
 | Path | Contents |
 |---|---|
 | `fg/` | the frame-generation layer (`sc_fg.cpp`), its compute shaders and the panel |
+| `gui/` | the launcher window (`myrddin-gui`, GTK 4 and libadwaita) and its list of games |
 | `probe/` | the passive probe layer and the test programs, among them the two-device test chain |
 | `tools/` | tests and validation, in-session comparisons, log readers, thread tools, the panel's key |
 | `wine/` | the Wine patch, its build and test scripts, an example launch script, thread and display tools |
@@ -172,6 +230,11 @@ Logs and dumps go to `logs/` inside the project.
 
 Myrddin is free software under the [GNU General Public License, version 3 or later](LICENSE).
 
+The code, the tests and the documents in this repository were written by Claude, the AI model
+made by [Anthropic](https://www.anthropic.com), working in Claude Code. Cadwaladr directed the
+work, decided what it should do and tested it in the game. The parts that come from elsewhere
+are listed below.
+
 | Component | Licence |
 |---|---|
 | AMD FidelityFX SDK 1.1.4, with changes that yield several generated frames per pair | MIT (`third_party/ffx_src/FidelityFX-SDK/LICENSE.txt`) |
@@ -181,7 +244,6 @@ Myrddin is free software under the [GNU General Public License, version 3 or lat
 | Adwaita Sans, the panel's letters, baked into `fg/hud_font.h` | SIL Open Font License 1.1 |
 
 Star Citizen is a trademark of Cloud Imperium Games; FidelityFX and FSR are AMD's; DLSS is
-NVIDIA's. Myrddin is an independent project. It owes its footing to the
+NVIDIA's; Claude and Claude Code are Anthropic's. Myrddin is an independent project: none of
+them is affiliated with it or endorses it. It owes its footing to the
 [Star Citizen LUG](https://github.com/starcitizen-lug), whose runners and Helper it builds on.
-
-<sub>Myrddin is the Welsh name of Merlin.</sub>
