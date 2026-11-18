@@ -49,9 +49,19 @@ between each pair of the game's frames, and presents one to three generated fram
 - Everything is switched from outside while the game runs, and frame dumps and an event
   record are there for diagnosis.
 
-On the test machine, a heavy hangar scene that the game renders at 24 to 28 frames a second is
-shown at 97 to 110 with ×4. Generated frames are interpolated: they add smoothness, not
-responsiveness, and each real frame is shown a little later than it would be without them.
+Frame rates on the test machine in the game's cities, on foot, with hangars and flights left out
+(2560×1440 at 120 Hz, DLSS rendering at 1280×720, up to ×4; live servers, 2026-11-18). "Typical"
+is the middle of the ten-second averages, "busy" the slowest tenth of them
+(`tools/city-rates.py` makes this table from a session's logs):
+
+| City | Time measured | The game's own frames per second: typical (busy) | Shown with frame generation: typical (busy) |
+|---|---|---|---|
+| Orison | 26 min | 27 (20) | 108 (82) |
+| Lorville | 9 min | 29 (25) | 111 (99) |
+| Levski | 5 min | 26 (22) | 102 (88) |
+
+Generated frames are interpolated: they add smoothness, not responsiveness, and each real frame
+is shown a little later than it would be without them.
 
 **A launcher window.** One entry per game with its icon: a click launches it, and `−  4x  +`
 under it sets the multiplier, before the launch and while the game runs. Everything it does is
