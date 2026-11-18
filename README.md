@@ -30,12 +30,14 @@ between each pair of the game's frames, and presents one to three generated fram
 - Multipliers ×2, ×3 and ×4, set at launch and changed while the game runs. The multiplier
   follows the game's rate: the fewest generated frames that fill the display.
 - The HUD stays sharp. The game draws its HUD into a layer of its own; `sc_fg` captures that
-  layer and puts it over every generated frame instead of interpolating it. A picture-based
-  detection is the fallback.
-- HUD content that moves over the screen (markers pinned to the world, the compass, the map, a
-  ship's flight display) moves at the shown rate too: the layer finds how each group of it
-  moved between two of the game's frames and puts it where it is on its way in every generated
-  frame. This costs about 4 % of the game's own frames where the GPU is the limit.
+  layer, interpolates the picture without it and puts it over every generated frame, to the
+  pixel. Now and then a frame comes without a capture: its picture without the HUD is then worked
+  out from the frame and the last capture. A picture-based detection is the fallback.
+- HUD content that moves over the screen (markers pinned to the world, the compass, a ship's
+  flight display) moves at the shown rate too: the layer finds how each group of it moved
+  between two of the game's frames and puts it where it is on its way in every generated frame.
+  What changes where it stands, like the map at the top left, is left at the game's own rate.
+  This costs about 4 % of the game's own frames where the GPU is the limit.
   `sc-turbo fg 3 nomarkers` launches without it, and `sc-turbo fg-params markers=0` switches
   it off in a running game.
 - The game's motion vectors are checked against the picture, which cures thin objects that
@@ -107,9 +109,13 @@ This is the only configuration Myrddin has run on.
   group, which moves as a whole, by one smooth motion, or not at all. A small part that moves
   by itself inside a group (a pointer on a scale) is put where the group's motion takes it,
   and in a very fast turn part of a group can stay at its old place for a frame. In play a
-  little flicker of the flight display is left now and then. About once or twice a minute the
-  game leaves out its HUD layer for half a second; for those frames and a few seconds after,
-  the frames are interpolated as they are presented, HUD included. In the pause menu, or while
+  little flicker of the flight display is left now and then. The map at the top left is not
+  moved: it updates at the game's own rate, because it turns inside its frame and moving it as
+  a piece doubled its lines and tore its picture. A frame that comes without a HUD
+  capture shows the HUD of the last capture in its generated frames, so what moves on the HUD
+  (markers) stands still for that frame. Where many frames in a row, or every second one, come
+  without (the game's menus), frames are interpolated as they are presented, HUD included, until
+  captures come again. In the pause menu, or while
   the view stands still, the generated rate can drop until the view moves; a fallback for that
   is in the source and not yet validated.
 - **Desktop integration is for KDE Plasma and COSMIC.** Setting up the panel's key, naming the
@@ -177,6 +183,8 @@ And more than the window has:
 ```sh
 ./sc-turbo fg 3 hud              # launch with MangoHud: its frame rate is the shown one
 ./sc-turbo fg 3 nomarkers        # launch with moving HUD content left at the game's own rate
+./sc-turbo fg 3 watch            # launch and record the game's disk, memory and GPU memory use
+./sc-turbo iowatch report        #   afterwards: that, frame rates and the game's log, place by place
 ./sc-turbo fg 3 panel            # launch with the layer's own panel available; then:
 ./sc-turbo fg-panel              #   step the panel (off, rate, both rates, with the graph)
 ./sc-turbo fg-panel-key install  #   KDE Plasma, COSMIC: Ctrl+Shift+` steps the panel

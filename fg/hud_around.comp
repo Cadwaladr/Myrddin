@@ -4,14 +4,15 @@
 // two around it (its own among them), each also one pixel to every side, on its own cells: a piece
 // lies across tiles, and a tile with little of it finds nothing by itself. One work group, 64
 // invocations, works on one tile. -> around (the motion, whether it fits, what it leaves
-// unexplained) and sums (the tile's arrived content, what "not moved" leaves).
+// unexplained) and sums (the tile's arrived content, what "not moved" leaves, its pixels).
 layout(local_size_x = 64) in;
 layout(binding = 0) uniform usampler2D blocks; // hud_blocks.comp
 layout(binding = 1) uniform usampler2D cells;
 struct Tile {
     ivec4 own;     // its own search's answer: xy; z: 1 when it has one
     ivec4 around;  // the best of the answers around it, on its own cells: xy; z: state; w: what it leaves unexplained
-    ivec4 sums;    // x: arrived content in its changed cells; y: what "not moved" leaves; z: its piece (-1: none)
+    ivec4 sums;    // x: arrived content in its changed cells; y: what "not moved" leaves; z: its piece (-1: none);
+                   // w: its pixels with content
     vec4 piece;    // (of a piece's first tile) x: content that fits, y: all of it, z: 1 when the piece counts
     vec4 first;    // the field, first round: xy; z: 1 when there is one
     ivec4 refined; // as around, against the field
@@ -35,7 +36,7 @@ const int CANDIDATES = 1 + 25 * 9; // "not moved", then nine around the answer o
 const uint NO_COST = 0xffffffffu;
 
 shared uint s_cell[256]; // the tile's cells of 4: sum | changed << 16
-shared uint s_changed[64], s_content[64];
+shared uint s_changed[64], s_content[64], s_pixels[64];
 shared ivec3 s_answers[25]; // xy; z: 1 when that tile has one
 shared uint s_costs[CANDIDATES];
 
@@ -65,15 +66,17 @@ void main() {
     const ivec2 tiles = ivec2(pc.tiles_w, pc.tiles_h);
     const uint record = uint(tile.y * tiles.x + tile.x);
     const ivec2 origin = tile * 64;
-    uint changed = 0u, content = 0u;
+    uint changed = 0u, content = 0u, pixels = 0u;
     for (uint k = me * 4u; k < me * 4u + 4u; ++k) {
         const uvec4 cell = texelFetch(cells, tile * 16 + ivec2(k & 15u, k >> 4), 0);
         s_cell[k] = cell.r | cell.b << 16;
         changed += cell.b;
         content += cell.b != 0u ? cell.g : 0u;
+        pixels += cell.a;
     }
     s_changed[me] = changed;
     s_content[me] = content;
+    s_pixels[me] = pixels;
     if (me < 25u) {
         const ivec2 other = tile + ivec2(me % 5u, me / 5u) - 2;
         ivec3 answer = ivec3(0);
@@ -86,9 +89,11 @@ void main() {
     barrier();
     changed = 0u;
     content = 0u;
+    pixels = 0u;
     for (int i = 0; i < 64; ++i) {
         changed += s_changed[i];
         content += s_content[i];
+        pixels += s_pixels[i];
     }
     if (changed == 0u || markers.seen > uint(pc.cap)) {
         if (me == 0u) {
@@ -125,7 +130,7 @@ void main() {
         return;
     }
     const uint zero = s_costs[0];
-    markers.tiles[record].sums = ivec4(int(content), int(zero), -1, 0);
+    markers.tiles[record].sums = ivec4(int(content), int(zero), -1, int(pixels));
     if (little) {
         markers.tiles[record].around = ivec4(0, 0, LITTLE, 0);
         return;

@@ -4,8 +4,11 @@
 #
 #   tools/fg-validate.sh [all | regression | hose | limiter [A|B|C|D] | multiplier | gpuwait | soak | panel | markers]
 #
-#   regression   the frame chain's six cases: chain intact (unlinked=0, shift=0, off=0; "early": shift=1, off=1)
-#                ("own": a swapchain of the game's own renderer, left as it is: presents = frames, nothing generated)
+#   regression   the frame chain's cases: chain intact (unlinked=0, shift=0, off=0; "early": shift=1, off=1)
+#                ("own": a swapchain of the game's own renderer, left as it is: presents = frames, nothing generated;
+#                "gaps": most frames without a HUD capture, generation goes on with the HUD in the picture;
+#                "gapfill": one frame in three without one, the HUD stays apart all the same; "gapcross": the HUD
+#                pass in a command buffer of its own; tools/gap-check.py says whether the pictures are right)
 #                "lost": frames copied out of the shared image only when the game's next frame was
 #                finished, so that the copy took the wrong picture (the layer counts them, from the moment
 #                generation is set up). Nothing but 0 will do, anywhere, except: in the runs of the
@@ -41,8 +44,11 @@
 #                transparent ones among them, are in proto/hud-motion/shapes.py); captures of the game's HUD layer replayed
 #                (HUD_CAPTURES=PREFIX, seven in a row from "sc-turbo fg-dump 7"; default logs/fg/dump-650085)
 #                must come out as the reference says, pass by pass and in the picture
-#                (tools/hud-motion-check.py); and what the passes cost: a GPU-bound game with them once,
-#                eight times over and not at all, in turn.
+#                (tools/hud-motion-check.py), with nothing of the game's map moved, whether it turns in its
+#                frame or sways with it (HUD_SWAY=PREFIX, three in a row; default logs/fg/dump-147674), and
+#                nothing of a ship's HUD held back, slow or fast (HUD_SHIP=PREFIX, eight in a row; default
+#                logs/fg/dump-1326375); and what the passes cost: a GPU-bound game with them once, eight
+#                times over and not at all, in turn.
 #   FG_TARGET=RATE: the display rate the limiter, multiplier, gpuwait and soak cases run at (120).
 #   panel        the performance panel (off by default; all the above run without it): the chain's cases
 #                with it on, intact as without; frames that pass through from the first one, with the
@@ -75,10 +81,17 @@ regression() {
     # command buffer later: the copy must not be captured as that old pass's frame (nothing but "0 taken").
     reg stale "" --stale-hud 7
     say "stale: $(grep -h 'stale-hud' logs/test/stale/out.txt); $(grep -c 'layer no longer exists' logs/test/stale/fg-*.log) taken for an old pass, $(grep -c 'never came back\|^ *[0-9.]* lock ' logs/test/stale/fg-*.log) lock lines"
-    # Captures that come with gaps (every third frame without one): interpolated as presented, so the
-    # generated rate stays near the real one's; one "come with gaps" line.
-    reg gaps "SC_FG_TEST_LAYER=1" --nohud 3
+    # Captures that come with gaps (every second frame without one, as in the game's menus): interpolated as
+    # presented, so the generated rate stays near the real one's; one "come with gaps" line.
+    reg gaps "SC_FG_TEST_LAYER=1" --nohud 2
     say "gaps: $(grep -c 'captures come with gaps' logs/test/gaps/fg-*.log) hold(s) begun, $(grep -c 'every frame has its HUD capture again' logs/test/gaps/fg-*.log) ended"
+    # Frames with their HUD but without a capture (every third one), as the game has them now and then: the
+    # scene given to the interpolation stays free of the HUD, every generated frame has it exact, none is lost.
+    # And a HUD pass recorded into a command buffer of its own: a capture all the same ("cross", nohud=0).
+    TEST_AT="5:DUMP=8" reg gapfill "SC_FG_MARKERS=1" --game-ms 30 --marker 0 0 --gap 3
+    say "gapfill: $(python3 tools/gap-check.py logs/test/gapfill --expect-gaps | tail -1), $(grep -c 'HUD layer mode off' logs/test/gapfill/fg-*.log) times out of layer mode, $(grep STAT logs/test/gapfill/fg-*.log | tail -1 | grep -o 'hud gaps filled=[0-9]*')"
+    TEST_AT="5:DUMP=6" reg gapcross "SC_FG_MARKERS=1" --game-ms 30 --marker 0 0 --split-hud 3
+    say "gapcross: $(python3 tools/gap-check.py logs/test/gapcross | tail -1), $(grep STAT logs/test/gapcross/fg-*.log | tail -1 | grep -o 'hud gaps filled=[0-9]* cross=[0-9]*')"
     # The locks' own test: a holder that ended (taken over), one at work (waited for, not taken over),
     # a call that never came back (let go by its thread, with and without another thread waiting).
     reg locks "SC_FG_TEST_LOCKS=1"
@@ -226,7 +239,7 @@ stamp="$here/logs/test/_validate.start"; touch "$stamp"
 say "# $(date '+%F %H:%M') build $(sha256sum "${TEST_LIB:-$( [ -f build/fg/libsc_fg.new.so ] && echo build/fg/libsc_fg.new.so || echo build/fg/libsc_fg.so)}" | cut -c1-16)"
 markers() {
     say "## markers: HUD content that moves over the screen (SC_FG_MARKERS=1)"
-    local c n v captures=${HUD_CAPTURES:-logs/fg/dump-650085}
+    local c n v captures=${HUD_CAPTURES:-logs/fg/dump-650085} sway=${HUD_SWAY:-logs/fg/dump-147674} ship=${HUD_SHIP:-logs/fg/dump-1326375}
     for c in "mk_across|14 0" "mk_down|0 9" "mk_both|11 7" "mk_fast|90 40"; do
         IFS='|' read -r n v <<< "$c"
         # shellcheck disable=SC2086
@@ -236,7 +249,17 @@ markers() {
     if ls "$captures"-000-hud-*.bin > /dev/null 2>&1; then
         TEST_SIZE=2560x1440 TEST_AT="5:DUMP=8" tools/test-chain.sh mk_game 12 "SC_FG_MARKERS=1 SC_FG_MARKER_CAP=100000" \
             --game-ms 30 --hud-files "$captures" 0 7 > logs/test/_mk_game.out 2>&1
-        python3 tools/hud-motion-check.py logs/test/mk_game "$captures" 0 7 2 | sed "s|$here/||" | tee -a "$out"
+        HUD_STILL="0 1 7 7" python3 tools/hud-motion-check.py logs/test/mk_game "$captures" 0 7 2 | sed "s|$here/||" | tee -a "$out"
+        if ls "$sway"-000-hud-*.bin > /dev/null 2>&1; then
+            TEST_SIZE=2560x1440 TEST_AT="5:DUMP=4" tools/test-chain.sh mk_sway 12 "SC_FG_MARKERS=1 SC_FG_MARKER_CAP=100000" \
+                --game-ms 30 --hud-files "$sway" 0 3 > logs/test/_mk_sway.out 2>&1
+            HUD_STILL="0 1 7 7" python3 tools/hud-motion-check.py logs/test/mk_sway "$sway" 0 3 2 | sed "s|$here/||" | tee -a "$out"
+        fi
+        if ls "$ship"-000-hud-*.bin > /dev/null 2>&1; then
+            TEST_SIZE=2560x1440 TEST_AT="5:DUMP=8" tools/test-chain.sh mk_ship 12 "SC_FG_MARKERS=1 SC_FG_MARKER_CAP=100000" \
+                --game-ms 30 --hud-files "$ship" 0 8 > logs/test/_mk_ship.out 2>&1
+            HUD_PICTURES=0 python3 tools/hud-motion-check.py logs/test/mk_ship "$ship" 0 8 2 | sed "s|$here/||" | tee -a "$out"
+        fi
         # what the passes cost: the game's own size, the GPU the slower one; in turn, twice
         local names=
         for n in mc0 mc1 mc8 mc0b mc1b mc8b; do

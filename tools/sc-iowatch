@@ -1,0 +1,580 @@
+#!/usr/bin/env python3
+"""What the game does with the disk, the memory and the GPU's memory while it is played, and what
+that has to do with its frame rate. It only reads /proc and /sys, asks nvidia-smi and looks at how
+much of the game's data file is in the page cache: it does not attach to the game or touch it.
+
+    tools/sc-iowatch [--pid PID] [--no-gpu]   record every session of the game (logs/io/io-PID.csv), until
+                                              what started this ends (with --pid: that process, once)
+    tools/sc-iowatch report [PID | FILE]      what a recording shows (default: the newest one)
+
+"sc-turbo fg N watch" starts the recording with the game. The report puts it together with the
+frame-generation layer's log (logs/fg/fg-PID.log) and the game's own log, place by place:
+
+  base        the game's frames a second
+  game sets   the share of the time the game itself set that rate; the rest of the time the layer
+              held it to what the display has room for, so that it could have gone faster
+  own rate    the rate in the time the game set it
+  gpu %       how busy the GPU was (the layer's own work included)
+  vram        GPU memory in use by everything on the machine, and by the game with the layer of what
+              the driver offers it (the layer's figures)
+  ram         the game's memory in RAM
+  disk        what was read from the game's disk (MB/s), how busy it was, how long a read took
+  blocked     the game's threads waiting for the disk or for memory at a sampled moment
+  physics     thousands of physics entities the game had loaded (from its own log, every 10 minutes)
+
+and then what happened in the minute after each arrival at a place.
+"""
+import bisect
+import collections
+import csv
+import ctypes
+import datetime
+import glob
+import json
+import os
+import re
+import statistics
+import struct
+import subprocess
+import sys
+import threading
+import time
+
+HERE = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+OUT = os.path.join(HERE, "logs", "io")
+GAME = "StarCitizen.exe"
+FIELDS = (
+    "time disk_reads disk_mb disk_read_ms disk_busy_ms disk_inflight "
+    "rchar_mb read_mb syscr minflt majflt cpu_user cpu_sys rss_mb anon_mb file_mb swap_mb threads running blocked "
+    "mem_free_mb mem_cached_mb mem_avail_mb allocstall scan_direct steal_direct swap_in swap_out compact_stall "
+    "psi_io_some psi_io_full psi_mem_some psi_cpu_some p4k_cached_mb p4k_evicted_mb "
+    "gpu_fb_mb gpu_bar1_mb gpu_busy gpu_mem_busy pcie_rx pcie_tx"
+).split()
+
+
+def read(path, default=""):
+    try:
+        with open(path, errors="replace") as f:
+            return f.read()
+    except OSError:
+        return default
+
+
+# ----------------------------------------------------------------------------- recording
+
+
+def find_game():
+    best, best_size = None, 0
+    for entry in os.listdir("/proc"):
+        if entry.isdigit() and read(f"/proc/{entry}/comm").strip() == GAME:
+            fields = read(f"/proc/{entry}/statm").split()
+            size = int(fields[1]) if len(fields) > 1 else 0
+            if size >= best_size:
+                best, best_size = int(entry), size
+    return best
+
+
+def disk_of(path):
+    """The whole disk a path is on: its name in /proc/diskstats."""
+    try:
+        st = os.stat(path)
+        link = os.path.realpath(f"/sys/dev/block/{os.major(st.st_dev)}:{os.minor(st.st_dev)}")
+        if os.path.exists(os.path.join(link, "partition")):
+            link = os.path.dirname(link)
+        return os.path.basename(link)
+    except OSError:
+        return None
+
+
+def data_file(pid):
+    """The game's big data file, from what it has open."""
+    try:
+        for fd in os.listdir(f"/proc/{pid}/fd"):
+            try:
+                target = os.readlink(f"/proc/{pid}/fd/{fd}")
+            except OSError:
+                continue
+            if target.endswith("Data.p4k"):
+                return target
+    except OSError:
+        pass
+    return None
+
+
+class CacheStat:
+    """How much of a file is in the page cache (the cachestat system call: no walking the file)."""
+
+    class Range(ctypes.Structure):
+        _fields_ = [("off", ctypes.c_uint64), ("len", ctypes.c_uint64)]
+
+    class Stat(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_uint64) for n in ("cache", "dirty", "writeback", "evicted", "recently_evicted")]
+
+    def __init__(self, path):
+        self.fd = os.open(path, os.O_RDONLY)
+        self.libc = ctypes.CDLL(None, use_errno=True)
+        self.page = os.sysconf("SC_PAGE_SIZE")
+
+    def read(self):
+        stat = self.Stat()
+        wanted = self.Range(0, 0)  # (length 0: to the end of the file)
+        if self.libc.syscall(451, self.fd, ctypes.byref(wanted), ctypes.byref(stat), 0) != 0:
+            return None
+        return stat.cache * self.page / 1e6, stat.recently_evicted * self.page / 1e6
+
+
+class GpuWatch(threading.Thread):
+    """nvidia-smi's monitor as one process that stays (asking it anew every time costs far more)."""
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.values = {}
+        self.process = None
+
+    def run(self):
+        try:
+            self.process = subprocess.Popen(["nvidia-smi", "dmon", "-s", "mut", "-d", "2"], stdout=subprocess.PIPE,
+                                            stderr=subprocess.DEVNULL, text=True)
+        except OSError:
+            return
+        names = []
+        for line in self.process.stdout:
+            words = line.split()
+            if line.startswith("#"):
+                if len(words) > 1 and words[1] == "gpu":
+                    names = words[2:]
+                continue
+            if names and len(words) == len(names) + 1:
+                self.values = dict(zip(names, words[1:]))
+
+    def stop(self):
+        if self.process:
+            self.process.terminate()
+
+
+def key_values(text):
+    out = {}
+    for line in text.splitlines():
+        parts = line.replace(":", " ").split()
+        if len(parts) >= 2:
+            out[parts[0]] = parts[1]
+    return out
+
+
+def psi(kind):
+    out = {}
+    for line in read(f"/proc/pressure/{kind}").splitlines():
+        parts = line.split()
+        if parts:
+            out[parts[0]] = int(parts[-1].split("=")[1]) / 1000.0  # ms
+    return out
+
+
+def task_states(pid):
+    running = blocked = 0
+    try:
+        tasks = os.listdir(f"/proc/{pid}/task")
+    except OSError:
+        return 0, 0, 0
+    for task in tasks:
+        text = read(f"/proc/{pid}/task/{task}/stat")
+        state = text[text.rfind(")") + 2 :][:1]
+        running += state == "R"
+        blocked += state == "D"
+    return len(tasks), running, blocked
+
+
+def thread_reads(pid):
+    out = {}
+    try:
+        tasks = os.listdir(f"/proc/{pid}/task")
+    except OSError:
+        return out
+    for task in tasks:
+        values = key_values(read(f"/proc/{pid}/task/{task}/io"))
+        if values:
+            out[task] = (read(f"/proc/{pid}/task/{task}/comm").strip(), int(values.get("rchar", 0)), int(values.get("read_bytes", 0)))
+    return out
+
+
+def record(args):
+    """Every session of the game for as long as what started this runs (the launcher, or a terminal)."""
+    os.nice(10)
+    if "--pid" in args:
+        record_one(int(args[args.index("--pid") + 1]), args)
+        return
+    parent = os.getppid()
+    done = set()
+    print(f"waiting for {GAME} ...", flush=True)
+    while os.getppid() == parent:
+        pid = find_game()
+        if pid and pid not in done:
+            done.add(pid)
+            record_one(pid, args)
+            print(f"waiting for {GAME} ...", flush=True)
+        else:
+            time.sleep(2.0)
+
+
+def ntsync_open(pid):
+    """Whether the process has Wine's fast synchronisation device open (None: cannot be told)."""
+    try:
+        with os.scandir(f"/proc/{pid}/fd") as entries:
+            for entry in entries:
+                try:
+                    if "ntsync" in os.readlink(entry.path):
+                        return True
+                except OSError:
+                    pass
+    except OSError:
+        return None
+    return False
+
+
+def record_one(pid, args):
+    os.makedirs(OUT, exist_ok=True)
+    path = os.path.join(OUT, f"io-{pid}.csv")
+    gpu = GpuWatch()
+    if "--no-gpu" not in args:
+        gpu.start()
+    tick_hz = os.sysconf("SC_CLK_TCK")
+    last = {}
+    cache = None
+    cache_values = (0.0, 0.0)
+    disk = None
+    threads_before = {}
+    print(f"recording process {pid} to {path}", flush=True)
+    with open(path, "w", newline="") as f, open(path[:-4] + ".threads", "w") as thread_file:
+        out = csv.writer(f)
+        out.writerow(FIELDS)
+        next_tick = time.time()
+        count = 0
+        while os.path.exists(f"/proc/{pid}/stat"):
+            next_tick += 1.0
+            pause = next_tick - time.time()
+            if pause > 0:
+                time.sleep(pause)
+            else:
+                next_tick = time.time()
+            if count % 10 == 0 and cache is None:
+                file = data_file(pid)
+                if file:
+                    disk = disk_of(file)
+                    try:
+                        cache = CacheStat(file)
+                    except OSError:
+                        pass
+            if disk is None:
+                disk = disk_of(f"/proc/{pid}/cwd")
+            now = time.time()
+            status = key_values(read(f"/proc/{pid}/status"))
+            if not status:
+                break
+            io_values = key_values(read(f"/proc/{pid}/io"))
+            text = read(f"/proc/{pid}/stat")
+            stat = text[text.rfind(")") + 2 :].split()
+            if len(stat) < 14 or stat[0] == "Z":
+                break
+            vm = key_values(read("/proc/vmstat"))
+            mem = key_values(read("/proc/meminfo"))
+            disk_fields = []
+            for line in read("/proc/diskstats").splitlines():
+                parts = line.split()
+                if len(parts) > 13 and parts[2] == disk:
+                    disk_fields = parts
+                    break
+            counters = {
+                "disk_reads": float(disk_fields[3]) if disk_fields else 0.0,
+                "disk_mb": float(disk_fields[5]) * 512 / 1e6 if disk_fields else 0.0,
+                "disk_read_ms": float(disk_fields[6]) if disk_fields else 0.0,
+                "disk_busy_ms": float(disk_fields[12]) if disk_fields else 0.0,
+                "rchar_mb": int(io_values.get("rchar", 0)) / 1e6,
+                "read_mb": int(io_values.get("read_bytes", 0)) / 1e6,
+                "syscr": float(io_values.get("syscr", 0)),
+                "minflt": float(stat[7]),
+                "majflt": float(stat[9]),
+                "cpu_user": float(stat[11]) / tick_hz,
+                "cpu_sys": float(stat[12]) / tick_hz,
+                "allocstall": sum(float(v) for k, v in vm.items() if k.startswith("allocstall_")),
+                "scan_direct": float(vm.get("pgscan_direct", 0)),
+                "steal_direct": float(vm.get("pgsteal_direct", 0)),
+                "swap_in": float(vm.get("pswpin", 0)),
+                "swap_out": float(vm.get("pswpout", 0)),
+                "compact_stall": float(vm.get("compact_stall", 0)),
+                "psi_io_some": psi("io").get("some", 0.0),
+                "psi_io_full": psi("io").get("full", 0.0),
+                "psi_mem_some": psi("memory").get("some", 0.0),
+                "psi_cpu_some": psi("cpu").get("some", 0.0),
+            }
+            row = {k: (v - last[k] if k in last else 0.0) for k, v in counters.items()}
+            last = counters
+            if cache and count % 5 == 0:
+                cache_values = cache.read() or cache_values
+            threads, running, blocked = task_states(pid)
+            g = gpu.values
+            row.update(
+                time=round(now, 2), disk_inflight=disk_fields[11] if disk_fields else 0,
+                rss_mb=int(status.get("VmRSS", 0)) // 1024, anon_mb=int(status.get("RssAnon", 0)) // 1024,
+                file_mb=int(status.get("RssFile", 0)) // 1024, swap_mb=int(status.get("VmSwap", 0)) // 1024,
+                threads=threads, running=running, blocked=blocked, mem_free_mb=int(mem.get("MemFree", 0)) // 1024,
+                mem_cached_mb=int(mem.get("Cached", 0)) // 1024, mem_avail_mb=int(mem.get("MemAvailable", 0)) // 1024,
+                p4k_cached_mb=round(cache_values[0]), p4k_evicted_mb=round(cache_values[1]),
+                gpu_fb_mb=g.get("fb", ""), gpu_bar1_mb=g.get("bar1", ""), gpu_busy=g.get("sm", ""),
+                gpu_mem_busy=g.get("mem", ""), pcie_rx=g.get("rxpci", ""), pcie_tx=g.get("txpci", ""),
+            )
+            out.writerow([round(row[k], 2) if isinstance(row[k], float) else row[k] for k in FIELDS])
+            f.flush()
+            count += 1
+            if count == 30:  # (the game has been up for a while by now)
+                thread_file.write(json.dumps({"time": round(now, 1), "ntsync": ntsync_open(pid)}) + "\n")
+            if count % 10 == 0:  # which threads read: per ten seconds
+                reads = thread_reads(pid)
+                top = []
+                for task, (name, rchar, disk_bytes) in reads.items():
+                    was = threads_before.get(task)
+                    if was:
+                        top.append((disk_bytes - was[2], rchar - was[1], name))
+                threads_before = reads
+                top.sort(reverse=True)
+                busy = [[n, round(b / 1e6, 1), round(c / 1e6, 1)] for b, c, n in top[:8] if b > 0 or c > 1_000_000]
+                thread_file.write(json.dumps({"time": round(now, 1), "top": busy}) + "\n")
+                thread_file.flush()
+    gpu.stop()
+    print(f"the game has ended: {count} seconds recorded. Now: tools/sc-iowatch report {pid}")
+
+
+# ----------------------------------------------------------------------------- report
+
+
+def conf_prefix():
+    prefix = os.environ.get("SC_PREFIX")
+    if not prefix:
+        m = re.search(r'^SC_PREFIX="?([^"\n]+)"?', read(os.path.join(HERE, "sc-turbo.conf")), re.M)
+        prefix = m.group(1).replace("$HOME", os.path.expanduser("~")) if m else os.path.expanduser("~/Games/star-citizen")
+    return prefix
+
+
+def game_folder():
+    return os.path.join(conf_prefix(), "drive_c/Program Files/Roberts Space Industries/StarCitizen/LIVE")
+
+
+STAMP = re.compile(r"<(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)")
+
+
+def stamp(text):
+    return datetime.datetime.fromisoformat(text).replace(tzinfo=datetime.timezone.utc).timestamp()
+
+
+def game_log_for(start):
+    """The game's log of the session that began about at `start`."""
+    live = game_folder()
+    best, best_gap = None, 300.0
+    for path in [os.path.join(live, "Game.log")] + glob.glob(os.path.join(live, "logbackups", "*.log")):
+        try:
+            with open(path, errors="replace") as f:
+                for line in f:
+                    m = STAMP.match(line)
+                    if m:
+                        gap = abs(stamp(m.group(1)) - start)
+                        if gap < best_gap:
+                            best, best_gap = path, gap
+                        break
+        except OSError:
+            pass
+    return best
+
+
+def parse_game_log(path):
+    places, physics, summary = [], [], {}
+    waiting = False
+    for line in open(path, errors="replace"):
+        m = STAMP.match(line)
+        when = stamp(m.group(1)) if m else None
+        for place in re.findall(r"Location\[([^\]]+)\]", line):
+            if when and place not in ("", "0", "Unknown") and (not places or places[-1][1] != place):
+                places.append((when, place))
+        if "PHYSICS INSTANCE STATS BEGIN" in line:
+            waiting = True
+        elif waiting:
+            e = re.search(r"entities:\s+(\d+) allocated", line)
+            if e and when:
+                physics.append((when, int(e.group(1))))
+                waiting = False
+        for name, pattern in (("entities", r"Entities\s*: Min: (-?\d+) Max: (\d+) Avg: (\d+)"),
+                              ("main", r"CPU \(MainThread\)\s*: ([\d.]+) FPS \(([\d.]+) ms\)"),
+                              ("frame", r"CPU \(WholeFrame\)\s*: ([\d.]+) FPS \(([\d.]+) ms\)"),
+                              ("ram", r"Memory \(WorkingSet\)\s*: Min: ([\d.]+) MB Max ([\d.]+)")):
+            s = re.search(pattern, line)
+            if s:
+                summary[name] = s.groups()
+    return places, physics, summary
+
+
+STAT = re.compile(
+    r"\s*([\d.]+) STAT x(\d) real=([\d.]+)/s.*?game frame ms mean=([\d.]+) p50=([\d.]+) p95=([\d.]+) p99=([\d.]+) max=([\d.]+)"
+    r".*?hud=(\d+) layer=(\d+).*?nohud=(\d+).*?limit (\d+) of (\d+) sleep ms=([\d.]+)"
+    r"(?:.*?hud gaps filled=(\d+) cross=(\d+) \| gpu memory used=(\d+) of (\d+) MB)?")
+
+
+def parse_layer_log(pid):
+    path = os.path.join(HERE, "logs", "fg", f"fg-{pid}.log")
+    threads = os.path.join(HERE, "logs", "fg", f"THREADS-{pid}")
+    try:
+        with open(threads, "rb") as f:
+            start = struct.unpack_from("<8siId", f.read(32), 0)[3]
+    except (OSError, struct.error):
+        return []
+    rows = []
+    for line in open(path, errors="replace") if os.path.exists(path) else ():
+        m = STAT.match(line)
+        if not m:
+            continue
+        g = m.groups()
+        frames = max(int(g[12]), 1)
+        rows.append(dict(time=start + float(g[0]), mult=int(g[1]), real=float(g[2]), p50=float(g[4]), p99=float(g[6]), worst=float(g[7]),
+                         layer_frames=int(g[9]), other_frames=int(g[8]), nohud=int(g[10]), held=int(g[11]) / frames,
+                         filled=int(g[14] or 0), cross=int(g[15] or 0), used=int(g[16] or 0), budget=int(g[17] or 0)))
+    return rows
+
+
+def median(values, default=float("nan")):
+    values = [v for v in values if v == v]
+    return statistics.median(values) if values else default
+
+
+def number(text):
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def report(args):
+    target = args[0] if args else None
+    if target and os.path.isfile(target):
+        path = target
+    elif target:
+        path = os.path.join(OUT, f"io-{target}.csv")
+    else:
+        files = sorted(glob.glob(os.path.join(OUT, "io-*.csv")), key=os.path.getmtime)
+        if not files:
+            sys.exit(f"no recording in {OUT} (sc-turbo fg N watch)")
+        path = files[-1]
+    pid = re.search(r"io-(\d+)", os.path.basename(path)).group(1)
+    with open(path) as f:
+        samples = [{k: number(v) for k, v in row.items()} for row in csv.DictReader(f)]
+    samples = samples[1:]  # (the first has no differences yet)
+    if len(samples) < 10:
+        sys.exit(path + ": hardly anything recorded")
+    times = [s["time"] for s in samples]
+    start, end = times[0], times[-1]
+    print(f"{os.path.basename(path)}: {(end - start) / 60:.0f} minutes, from {time.strftime('%Y-%m-%d %H:%M', time.localtime(start))}\n")
+    total = lambda k: sum(s[k] for s in samples if s[k] == s[k])
+    peak = lambda k: max((s[k] for s in samples if s[k] == s[k]), default=float("nan"))
+    seconds = len(samples)
+    reads = total("disk_reads")
+    print("the disk the game is on")
+    print(f"  read {total('disk_mb') / 1000:.1f} GB in all, {total('disk_mb') / seconds:.0f} MB/s on average, {peak('disk_mb'):.0f} MB/s at the most")
+    print(f"  busy {total('disk_busy_ms') / 10 / seconds:.1f} % of the time; a read took {total('disk_read_ms') / max(reads, 1):.2f} ms on average")
+    rchar, disk = total("rchar_mb"), total("read_mb")
+    print(f"the game read {rchar / 1000:.1f} GB through file calls; {disk / 1000:.1f} GB of what it read came from the disk, the rest from memory")
+    print(f"  something waited for the disk {total('psi_io_some') / 10 / seconds:.2f} % of the time, for memory {total('psi_mem_some') / 10 / seconds:.3f} %")
+    print(f"memory: the game's largest {peak('rss_mb') / 1000:.1f} GB in RAM; least available to the machine {min(s['mem_avail_mb'] for s in samples) / 1000:.1f} GB; "
+          f"{total('allocstall'):.0f} allocation stalls, {total('swap_out') * 4 / 1000:.0f} MB swapped out")
+    print(f"GPU memory: {peak('gpu_fb_mb') / 1000:.1f} GB at the most; the GPU busy {median([s['gpu_busy'] for s in samples]):.0f} % (median)\n")
+
+    layer = parse_layer_log(pid)
+    log = game_log_for(start)
+    places, physics, summary = parse_game_log(log) if log else ([], [], {})
+    if summary.get("entities"):
+        e, main, whole, ram = summary["entities"], summary.get("main", ("?", "?")), summary.get("frame", ("?", "?")), summary.get("ram", ("?", "?"))
+        print(f"the game's own figures for the session: entities {e[0]} to {e[1]}, on average {e[2]}; main thread {main[1]} ms, whole frame {whole[1]} ms a frame\n")
+    if not layer:
+        print("(no log of the frame-generation layer for this process: no frame rates to compare with)")
+        return
+    # Every ten-second line of the layer with what was recorded in the same ten seconds.
+    for w in layer:
+        a, b = bisect.bisect_left(times, w["time"] - 10.0), bisect.bisect_right(times, w["time"])
+        part = samples[a:b]
+        w["n"] = len(part)
+        for key in ("disk_mb", "gpu_busy", "gpu_fb_mb", "rss_mb", "blocked", "running", "pcie_rx", "pcie_tx"):
+            w[key] = median([s[key] for s in part])
+        reads_here = sum(s["disk_reads"] for s in part)
+        w["disk_busy"] = sum(s["disk_busy_ms"] for s in part) / 10.0 / max(len(part), 1)
+        w["await"] = sum(s["disk_read_ms"] for s in part) / reads_here if reads_here else float("nan")
+        w["blocked_max"] = max((s["blocked"] for s in part), default=0)
+        w["disk_peak"] = max((s["disk_mb"] for s in part), default=0)
+    layer = [w for w in layer if w["n"] and w["real"] > 5]
+    segments = []
+    for i, (when, place) in enumerate(places):
+        until = places[i + 1][0] if i + 1 < len(places) else float("inf")
+        part = [w for w in layer if when <= w["time"] < until]
+        if len(part) >= 6:
+            near = [e for t, e in physics if when <= t < until]  # the game says it every ten minutes
+            if not near:
+                close = [(min(abs(t - when), abs(t - until)), e) for t, e in physics if when - 300 <= t < until + 300]
+                near = [min(close)[1]] if close else []
+            segments.append(dict(place=place, when=when, kind="first" if i == 0 else "arrived", part=part, physics=median(near)))
+    title = (f"{'place':30s} {'reached':8s} {'at':>5s} {'min':>4s} | {'base':>5s} {'game sets':>9s} {'own rate':>8s} {'p99 ms':>6s} | "
+             f"{'gpu %':>5s} {'vram GB':>12s} {'ram GB':>6s} | {'disk MB/s':>9s} {'busy %':>6s} {'read ms':>7s} {'blocked':>7s} | {'physics k':>9s}")
+    print(title)
+    for s in segments:
+        p = s["part"]
+        free = [w["real"] for w in p if w["held"] < 0.5]
+        used = median([w["used"] for w in p if w["used"]])
+        budget = median([w["budget"] for w in p if w["budget"]])
+        print(f"{s['place'][:30]:30s} {s['kind']:8s} {time.strftime('%H:%M', time.localtime(s['when'])):>5s} {len(p) / 6:4.0f} | "
+              f"{median([w['real'] for w in p]):5.1f} {100 * len(free) / len(p):8.0f}% {median(free) if len(free) >= 3 else float('nan'):8.1f} {median([w['p99'] for w in p]):6.1f} | "
+              f"{median([w['gpu_busy'] for w in p]):5.0f} {median([w['gpu_fb_mb'] for w in p]) / 1000:5.1f} {used / 1000:3.1f}/{budget / 1000:3.1f} {median([w['rss_mb'] for w in p]) / 1000:6.1f} | "
+              f"{median([w['disk_mb'] for w in p]):9.0f} {median([w['disk_busy'] for w in p]):6.1f} {median([w['await'] for w in p]):7.2f} {median([w['blocked'] for w in p]):7.0f} | {s['physics'] / 1000:9.0f}")
+    print("\nthe first minute after arriving at a place, against the rest of the stay there")
+    print(f"{'place':30s} {'at':>5s} | {'read GB':>7s} {'peak MB/s':>9s} {'busy %':>6s} {'blocked at most':>15s} | {'worst frame ms':>14s} {'p99 ms':>13s} | {'ram GB':>13s} {'vram GB':>13s}")
+    for s in segments:
+        p = s["part"]
+        first = [w for w in p if w["time"] - s["when"] <= 60]
+        rest = [w for w in p if w["time"] - s["when"] > 60]
+        if not first or not rest:
+            continue
+        print(f"{s['place'][:30]:30s} {time.strftime('%H:%M', time.localtime(s['when'])):>5s} | "
+              f"{sum(w['disk_mb'] * 10 for w in first) / 1000:7.1f} {max(w['disk_peak'] for w in first):9.0f} {median([w['disk_busy'] for w in first]):6.1f} {max(w['blocked_max'] for w in first):15.0f} | "
+              f"{max(w['worst'] for w in first):6.0f} / {median([w['worst'] for w in rest]):5.0f}  {median([w['p99'] for w in first]):5.1f} / {median([w['p99'] for w in rest]):5.1f} | "
+              f"{median([w['rss_mb'] for w in first]) / 1000:5.1f} / {median([w['rss_mb'] for w in rest]) / 1000:5.1f}  {median([w['gpu_fb_mb'] for w in first]) / 1000:5.1f} / {median([w['gpu_fb_mb'] for w in rest]) / 1000:5.1f}")
+    # Do slow stretches go with the disk, or with memory?
+    own = [w for w in layer if w["held"] < 0.5]
+    print(f"\nthe game set its own rate in {100 * len(own) / len(layer):.0f} % of the ten-second spans")
+    if len(own) >= 12:
+        own.sort(key=lambda w: w["real"])
+        third = max(len(own) // 3, 1)
+        slow, fast = own[:third], own[-third:]
+        print(f"{'':28s} {'base':>5s} {'disk MB/s':>9s} {'busy %':>6s} {'blocked':>7s} {'running':>7s} {'gpu %':>5s} {'vram GB':>7s} {'ram GB':>6s}")
+        for name, part in (("its slowest third of those", slow), ("its fastest third of those", fast)):
+            print(f"{name:28s} {median([w['real'] for w in part]):5.1f} {median([w['disk_mb'] for w in part]):9.0f} {median([w['disk_busy'] for w in part]):6.1f} "
+                  f"{median([w['blocked'] for w in part]):7.1f} {median([w['running'] for w in part]):7.1f} {median([w['gpu_busy'] for w in part]):5.0f} "
+                  f"{median([w['gpu_fb_mb'] for w in part]) / 1000:7.1f} {median([w['rss_mb'] for w in part]) / 1000:6.1f}")
+    gaps = sum(w["nohud"] for w in layer)
+    print(f"\nframes without a HUD capture: {gaps}; their scene worked out: {sum(w['filled'] for w in layer)}; captured from a frame copy apart from the HUD pass: {sum(w['cross'] for w in layer)}")
+    names = collections.Counter()
+    ntsync = None
+    for line in open(path[:-4] + ".threads") if os.path.exists(path[:-4] + ".threads") else ():
+        entry = json.loads(line)
+        ntsync = entry.get("ntsync", ntsync)
+        for name, disk_mb, _ in entry.get("top", ()):
+            names[name] += disk_mb
+    if names:
+        print("the threads that read most from the disk: " + ", ".join(f"{n} {v / 1000:.1f} GB" for n, v in names.most_common(6)))
+    if ntsync is not None:
+        print("Wine's fast synchronisation (ntsync): " + ("in use by the game" if ntsync else "NOT open in the game"))
+
+
+def main():
+    args = sys.argv[1:]
+    if args[:1] == ["report"]:
+        report(args[1:])
+    elif args[:1] in (["-h"], ["--help"]):
+        print(__doc__)
+    else:
+        record(args)
+
+
+if __name__ == "__main__":
+    main()

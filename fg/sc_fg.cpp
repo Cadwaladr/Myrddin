@@ -94,6 +94,7 @@
 #include "hud_composite.spv.h"
 #include "hud_detect.spv.h"
 #include "hud_layer.spv.h"
+#include "hud_unmix.spv.h"
 #include "mv_check.spv.h"
 #include "mv_marks.spv.h"
 #include "mv_reach.spv.h"
@@ -759,6 +760,7 @@ struct Instance {
     PFN_vkGetInstanceProcAddr gipa{};
     PFN_vkDestroyInstance DestroyInstance{};
     PFN_vkGetPhysicalDeviceMemoryProperties GetPhysicalDeviceMemoryProperties{};
+    PFN_vkGetPhysicalDeviceMemoryProperties2 GetPhysicalDeviceMemoryProperties2{};
     PFN_vkGetPhysicalDeviceProperties GetPhysicalDeviceProperties{};
     PFN_vkGetPhysicalDeviceProperties2 GetPhysicalDeviceProperties2{};
     PFN_vkGetPhysicalDeviceFeatures GetPhysicalDeviceFeatures{};
@@ -1460,12 +1462,20 @@ ChainFrame g_chain_newest; ///< the last frame handed over (under g_chain_mutex)
 /// interpolation (0) or goes on with the last capture, as before the chain (1); the wait for the
 /// generated frames on/off; a shift of the chain by hand, in captures.
 std::atomic<float> g_live_chain{1.0f}, g_live_nohud{0.0f}, g_live_wait{1.0f}, g_live_shift{0.0f};
+/// A frame without a HUD capture of its own keeps the scene and the HUD apart (PARAMS: gapfill; see
+/// RecordUnmix). A frame copy recorded apart from the HUD pass still makes a capture (PARAMS: cross;
+/// see NoteFrameCopy).
+std::atomic<float> g_live_gapfill{EnvFloat("SC_FG_GAPFILL", 1.0f)}, g_live_cross{EnvFloat("SC_FG_CROSS", 1.0f)};
+std::atomic<uint32_t> g_cross_captures{}; ///< captures made that way, for the statistics
 /// The check of the game's vectors against the picture (PARAMS: vectors; see RecordVectorCheck).
 std::atomic<float> g_live_vectors{EnvFloat("SC_FG_FIX_VECTORS", 1.0f)};
 /// HUD content that moves over the screen is put where it is on its way in the generated frames
 /// (PARAMS: markers; see RecordMarkers). Off unless asked for, which sc-turbo does at launch
 /// (proto/hud-motion/hudmotion.py is the reference the passes are checked against).
 std::atomic<float> g_live_markers{EnvFloat("SC_FG_MARKERS", 0.0f)};
+/// ... except pictures that change where they stand, the game's map (PARAMS: pictures=0 moves them
+/// too; see hud_pieces.comp).
+std::atomic<float> g_live_pictures{EnvFloat("SC_FG_PICTURES", 1.0f)};
 /// The limiter's gate and guard (PARAMS: gate, guard; see Limiter and GuardHandover).
 std::atomic<float> g_live_gate{EnvFloat("SC_FG_GATE", 1.0f)}, g_live_guard{EnvFloat("SC_FG_GUARD", 1.0f)};
 /// This layer's GPU work before the game's next frame (PARAMS: first; see WaitForGenerated).
@@ -2645,9 +2655,10 @@ void CopyHud(Device& d, VkCommandBuffer cmd, VkImage image, VkImage scene, VkIma
 /// `before`: the scene copy of the capture before this one, when it is still held and was taken
 /// right before it: the picture this frame's vectors point into. Null otherwise. `layer_before`:
 /// that capture's HUD layer, under the same conditions. `used`: the count of the capture handed out.
+/// `max_age`: an older capture is none (seconds).
 Image* PickHud(Device& p, uint32_t& width, uint32_t& height, Image** scene = nullptr, uint64_t use = 0,
                Image** neighbours = nullptr, Image** before = nullptr, Image** layer_before = nullptr,
-               uint64_t* used = nullptr) {
+               uint64_t* used = nullptr, double max_age = 0.5) {
     static const uint64_t lag = static_cast<uint64_t>(EnvFloat("SC_FG_HUD_LAG", 0.0f));
     std::lock_guard global{g_input_mutex};
     Device* r = g_input_device;
@@ -2681,7 +2692,7 @@ Image* PickHud(Device& p, uint32_t& width, uint32_t& height, Image** scene = nul
             *used = serial;
         }
     };
-    if (serial <= lag || !in.hud_width || Now() - in.hud_time[(serial - 1) % Inputs::SLOTS] > 0.5) {
+    if (serial <= lag || !in.hud_width || Now() - in.hud_time[(serial - 1) % Inputs::SLOTS] > max_age) {
         return nullptr;
     }
     const uint32_t slot = static_cast<uint32_t>((serial - 1 - lag) % Inputs::SLOTS);
@@ -2832,8 +2843,9 @@ void SelftestImport(Device& p) {
 
 constexpr uint32_t MAX_GENERATED = FFX_FRAMEINTERPOLATION_MAX_GENERATED_FRAMES;
 constexpr int COMMAND_SETS = 3;
-constexpr int HUD_PASSES = 9;  ///< the HUD passes' pipelines; one more follows them:
-constexpr int PANEL_PASS = 9;  ///< the performance panel's, made when the panel is first shown
+constexpr int HUD_PASSES = 10; ///< the HUD passes' pipelines; one more follows them:
+constexpr int UNMIX_PASS = 9;  ///< (the last of them) hud_unmix.comp: a scene worked out, see RecordUnmix
+constexpr int PANEL_PASS = HUD_PASSES; ///< the performance panel's, made when the panel is first shown
 /// The panel's descriptor sets in a command set: one per generated frame, then the real frame's.
 constexpr uint32_t PANEL_SETS = 7 + MAX_GENERATED;
 /// HUD content that moves over the screen (RecordMarkers): its pipelines follow the panel's and
@@ -2856,12 +2868,14 @@ enum MarkerPass { // (in the order of PrepareMarkers' table)
 constexpr int ALL_PASSES = MARKER_PASS + MARKER_PASSES;
 constexpr uint32_t MARKER_SETS = PANEL_SETS + MAX_GENERATED + 1;
 constexpr uint32_t MARKER_SET_COUNT = 11; ///< pieces and field run twice
+constexpr uint32_t UNMIX_SET = MARKER_SETS + MARKER_SET_COUNT; ///< RecordUnmix's descriptor set, the last
+constexpr uint32_t HUD_SET_COUNT = UNMIX_SET + 1;
 
 /// One present, kept for a while: what was linked to what, and what it took (EVENTS control file).
 struct Event {
     enum : uint32_t {
         CHAINED = 1, DUPLICATE = 2, LAYER = 4, RESET = 8, REUSED = 16, NO_HUD = 32, PASSED = 64, MEASURED = 128,
-        CHECKED = 256, GATED = 512, LATE = 1024, LOST = 2048
+        CHECKED = 256, GATED = 512, LATE = 1024, LOST = 2048, UNMIXED = 4096
     };
     double time{};                 ///< entry of the present hook
     uint64_t chain{}, hud{}, input{}, newest_hud{}, newest_input{};
@@ -2936,6 +2950,11 @@ struct Fg {
     // and how many came with one since. With gaps the layer is left alone (see Generate).
     uint32_t capture_gaps{}, capture_run{};
     bool capture_hold{};
+    // The scene of a frame without a capture, worked out (RecordUnmix): two, as a run of such frames
+    // goes from one to the other. `unmixed_last`: the frame before was one, its scene in unmixed[unmixed_index].
+    Image unmixed[2];
+    uint32_t unmixed_index{}, unmixed_frames{};
+    bool unmixed_last{}, unmixed_failed{};
     // The game's final tone curve: presented value per scene value (measured, see MeasureCurve).
     bool curve_ok{}, curve_dirty{};
     double curve_time{};
@@ -2955,8 +2974,8 @@ struct Fg {
         VkCommandBuffer main{};
         VkCommandBuffer blit[MAX_GENERATED]{};
         /// detect, apply, one composite per output, the five passes of the vector check, the panel's,
-        /// those of the moving HUD content (one for every pass RecordMarkers runs)
-        VkDescriptorSet hud_sets[MARKER_SETS + MARKER_SET_COUNT]{};
+        /// those of the moving HUD content (one for every pass RecordMarkers runs), RecordUnmix's
+        VkDescriptorSet hud_sets[HUD_SET_COUNT]{};
         VkFence fence{};
         bool pending{};
     } sets[COMMAND_SETS];
@@ -3013,7 +3032,7 @@ struct Fg {
         bool counted[COMMAND_SETS]{};
         HostBuffer dump;                    ///< the whole of it, for a dump
         uint64_t previous_hud{};            ///< the capture that went with the frame in `previous`; 0: none
-        uint32_t frames{}, seen{}, found{}, pieces{}, over{}; ///< since the last statistics line
+        uint32_t frames{}, seen{}, found{}, pieces{}, over{}, pictures{}; ///< since the last statistics line
     } markers;
     VkSemaphore real_ready{};
     VkSemaphore acquired[MAX_GENERATED]{};
@@ -3204,7 +3223,8 @@ void WriteEvents(Fg& fg) {
                        "hud_captures evaluations hud_passes frame_copies | ms: hand-over_to_present limiter_sleep "
                        "game_gpu fg_gpu_wait hook hook_to_submit hook_to_first_frame_out paced_waits game_own "
                        "submit_kept_back | multiplier shift flags (C chained, D duplicate, L layer, R reset, U reused "
-                       "inputs, N no HUD capture, P passed untouched, M measured, V vectors checked, G let on by the "
+                       "inputs, N no HUD capture, H its scene worked out from the frame, P passed untouched, M measured, "
+                       "V vectors checked, G let on by the "
                        "gate, O copied out only after the game's next frame was submitted, X ... and finished: the wrong "
                        "picture)\n");
     const uint64_t count = std::min<uint64_t>(fg.event_count, EVENT_COUNT);
@@ -3215,7 +3235,8 @@ void WriteEvents(Fg& fg) {
         for (const auto& [bit, letter] : {std::pair{Event::CHAINED, 'C'}, {Event::DUPLICATE, 'D'}, {Event::LAYER, 'L'},
                                           {Event::RESET, 'R'},   {Event::REUSED, 'U'},    {Event::NO_HUD, 'N'},
                                           {Event::PASSED, 'P'},  {Event::MEASURED, 'M'}, {Event::CHECKED, 'V'},
-                                          {Event::GATED, 'G'},   {Event::LATE, 'O'},     {Event::LOST, 'X'}}) {
+                                          {Event::GATED, 'G'},   {Event::LATE, 'O'},     {Event::LOST, 'X'},
+                                          {Event::UNMIXED, 'H'}}) {
             if (e.flags & bit) {
                 flags[n++] = letter;
             }
@@ -3328,7 +3349,8 @@ void ReadParameters() {
     static const std::pair<const char*, std::atomic<float>*> live[] = {
         {"chain", &g_live_chain},     {"nohud", &g_live_nohud}, {"wait", &g_live_wait}, {"shift", &g_live_shift},
         {"vectors", &g_live_vectors}, {"gate", &g_live_gate},   {"guard", &g_live_guard}, {"first", &g_live_first},
-        {"fill", &g_live_fill},       {"probe", &g_live_probe}, {"gpuwait", &g_live_lag}, {"markers", &g_live_markers}};
+        {"fill", &g_live_fill},       {"probe", &g_live_probe}, {"gpuwait", &g_live_lag}, {"markers", &g_live_markers},
+        {"gapfill", &g_live_gapfill}, {"cross", &g_live_cross}, {"pictures", &g_live_pictures}};
     char name[64];
     float value = 0.0f;
     while (std::fscanf(file, " %63[^= \n]=%f", name, &value) == 2) {
@@ -3347,14 +3369,17 @@ void ReadParameters() {
     unlink(path);
     Log("fg: frame chain %s, frames without a HUD capture %s, wait for generated frames %s, chain shift by hand %d, "
         "vector check %.0f, limiter gate %s, guard %s, generated frames first %s, multiplier %s, probes %s, "
-        "frames wait for the GPU %s, moving HUD content %s",
+        "frames wait for the GPU %s, moving HUD content %s, pictures in the HUD %s, frames without a capture keep the HUD apart %s, "
+        "captures from a frame copy apart from the HUD pass %s",
         g_live_chain.load() != 0.0f ? "on" : "off", g_live_nohud.load() != 0.0f ? "use the last capture" : "restart",
         g_live_wait.load() != 0.0f ? "on" : "off", static_cast<int>(g_live_shift.load()), g_live_vectors.load(),
         g_live_gate.load() != 0.0f ? "on" : "off", g_live_guard.load() != 0.0f ? "on" : "off",
         g_live_first.load() != 0.0f ? "on" : "off",
         g_live_fill.load() != 0.0f ? "fills the display" : "does not hold the game back",
         g_live_probe.load() != 0.0f ? "on" : "off", g_live_lag.load() != 0.0f ? "on" : "off",
-        g_live_markers.load() != 0.0f ? "on its way in the generated frames" : "as in the frame that follows");
+        g_live_markers.load() != 0.0f ? "on its way in the generated frames" : "as in the frame that follows",
+        g_live_pictures.load() != 0.0f ? "stay at the game's rate" : "are moved like the rest",
+        g_live_gapfill.load() != 0.0f ? "on" : "off", g_live_cross.load() != 0.0f ? "on" : "off");
     Log("fg: HUD parameters bias=%g ratio=%g motion=%g up=%g down=%g level=%g grow=%g", g_hud_parameters[0],
         g_hud_parameters[1], g_hud_parameters[2], g_hud_parameters[4], g_hud_parameters[5], g_hud_parameters[6],
         g_hud_parameters[7]);
@@ -3386,7 +3411,7 @@ bool PrepareHud(Device& d, Fg& fg) {
     sampler.magFilter = sampler.minFilter = VK_FILTER_LINEAR;
     sampler.addressModeU = sampler.addressModeV = sampler.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     // (the command sets' own, and one for the panel on frames that pass through)
-    constexpr uint32_t SETS = COMMAND_SETS * (MARKER_SETS + MARKER_SET_COUNT) + 1;
+    constexpr uint32_t SETS = COMMAND_SETS * HUD_SET_COUNT + 1;
     const VkDescriptorPoolSize sizes[3] = {{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 7 * SETS},
                                            {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 2 * SETS},
                                            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, SETS}};
@@ -3416,7 +3441,8 @@ bool PrepareHud(Device& d, Fg& fg) {
                                                         {MV_SPREAD_SPV, sizeof MV_SPREAD_SPV},
                                                         {MV_TILES_SPV, sizeof MV_TILES_SPV},
                                                         {MV_REACH_SPV, sizeof MV_REACH_SPV},
-                                                        {MV_MARKS_SPV, sizeof MV_MARKS_SPV}};
+                                                        {MV_MARKS_SPV, sizeof MV_MARKS_SPV},
+                                                        {HUD_UNMIX_SPV, sizeof HUD_UNMIX_SPV}};
     for (int i = 0; i < HUD_PASSES; ++i) {
         VkShaderModuleCreateInfo shader{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
         shader.codeSize = code[i].second;
@@ -3989,7 +4015,7 @@ bool RecordMarkers(Device& d, Fg& fg, Fg::Set& set, int set_number, VkCommandBuf
                          nullptr, 0, nullptr);
     const uint32_t w = markers.tiles_w, h = markers.tiles_h;
     const float first[4] = {static_cast<float>(w), static_cast<float>(h), MarkerCap(fg), 0.0f};
-    const float second[4] = {first[0], first[1], first[2], 1.0f};
+    const float second[4] = {first[0], first[1], first[2], g_live_pictures.load() != 0.0f ? 1.0f : 2.0f};
     const VkImageView layers[3] = {layer_view, before_view, VK_NULL_HANDLE};
     const VkImageView sums[3] = {markers.blocks_view, markers.cells_view, VK_NULL_HANDLE};
     const VkImageView sums_and_map[3] = {markers.blocks_view, markers.cells_view, markers.quarter_view};
@@ -4064,9 +4090,98 @@ bool RecordLayerComposite(Device& d, Fg& fg, Fg::Set& set, VkCommandBuffer cmd, 
     return true;
 }
 
+/// The GPU's own memory (its device-local heaps) that this process has in use, the game's and this
+/// layer's together, and how much of it the driver offers the process now, in MB. False: the driver
+/// does not say.
+bool GpuMemory(const Device& d, double& used, double& budget) {
+    used = budget = 0.0;
+    const Instance* const in = d.instance;
+    if (!in || !in->GetPhysicalDeviceMemoryProperties2 || !in->EnumerateDeviceExtensionProperties) {
+        return false;
+    }
+    static const bool supported = [&] {
+        uint32_t count = 0;
+        in->EnumerateDeviceExtensionProperties(d.physical, nullptr, &count, nullptr);
+        std::vector<VkExtensionProperties> all(count);
+        in->EnumerateDeviceExtensionProperties(d.physical, nullptr, &count, all.data());
+        for (const VkExtensionProperties& extension : all) {
+            if (!std::strcmp(extension.extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME)) {
+                return true;
+            }
+        }
+        return false;
+    }();
+    if (!supported) {
+        return false;
+    }
+    VkPhysicalDeviceMemoryBudgetPropertiesEXT heaps{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT};
+    VkPhysicalDeviceMemoryProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2, &heaps};
+    in->GetPhysicalDeviceMemoryProperties2(d.physical, &properties);
+    for (uint32_t i = 0; i < properties.memoryProperties.memoryHeapCount; ++i) {
+        if (properties.memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+            used += static_cast<double>(heaps.heapUsage[i]) / (1024.0 * 1024.0);
+            budget += static_cast<double>(heaps.heapBudget[i]) / (1024.0 * 1024.0);
+        }
+    }
+    return true;
+}
+
+/// The two images for the scenes RecordUnmix works out. False: there are none, and such frames go
+/// the old way (no generated frames for them).
+bool PrepareUnmix(Device& d, Fg& fg) {
+    if (fg.unmixed[1].image) {
+        return true;
+    }
+    if (!fg.unmixed_failed && (fg.unmixed[0].image || CreateOwnImage(d, fg.unmixed[0], SCENE_FORMAT, fg.extent.width, fg.extent.height)) &&
+        CreateOwnImage(d, fg.unmixed[1], SCENE_FORMAT, fg.extent.width, fg.extent.height)) {
+        return true;
+    }
+    if (!fg.unmixed_failed) {
+        Log("fg: no memory for the scenes of frames without a HUD capture");
+    }
+    fg.unmixed_failed = true;
+    return false;
+}
+
+/// A frame came without a HUD capture of its own. The picture it shows has the HUD in it, and
+/// interpolating that would drag the HUD and what is around it along with the scene. So the
+/// scene is worked out (hud_unmix.comp): `target` gets this frame without what the HUD added to
+/// the frame before, from that frame (fg.previous), its scene `scene_before` and the last
+/// captured layer. False: a view could not be made.
+bool RecordUnmix(Device& d, Fg& fg, Fg::Set& set, VkCommandBuffer cmd, const Image& scene_before, const Image& layer,
+                 Image& target) {
+    Fg::Hud& hud = fg.hud;
+    const auto view_of = [&](const Image& image, VkFormat format) {
+        VkImageView& view = hud.layer_views[U64(image.image)];
+        if (!view) {
+            view = MakeView(d, image.image, format);
+        }
+        return view;
+    };
+    const VkImageView before = view_of(scene_before, SCENE_FORMAT), hud_layer = view_of(layer, HUD_FORMAT),
+                      out = view_of(target, SCENE_FORMAT);
+    if (!before || !hud_layer || !out) {
+        return false;
+    }
+    ToGeneral(d, cmd, target);
+    VkMemoryBarrier copied{VK_STRUCTURE_TYPE_MEMORY_BARRIER}; // (this frame and the tone curve were copied just now)
+    copied.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    copied.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    d.CmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &copied, 0, nullptr,
+                         0, nullptr);
+    const VkImageView in[3] = {hud.current_view, before, hud_layer};
+    const VkImageView written[2] = {out, VK_NULL_HANDLE};
+    const VkImageView more[3] = {hud.previous_view, VK_NULL_HANDLE, VK_NULL_HANDLE};
+    RunHudPass(d, fg, cmd, set.hud_sets[UNMIX_SET], UNMIX_PASS, in, written, g_layer_parameters, fg.extent.width,
+               fg.extent.height, fg.curve_view, VK_NULL_HANDLE, VK_WHOLE_SIZE, more);
+    return true;
+}
+
 /// Everything a swapchain needs for frame generation, made at its first generated frame.
 bool Prepare(Device& d, Fg& fg, uint32_t family) {
     const double start = Now();
+    double memory_before = 0.0, memory_after = 0.0, memory_budget = 0.0;
+    GpuMemory(d, memory_before, memory_budget);
     fg.family = family;
     uint32_t count = 0;
     d.GetSwapchainImagesKHR(d.handle, fg.swapchain, &count, nullptr);
@@ -4152,9 +4267,11 @@ bool Prepare(Device& d, Fg& fg, uint32_t family) {
     }
     fg.ready = true;
     g_fg_ready_time = Now();
+    GpuMemory(d, memory_after, memory_budget);
     Log("fg: ready for %ux%u format %d, %zu swapchain images, %u generated per frame, queue family %u "
-        "(%.0f ms)",
-        w, h, fg.format, fg.images.size(), fg.generated, family, (Now() - start) * 1000.0);
+        "(%.0f ms; GPU memory of the process %.0f -> %.0f MB, offered to it %.0f MB)",
+        w, h, fg.format, fg.images.size(), fg.generated, family, (Now() - start) * 1000.0, memory_before, memory_after,
+        memory_budget);
     return true;
 }
 
@@ -4244,6 +4361,8 @@ void Statistics(Device& d, Fg& fg, double now) {
         least = g_limiter.hook_least;
     }
     const uint32_t lag_waits = g_lag_waits.exchange(0);
+    double memory_used = 0.0, memory_budget = 0.0;
+    GpuMemory(d, memory_used, memory_budget);
     // "low" rates are what the slowest 1 % of frames amount to.
     Log("STAT x%u real=%.1f/s generated=%.1f/s shown=%.1f/s untouched=%u | game frame ms mean=%.1f p50=%.1f "
         "p95=%.1f p99=%.1f max=%.1f | shown frame ms mean=%.1f p50=%.1f p95=%.1f p99=%.1f max=%.1f | "
@@ -4254,7 +4373,8 @@ void Statistics(Device& d, Fg& fg, double now) {
         "game gpu ms=%.1f (late %u) free=%.0f/s of %.0f probes=%u | gate=%u advance ms=%.1f least ms=%.1f own ms=%.1f lead ms=%.1f guard=%u ms=%.1f "
         "failed=%u first=%u ms=%.1f ahead=%u late copies=%u lost=%u | "
         "latency calls sleep=%u marker=%u | kept back for the GPU %u ms=%.1f paced=%u | "
-        "moving hud frames=%u tiles=%u found=%u pieces=%u over=%u",
+        "moving hud frames=%u tiles=%u found=%u pieces=%u over=%u pictures=%u | hud gaps filled=%u cross=%u | "
+        "gpu memory used=%.0f of %.0f MB",
         fg.too_fast ? 1 : fg.generated + 1, real / span, fg.generated_frames / span, (real + fg.generated_frames) / span,
         fg.passed_frames, game.mean, game.p50, game.p95, game.p99, game.max, output.mean, output.p50, output.p95,
         output.p99, output.max, real ? fg.hook_seconds / real * 1000.0 : 0.0, fg.hud_frames, fg.layer_frames, fg.game_inputs, fg.blank_inputs,
@@ -4275,8 +4395,10 @@ fg.tail_seconds * 1000.0,
         g_lost_copies.exchange(0),
         g_latency_sleeps.exchange(0), g_latency_markers.exchange(0), lag_waits,
         lag_waits ? g_lag_us.exchange(0) / 1000.0 / lag_waits : 0.0, g_limiter.gpu_paced.load(), fg.markers.frames,
-        fg.markers.seen, fg.markers.found, fg.markers.pieces, fg.markers.over);
-    fg.markers.frames = fg.markers.seen = fg.markers.found = fg.markers.pieces = fg.markers.over = 0;
+        fg.markers.seen, fg.markers.found, fg.markers.pieces, fg.markers.over, fg.markers.pictures, fg.unmixed_frames,
+        g_cross_captures.exchange(0), memory_used, memory_budget);
+    fg.unmixed_frames = 0;
+    fg.markers.frames = fg.markers.seen = fg.markers.found = fg.markers.pieces = fg.markers.over = fg.markers.pictures = 0;
     fg.limit_gated = fg.limit_own_frames = fg.guard_waits = fg.guard_timeouts = fg.first_waits = fg.first_ahead = 0;
     fg.limit_own_seconds = fg.guard_seconds = fg.first_seconds = 0.0;
     fg.ahead_frames = fg.stale_frames = fg.held = 0;
@@ -5094,6 +5216,7 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
         fg.markers.seen += counts[0];
         fg.markers.found += counts[1];
         fg.markers.pieces += counts[2];
+        fg.markers.pictures += counts[3];
         fg.markers.over += static_cast<float>(counts[0]) > MarkerCap(fg);
         fg.markers.counted[set_number] = false;
     }
@@ -5130,27 +5253,31 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
     const bool hud_gap = link.chained && link.hud && link.hud == fg.hud_used && !link.duplicate;
     const bool hud_missing =
         link.chained && link.hud && link.hud == fg.hud_used && fg.layer_mode && g_live_nohud.load() == 0.0f;
-    // Not everywhere does every frame come with a capture: in the game's menu about every second
-    // one comes without (the HUD is drawn, the frame is not set aside). Starting over at each gap
-    // leaves hardly a generated frame. While captures come with gaps the layer is left alone and
-    // the frames are interpolated as they are presented; it is taken up again once every frame
-    // has had its capture for a while.
+    // Not every frame comes with a capture. In play a few do not (one in two hundred, in short
+    // runs): for those the scene is worked out from the frame and the last capture (RecordUnmix),
+    // and the HUD stays apart from what is interpolated. In the game's menu about every second one
+    // comes without (the HUD is drawn, the frame is not set aside): where that many are missing,
+    // or a run goes on for long, the layer is left alone and the frames are interpolated as they
+    // are presented; it is taken up again once every frame has had its capture for a while.
+    // (With gapfill=0 a few are enough for that, and starting over at each of the others leaves
+    // fewer generated frames.)
+    const bool gap_fill = g_live_gapfill.load() != 0.0f && !fg.unmixed_failed;
     fg.capture_gaps = (fg.capture_gaps << 1) | (hud_gap ? 1u : 0u);
     fg.capture_run = hud_gap ? 0 : fg.capture_run + 1;
-    if (!fg.capture_hold && __builtin_popcount(fg.capture_gaps) >= 3 && g_live_nohud.load() == 0.0f) {
+    if (!fg.capture_hold && __builtin_popcount(fg.capture_gaps) >= (gap_fill ? 12 : 3) && g_live_nohud.load() == 0.0f) {
         fg.capture_hold = true;
         Log("fg: HUD captures come with gaps (%d of the last 32 frames without one): frames are interpolated as "
             "presented until every frame has one again",
             __builtin_popcount(fg.capture_gaps));
-    } else if (fg.capture_hold && fg.capture_run >= 45) {
+    } else if (fg.capture_hold && fg.capture_run >= (gap_fill ? 16u : 45u)) {
         fg.capture_hold = false;
         Log("fg: every frame has its HUD capture again");
     }
     Image* scene_before = nullptr;
     Image* layer_before = nullptr;
     uint64_t hud_capture = 0; // the one handed out (not always the one asked for)
-    Image* hud_layer =
-        PickHud(d, hud_w, hud_h, &hud_scene, link.hud, hud_neighbours, &scene_before, &layer_before, &hud_capture);
+    Image* hud_layer = PickHud(d, hud_w, hud_h, &hud_scene, link.hud, hud_neighbours, &scene_before, &layer_before,
+                               &hud_capture, hud_missing && gap_fill ? 1.0 : 0.5);
     if (!hud_layer) {
         hud_capture = 0;
     }
@@ -5181,6 +5308,7 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
                 fg.layer_off = true;
                 Log("fg: no tone curve image, HUD layer not used");
             }
+            PrepareUnmix(d, fg); // (here, not in the middle of play at the first frame that needs them)
         }
         measure = !fg.layer_off && !hud_missing && fg.measure_set < 0 && now - fg.curve_time > (fg.curve_ok ? 1.0 : 0.5);
         if (!fg.curve_ok || fg.layer_off) {
@@ -5196,12 +5324,15 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
         ++fg.layer_frames;
     }
     fg.nohud_frames += hud_missing;
-    const bool reset = !fg.have_previous || now - fg.last_present > 0.5 || hud_missing;
+    // A frame without a capture, between frames in layer mode: its scene is worked out, below.
+    const bool unmix = hud_missing && gap_fill && hud_layer && hud_layer != &fg.test_layer && hud_scene && fg.hud.ok &&
+                       fg.have_previous && now - fg.last_present <= 0.5 && PrepareUnmix(d, fg);
+    const bool reset = !fg.have_previous || now - fg.last_present > 0.5 || (hud_missing && !unmix);
     // A frame without generated ones in the middle of a run of them: the real frame still goes
     // out when it would have, so that the real frames keep their even spacing.
     const bool keep_cadence = reset && fg.last_present > 0.0 && now - fg.last_present < 0.1;
     event.flags |= (hud_layer ? Event::LAYER : 0u) | (reset ? Event::RESET : 0u) | (reuse ? Event::REUSED : 0u) |
-                   (hud_missing ? Event::NO_HUD : 0u) | (measure ? Event::MEASURED : 0u);
+                   (hud_missing ? Event::NO_HUD : 0u) | (measure ? Event::MEASURED : 0u) | (unmix ? Event::UNMIXED : 0u);
     const float frame_ms = fg.last_present > 0.0 ? static_cast<float>((now - fg.last_present) * 1000.0) : 33.3f;
     const bool dump = fg.dump_next && !reset;
     // HUD content that moves over the screen is looked for when the capture before this one is
@@ -5265,8 +5396,24 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
     bool hud_ran = false;
     Image* const game_vectors = vectors;
     bool checked = false;
+    bool unmixed = false;
     if (fg.hud.ok) {
         ToGeneral(d, cmd, fg.previous);
+        if (unmix) {
+            // This frame's scene takes the place of the capture's, and the scene before it is what
+            // the vectors point into. A run of such frames goes on from the scene worked out last.
+            Image& target = fg.unmixed[fg.unmixed_index ^ 1u];
+            Image* const before = fg.unmixed_last ? &fg.unmixed[fg.unmixed_index] : hud_scene;
+            unmixed = RecordUnmix(d, fg, set, cmd, *before, *hud_layer, target);
+            if (unmixed) {
+                scene_before = before;
+                hud_scene = &target;
+                fg.unmixed_index ^= 1u;
+                ++fg.unmixed_frames;
+            }
+        } else if (fg.unmixed_last) {
+            scene_before = &fg.unmixed[fg.unmixed_index]; // the frame before had no capture to go by
+        }
         // The game's vectors against the picture: with the HUD layer the scene without the HUD
         // of this capture and of the one before, otherwise (tests, or asked for) the shown frames.
         const float check = g_live_vectors.load();
@@ -5684,9 +5831,10 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
                 std::fclose(file);
             }
         }
-        Log("fg: dump %u written (render %ux%u, %s inputs%s%s, HUD capture %llu)", fg.dumps, render_w, render_h,
+        Log("fg: dump %u written (render %ux%u, %s inputs%s%s%s, HUD capture %llu)", fg.dumps, render_w, render_h,
             game_vectors == &fg.zero_vectors ? "blank" : "game", checked ? ", vectors checked" : "",
-            markers_ran ? ", moving HUD content looked for" : "", static_cast<unsigned long long>(hud_capture));
+            markers_ran ? ", moving HUD content looked for" : "",
+            unmixed ? ", no capture of its own: scene worked out" : "", static_cast<unsigned long long>(hud_capture));
         ++fg.dumps;
         fg.dump_next = fg.dump_more > 0; // (the frames of a run of dumps follow each other without a gap)
         fg.dump_more -= fg.dump_more > 0;
@@ -5702,7 +5850,8 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
         fg.panel.dump_next = false;
     }
 
-    fg.have_previous = !hud_missing;
+    fg.have_previous = !hud_missing || unmixed;
+    fg.unmixed_last = unmixed;
     fg.last_present = now;
     ++fg.frame_id;
     ++fg.real_frames;
@@ -6123,6 +6272,8 @@ void DestroyFg(Device& d, Fg* fg) {
         d.DestroyDescriptorSetLayout(d.handle, hud.set_layout, nullptr);
     }
     DestroyOwnImage(d, fg->previous);
+    DestroyOwnImage(d, fg->unmixed[0]);
+    DestroyOwnImage(d, fg->unmixed[1]);
     DestroyOwnImage(d, fg->curve_image);
     DestroyOwnImage(d, panel.image);
     for (Image* image : {&fg->markers.quarter, &fg->markers.sixteenth, &fg->markers.blocks, &fg->markers.cells,
@@ -6329,6 +6480,7 @@ VKAPI_ATTR VkResult VKAPI_CALL HookCreateInstance(const VkInstanceCreateInfo* in
 #define LOAD(name) in->name = reinterpret_cast<PFN_vk##name>(gipa(*instance, "vk" #name))
     LOAD(DestroyInstance);
     LOAD(GetPhysicalDeviceMemoryProperties);
+    LOAD(GetPhysicalDeviceMemoryProperties2);
     LOAD(GetPhysicalDeviceProperties);
     LOAD(GetPhysicalDeviceProperties2);
     LOAD(GetPhysicalDeviceFeatures);
@@ -6800,6 +6952,14 @@ struct HudPass {
 };
 Lock g_hud_pass_mutex{LOCK_HUD_PASS};
 std::unordered_map<uint64_t, HudPass> g_hud_passes; ///< command buffer -> the HUD layer its open pass draws into
+/// The last capture's layer and the frame copy that went with it (under g_hud_pass_mutex). The game
+/// does not always record the two into one command buffer: the same copy without a HUD pass before
+/// it in its own is the same thing, with that layer (see NoteFrameCopy).
+struct HudCopy {
+    VkImage layer{};
+    uint64_t source{}, destination{};
+    uint32_t width{}, height{};
+} g_hud_copy;
 
 /// A pass begins. The HUD layer is a display-size RGBA16F target drawn into without depth; the last
 /// such pass of a command buffer before the frame is copied aside is the finished layer.
@@ -6852,6 +7012,9 @@ void ForgetImage(Device& d, VkImage image) {
         if (!g_hud_passes.empty()) {
             std::erase_if(g_hud_passes, [image](const auto& entry) { return entry.second.image == image; });
         }
+        if (g_hud_copy.layer == image || g_hud_copy.source == U64(image) || g_hud_copy.destination == U64(image)) {
+            g_hud_copy = {};
+        }
     }
     Inputs& in = d.inputs;
     std::lock_guard lock{in.mutex};
@@ -6879,14 +7042,21 @@ void NoteFrameCopy(VkCommandBuffer cmd, VkImage source, VkImageLayout source_lay
         return;
     }
     HudPass pass;
-    bool stale = false;
+    bool stale = false, cross = false;
     {
         std::lock_guard lock{g_hud_pass_mutex};
         const auto it = g_hud_passes.find(U64(cmd));
-        if (it == g_hud_passes.end()) {
+        if (it != g_hud_passes.end()) {
+            pass = it->second;
+        } else if (g_live_cross.load() != 0.0f && g_hud_copy.layer && g_hud_copy.source == U64(source) &&
+                   g_hud_copy.destination == U64(destination)) {
+            // No HUD pass in this command buffer, but the frame copy that follows it: the pass went
+            // into another one, which runs before this.
+            pass = {g_hud_copy.layer, g_hud_copy.width, g_hud_copy.height};
+            cross = true;
+        } else {
             return;
         }
-        pass = it->second;
     }
     {
         std::lock_guard lock{g_records_mutex};
@@ -6917,8 +7087,19 @@ void NoteFrameCopy(VkCommandBuffer cmd, VkImage source, VkImageLayout source_lay
     }
     ++g_frame_copy_count;
     Device& d = *DeviceOfCommandBuffer(cmd);
+    // (A capture that is not on its way yet may be this frame's, and a second one would put the
+    // frames and their captures out of step.)
+    if (cross && d.inputs.hud_serial.load() != d.inputs.hud_submitted.load()) {
+        return;
+    }
     if (pass.width != d.inputs.width || pass.height != d.inputs.height) {
         CopyHud(d, cmd, pass.image, source, source_layout, pass.width, pass.height);
+        if (cross) {
+            g_cross_captures.fetch_add(1);
+        } else {
+            std::lock_guard lock{g_hud_pass_mutex};
+            g_hud_copy = {pass.image, U64(source), U64(destination), pass.width, pass.height};
+        }
     }
 }
 

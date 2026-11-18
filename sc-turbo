@@ -6,16 +6,17 @@
 #   sc-turbo capture   like probe, and also saves a few frames of DLSS's inputs (colour, motion
 #                      vectors, depth) to logs/capture, but only after "sc-turbo go"
 #   sc-turbo go        start a capture series now: 4 consecutive frames every 10 s for 2 minutes
-#   sc-turbo fg [2|3|4] [hud] [panel] [nomarkers] [trace|old|older|next]  launch with frame generation (DLSS must be the
+#   sc-turbo fg [2|3|4] [hud] [panel] [nomarkers] [watch] [trace|old|older|next]  launch with frame generation (DLSS must be the
 #                      upscaler in game); the number is the multiplier, default 2. Log and dumps: logs/fg
 #                      ("hud": with MangoHud, which sits below the layer and so counts every frame that
 #                      is shown, the generated ones too; SC_MANGOHUD=1 in sc-turbo.conf: always.
 #                      "panel": the layer's own performance panel can be shown, see fg-panel; without
 #                      the word there is none.
 #                      "nomarkers": HUD content that moves over the screen (world markers, the compass,
-#                      the map, a flight display) is left at the game's own rate. Without the word it
+#                      a flight display) is left at the game's own rate. Without the word it
 #                      is put where it is on its way in every generated frame (SC_FG_MARKERS=0 in
 #                      sc-turbo.conf: never); fg-params markers=0|1 switches it in the running game.
+#                      "watch": record what the game does with the disk and with memory (see iowatch).
 #                      "old": the build before the last one, kept in build/fg-prev; "older": the one
 #                      before that, build/fg-prev2; "next": the newest build, which ./build.sh
 #                      leaves in build/fg-next before it is validated and installed: for a diagnosis)
@@ -23,6 +24,9 @@
 #                      below it for the multiplier, also while the game runs (gui/games.ini lists the
 #                      games). install / remove: its entry in the desktop's application menu.
 #   sc-turbo run       launch the game as it is, with none of this project's layers
+#   sc-turbo iowatch [report [PID]]   record the game's disk, memory and GPU memory use, second by second,
+#                      from outside (it reads /proc and asks nvidia-smi; started by itself with "fg N watch");
+#                      report: the recording put together with the frame rates and the game's log, place by place
 #   sc-turbo fg-off / fg-on   switch generation off / on while the game runs
 #   sc-turbo fg-mult N change the multiplier (2, 3 or 4) while the game runs
 #   sc-turbo fg-hud on|off   switch the HUD handling (keeps the HUD in place) while the game runs
@@ -56,7 +60,14 @@
 #                      that fill the display (a game that could do 50 a second gets x3, is held at 40 and
 #                      shows 120, evenly), fill=0 the most that do not hold the game back (the same game
 #                      gets x2 and shows 100); probe=0|1 (a held game is asked what it could do by letting
-#                      one frame on early now and then, instead of guessing)
+#                      one frame on early now and then, instead of guessing).
+#                      A frame that comes without a HUD capture of its own: gapfill=1 (default) its scene is
+#                      worked out from the frame and the last capture, and the HUD stays apart from what is
+#                      interpolated; gapfill=0: such frames are not generated from, and when several come
+#                      close together the HUD is interpolated with the picture for a few seconds.
+#                      cross=1 (default): a frame copy recorded apart from the HUD pass still makes a capture.
+#                      pictures=1 (default): pictures in the HUD that change where they stand (the map) stay
+#                      at the game's own rate; pictures=0: they are moved like the rest (their lines double)
 #   sc-turbo fg-watch [--last N]   the session's log at a glance: a short line per ten seconds (frame
 #                      rates, frame times, what the limiter did) and every change of the multiplier
 #   sc-turbo fg-ab "A" "B" [SECONDS] [CYCLES]   two settings compared within the running session: switched
@@ -189,7 +200,7 @@ fg)
     mkdir -p "$here/logs/fg"; rm -f "$here/logs/fg/OFF" "$here/logs/fg/DUMP" "$here/logs/fg/MULT" "$here/logs/fg/HUDOFF" "$here/logs/fg/HUDLAYEROFF" "$here/logs/fg/HUDSCAN" "$here/logs/fg/TRACE" "$here/logs/fg/LAYER" "$here/logs/fg/SCDON" "$here/logs/fg/NOCAP" "$here/logs/fg/EVENTS" "$here/logs/fg/PARAMS"
     export SC_FG=1 SC_FG_DIR="$here/logs/fg" SC_FG_MULT="${2:-2}"
     layer="$here/build/fg"
-    # HUD content that moves over the screen (markers, the compass, the map, a flight display) is put where it
+    # HUD content that moves over the screen (markers, the compass, a flight display) is put where it
     # is on its way in every generated frame, unless "nomarkers" or sc-turbo.conf says otherwise.
     export SC_FG_MARKERS="${SC_FG_MARKERS:-1}"
     for word in "${@:3}"; do
@@ -198,6 +209,7 @@ fg)
         hud) SC_MANGOHUD=1 ;;
         panel) export SC_FG_PANEL=1 ;;   # the layer's own panel (sc-turbo fg-panel); without the word there is none
         markers) export SC_FG_MARKERS=1 ;;   # (what the launch does anyway; the word is still taken)
+        watch) io_watch=1 ;;   # the recording of "sc-turbo iowatch", from outside the game
         nomarkers) export SC_FG_MARKERS=0
             echo "Moving HUD content stays at the game's own rate (sc-turbo fg-params markers=1 switches it on in the running game)" ;;
         old|older)
@@ -208,7 +220,7 @@ fg)
             layer="$here/build/fg-next"
             [ -f "$layer/libsc_fg.so" ] || { echo "$layer/libsc_fg.so is missing (./build.sh)"; exit 1; }
             echo "Using the newest build, which is not validated yet ($layer)" ;;
-        *) echo "fg: \"$word\" is not known (hud, panel, nomarkers, trace, old, older, next)"; exit 1 ;;
+        *) echo "fg: \"$word\" is not known (hud, panel, nomarkers, watch, trace, old, older, next)"; exit 1 ;;
         esac
     done
     # (This layer's folder comes first among the implicit layers, which puts it nearest the game:
@@ -228,6 +240,11 @@ fg)
     display_settings
     runner_note
     echo "Frame generation x$SC_FG_MULT; log: $here/logs/fg"
+    if [ "${io_watch:-0}" = 1 ]; then
+        mkdir -p "$here/logs/io"
+        nohup "$here/tools/sc-iowatch" > "$here/logs/io/watch.out" 2>&1 &
+        echo "Recording the game's disk and memory use (afterwards: sc-turbo iowatch report)"
+    fi
     exec "$launch"
     ;;
 run)
@@ -312,6 +329,7 @@ fg-mult) echo "${2:?multiplier 2, 3 or 4}" > "$here/logs/fg/MULT" && echo "multi
 fg-stat) log="$(ls -t "$here"/logs/fg/fg-*.log 2>/dev/null | head -1)"; [ -n "$log" ] && { grep -v 'STAT' "$log" | tail -8; grep 'STAT' "$log" | tail -4; } ;;
 fg-watch) shift; exec "$here/tools/fg-watch.py" "$@" ;;
 fg-ab) shift; exec "$here/tools/fg-ab.sh" "$@" ;;
+iowatch) shift; exec "$here/tools/sc-iowatch" "$@" ;;
 threads) exec "$here/tools/sc-threads" show ;;
 threads-ab) shift; exec "$here/tools/sc-ab-threads.sh" "$@" ;;
 displays)

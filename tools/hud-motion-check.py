@@ -13,7 +13,11 @@ from the captures alone), then the picture: the HUD of the generated frame, read
 generated picture (white over grey), against the reference's layer at that time.
 What may differ: the layer works in single precision where the reference uses double, and its
 maps are stored in half precision; a search that is decided by a hair, or a place that rounds the
-other way, comes out differently now and then. Prints one block per dump and "ok" or "NOT ok".
+other way, comes out differently now and then (so in the picture a pixel counts as different only
+when none of the reference's pixels right around it is like it). With HUD_STILL="X0 Y0 X1 Y1" (tiles)
+nothing in that box may have a motion: the game's map, which must not be moved. With HUD_PICTURES=N
+that many pieces, exactly, may be held back as pictures (0: a ship's HUD, all of which is to move).
+Prints one block per dump and "ok" or "NOT ok".
 """
 import glob, os, re, sys
 import numpy as np
@@ -61,7 +65,9 @@ def check(prefix, sources, multiplier):
     a_p = sources[(k - 1) % len(sources)]
     f = hm.Frame(a_n, a_p)
     lines.append(f"{os.path.basename(prefix)}: captures {(k - 1) % len(sources)} -> {k}; the layer: {counts[0]} tiles searched, "
-                 f"{counts[1]} with a motion, {counts[2]} pieces move")
+                 f"{counts[1]} with a motion, {counts[2]} pieces move, {counts[3]} held back as pictures")
+    if os.environ.get("HUD_PICTURES"):
+        ok &= int(counts[3]) == int(os.environ["HUD_PICTURES"])
 
     # ---- each pass by itself
     mine, active = hm.own(f)
@@ -98,7 +104,12 @@ def check(prefix, sources, multiplier):
     lines.append(f"  refine: {share(same & some, some)} tiles the same")
     ok &= (same & some).sum() >= 0.97 * some.sum()
 
-    _, counts2, _, _, _ = hm.pieces(g_refined, label)
+    in_piece = label >= 0
+    same = gpu["sums"][:, :, 3].astype(np.int64) == f.filled
+    lines.append(f"  pixels with content: {share(same & in_piece, in_piece)} tiles the same")
+    ok &= bool((same | ~in_piece).all())
+
+    _, counts2, _, _, _ = hm.pieces(g_refined, label, f)
     g_counts2 = {int(l): bool(gpu["piece"].reshape(-1, 4)[int(l), 2] != 0) for l in counts2}
     lines.append(f"  pieces, second round: {sum(counts2.values())} of {len(counts2)} move, {'the same' if g_counts2 == {int(l): bool(v) for l, v in counts2.items()} else 'DIFFERENT'} in the layer")
     ok &= g_counts2 == {int(l): bool(v) for l, v in counts2.items()}
@@ -110,6 +121,13 @@ def check(prefix, sources, multiplier):
     off = float(np.abs(r_motion[:, :, :2] - g_motion[:, :, :2])[both].max()) if both.any() else 0.0
     lines.append(f"  field: {int(both.sum())} tiles, {int((~valid).sum())} only in one; largest difference {off:.3f} pixels")
     ok &= bool(valid.all()) and off < 0.05
+
+    still = os.environ.get("HUD_STILL")
+    if still:
+        x0, y0, x1, y1 = (int(v) for v in still.split())
+        moved = int((g_motion[y0 : y1 + 1, x0 : x1 + 1, 2] > 0).sum())
+        lines.append(f"  tiles ({x0},{y0})-({x1},{y1}), which must stay: {moved} with a motion")
+        ok &= moved == 0
 
     r_reach = hm.reach(g_motion)
     wrong = 0
@@ -140,7 +158,11 @@ def check(prefix, sources, multiplier):
         # (the rows of the scene that hold every grey are not part of this: the dump has the scene)
         scene = glob.glob(prefix + "-scene.ppm")
         checked = (np.abs(ppm(scene[0]) - np.array(GREY, dtype=np.float32)) <= 1.0).all(axis=2) if scene else np.ones(a_n.shape, dtype=bool)
-        differs = (np.abs(shown - want) > 0.04) & checked
+        nearest = np.abs(shown - want)
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                nearest = np.minimum(nearest, np.abs(shown - np.roll(want, (dy, dx), axis=(0, 1))))
+        differs = (nearest > 0.04) & checked
         content = ((want > 0.04) | (shown > 0.04)) & checked
         still = (np.abs(shown - a_n) > 0.04) & checked
         lines.append(f"  picture at 1/{multiplier}: {int((differs & involved).sum())} of {int((content & involved).sum())} HUD pixels in tiles with motion differ from the reference "

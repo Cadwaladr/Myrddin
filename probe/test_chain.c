@@ -23,6 +23,11 @@
  *     --sim-dip S L MS every S seconds, for L milliseconds, its frames take MS milliseconds more
  *     --worker-ms N    extra time the queue thread spends per frame (default 0)
  *     --nohud N        every Nth frame comes without the HUD pass and the frame copy
+ *     --gap N          every Nth frame has its HUD like the others, in the layer and over the frame, but
+ *                      no HUD pass and no frame copy that the layer could take as its cue (what the game does
+ *                      now and then: the layer has to keep scene and HUD apart without a capture)
+ *     --split-hud N    every Nth frame records its HUD pass into a command buffer of its own, submitted
+ *                      before the frame's; the frame copy stays in the frame's (a capture all the same)
  *     --stale-hud N    every Nth frame draws its HUD pass into a layer of its own and comes without the
  *                      frame copy; that layer is destroyed, and the next frame recorded into the same
  *                      command buffer brings a frame copy without a pass (what the game does when the HUD
@@ -348,6 +353,7 @@ int main(int argc, char **argv)
     double seconds = 12, game_ms = 4, jitter_ms = 0, spike_ms = 0;
     unsigned spike = 0, random_state = 12345;
     int stale_hud = 0;
+    int gap = 0, split_hud = 0;
     int nohud = 0, dup = 0, early = 0, fifo = 0, gpu_load = 0, wild = 0, marker = 0, marker_vx = 0, marker_vy = 0;
     const char *replay = NULL, *hud_files = NULL, *engine = NULL;
     int hud_first = 0, hud_count = 0;
@@ -362,6 +368,8 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--sim-change") && i + 2 < argc) { sim_change_s = atof(argv[++i]); sim_change_ms = atof(argv[++i]); }
         else if (!strcmp(argv[i], "--sim-dip") && i + 3 < argc) { sim_dip_s = atof(argv[++i]); sim_dip_length_ms = atof(argv[++i]); sim_dip_ms = atof(argv[++i]); }
         else if (!strcmp(argv[i], "--nohud") && i + 1 < argc) nohud = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--gap") && i + 1 < argc) gap = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "--split-hud") && i + 1 < argc) split_hud = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--stale-hud") && i + 1 < argc) stale_hud = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--dup") && i + 1 < argc) dup = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--early")) early = 1;
@@ -646,9 +654,11 @@ int main(int argc, char **argv)
     CHECK(vkCreateCommandPool(dev_a, &pci, NULL, &pool_a));
     CHECK(vkCreateCommandPool(dev_b, &pci, NULL, &pool_b));
     CHECK(vkCreateCommandPool(dev_b, &pci, NULL, &pool_w));
-    VkCommandBuffer cbs_a[RING + 1], cbs_b[RING];
+    VkCommandBuffer cbs_a[RING + 1], cbs_b[RING], cbs_split[RING];
     VkCommandBufferAllocateInfo cai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = pool_a, .commandBufferCount = RING + 1};
     CHECK(vkAllocateCommandBuffers(dev_a, &cai, cbs_a));
+    cai.commandBufferCount = RING;
+    CHECK(vkAllocateCommandBuffers(dev_a, &cai, cbs_split));
     cai.commandPool = pool_b;
     cai.commandBufferCount = RING;
     CHECK(vkAllocateCommandBuffers(dev_b, &cai, cbs_b));
@@ -789,6 +799,8 @@ int main(int argc, char **argv)
             if (!hud_files) copy(cb, bar.img, f0.img, 0, (int32_t)((frame * 12) % (W - 64)), 64, H);
         }
         const int with_hud = !(nohud && frame % nohud == (unsigned)nohud - 1);
+        const int gap_now = gap && frame % gap == (unsigned)gap - 1;
+        const int split_now = split_hud && frame % split_hud == (unsigned)split_hud - 1;
         /* --marker: where the marker is in this frame */
         const int marker_x = 60 + bounce((long)frame * marker_vx, W - 72 - 120), marker_y = 60 + bounce((long)frame * marker_vy, H - 48 - 120);
         const int marker_count = (int)(sizeof marker_rects / sizeof *marker_rects), static_count = (int)(sizeof static_rects / sizeof *static_rects);
@@ -818,9 +830,16 @@ int main(int argc, char **argv)
                 copy_rects(cb, hud_solid.img, hud.img, marker_rects, marker_count, marker_x, marker_y);
             }
             VkRenderPassBeginInfo rb = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = fb, .renderArea = {{0, 0}, {W, H}}};
-            vkCmdBeginRenderPass(cb, &rb, VK_SUBPASS_CONTENTS_INLINE);
-            vkCmdEndRenderPass(cb);
-            copy(cb, f0.img, f1.img, 0, 0, W, H); /* the frame set aside before the HUD goes over it */
+            if (split_now) {
+                CHECK(vkBeginCommandBuffer(cbs_split[slot], &bi));
+                vkCmdBeginRenderPass(cbs_split[slot], &rb, VK_SUBPASS_CONTENTS_INLINE);
+                vkCmdEndRenderPass(cbs_split[slot]);
+                CHECK(vkEndCommandBuffer(cbs_split[slot]));
+            } else if (!gap_now) {
+                vkCmdBeginRenderPass(cb, &rb, VK_SUBPASS_CONTENTS_INLINE);
+                vkCmdEndRenderPass(cb);
+            }
+            if (!gap_now) copy(cb, f0.img, f1.img, 0, 0, W, H); /* the frame set aside before the HUD goes over it */
             if (hud_files) fill(cb, hud_frames[frame % (unsigned)hud_count].buf, f0.img, VK_IMAGE_ASPECT_COLOR_BIT, W, H);
             if (marker) { /* ... which it does here */
                 copy_rects(cb, static_colour.img, f0.img, static_rects, static_count, 0, 0);
@@ -837,6 +856,11 @@ int main(int argc, char **argv)
             .pWaitSemaphoreValues = &copied_before};
         VkSubmitInfo fs = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .pNext = unprotected ? NULL : &fts, .waitSemaphoreCount = unprotected ? 0 : 1,
             .pWaitSemaphores = &copied_a, .pWaitDstStageMask = &all_stages, .commandBufferCount = 1, .pCommandBuffers = &cb};
+        VkCommandBuffer both[2] = {cbs_split[slot], cb};
+        if (split_now && with_hud && !stale_now && !stale_use) {
+            fs.commandBufferCount = 2;
+            fs.pCommandBuffers = both;
+        }
         VkCommandBuffer cb2 = cbs_b[slot];
         if (!early) CHECK(vkQueueSubmit(queue_a, 1, &fs, fences[slot]));
         /* --- device B, same thread: the hand-over --- */

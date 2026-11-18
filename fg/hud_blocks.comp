@@ -6,7 +6,8 @@
 //           every x, y from -3 on (what lies outside the picture counts as nothing).
 //   cells   this capture's, for the cells of 4x4 pixels that lie wholly in the picture: r the sum,
 //           g the sum of what arrived (alpha that rose by more than 40), b 1 when a pixel of the
-//           cell changed by more than EPS. The cells of the tiles (64x64) past the picture: zeros.
+//           cell changed by more than EPS, a its pixels with content in either capture (more than
+//           EPS). The cells of the tiles (64x64) past the picture: zeros.
 // One invocation works on one place of `blocks`.
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform sampler2D layer;
@@ -18,6 +19,10 @@ const float EPS = 0.04;
 
 uvec4 Levels(vec4 alpha) {
     return uvec4(clamp(alpha, 0.0, 1.0) * 1023.0 + 0.5);
+}
+
+uint Count(bvec4 which) {
+    return uint(which.x) + uint(which.y) + uint(which.z) + uint(which.w);
 }
 
 void main() {
@@ -58,6 +63,7 @@ void main() {
             cell.r += level.x + level.y + level.z + level.w;
             cell.g += arrived.x + arrived.y + arrived.z + arrived.w;
             cell.b |= uint(any(greaterThan(abs(now - before), vec4(EPS))));
+            cell.a += Count(greaterThan(max(now, before), vec4(EPS)));
         }
     }
     imageStore(cells, from >> 2, cell);

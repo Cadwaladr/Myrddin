@@ -1,0 +1,75 @@
+#version 450
+// A frame that came without a HUD capture of its own (the game draws its HUD into the layer and
+// over the frame all the same, it only did not set the frame aside where the layer could see it).
+// Interpolation needs the scene without the HUD, so it is worked out here: what the HUD added to
+// the frame before (that frame, its scene and the last captured layer tell, as in hud_layer.comp)
+// is taken out of this frame, and the result goes back through the game's tone curve.
+// Where the HUD covers the scene (nearly) completely nothing of it can be seen: the scene of the
+// frame before stays there. The HUD is put over those pixels again in every generated frame.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D current_frame; // this frame as presented: scene + HUD
+layout(binding = 1) uniform sampler2D scene_before;  // the scene of the frame before
+layout(binding = 2) uniform sampler2D layer;         // the HUD layer of the last capture
+layout(binding = 3, rgba8) uniform writeonly image2D scene; // this frame's scene
+layout(binding = 5) uniform sampler2D curve; // see hud_layer.comp
+layout(binding = 7) uniform sampler2D frame_before;  // the frame before as presented
+layout(push_constant) uniform Constants {
+    float mode;   // (the layer composite's: not used here)
+    float gain;   // multiplies the layer's alpha
+    float floor_; // differences below this count as none
+    float unused;
+} pc;
+
+vec3 Tone(vec3 colour) {
+    const vec3 at = (colour * 255.0 + 0.5) / 256.0;
+    return vec3(textureLod(curve, vec2(at.r, 0.5), 0.0).r, textureLod(curve, vec2(at.g, 0.5), 0.0).g,
+                textureLod(curve, vec2(at.b, 0.5), 0.0).b);
+}
+
+/// The scene value the tone curve takes to `shown` (the curve never falls).
+float Untone(float shown, int channel) {
+    int low = 0, high = 255; // the last entry not above it
+    while (low < high) {
+        const int middle = (low + high + 1) / 2;
+        if (texelFetch(curve, ivec2(middle, 0), 0)[channel] <= shown) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    if (low == 255) {
+        return 1.0;
+    }
+    const float below = texelFetch(curve, ivec2(low, 0), 0)[channel];
+    const float above = texelFetch(curve, ivec2(low + 1, 0), 0)[channel];
+    const float part = above > below ? clamp((shown - below) / (above - below), 0.0, 1.0) : 0.0;
+    return (float(low) + part) / 255.0;
+}
+
+void main() {
+    const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = imageSize(scene);
+    if (any(greaterThanEqual(pixel, size))) {
+        return;
+    }
+    const vec3 now = texelFetch(current_frame, pixel, 0).rgb;
+    const vec3 before = texelFetch(frame_before, pixel, 0).rgb;
+    const vec3 held = texelFetch(scene_before, pixel, 0).rgb;
+    const vec3 hudless = Tone(held);
+    // What the HUD did to the frame before: as much of the scene as it covers, and what it added.
+    float alpha = clamp(texelFetch(layer, pixel, 0).a * pc.gain, 0.0, 1.0);
+    const vec3 share = hudless * (1.0 - alpha);
+    const vec3 fits = min(vec3(1.0), (before + pc.floor_) / max(share, vec3(1e-4)));
+    alpha = 1.0 - (1.0 - alpha) * min(fits.r, min(fits.g, fits.b));
+    const vec3 difference = abs(before - hudless);
+    const bool hud = alpha > 0.0 || max(difference.r, max(difference.g, difference.b)) > pc.floor_;
+    const vec3 added = hud ? before - hudless * (1.0 - alpha) : vec3(0.0);
+    const float covered = smoothstep(0.80, 0.95, alpha);
+    vec3 result = held;
+    if (covered < 1.0) {
+        const vec3 toned = clamp((now - added) / max(1.0 - alpha, 0.05), 0.0, 1.0);
+        const vec3 found = vec3(Untone(toned.r, 0), Untone(toned.g, 1), Untone(toned.b, 2));
+        result = mix(found, held, covered);
+    }
+    imageStore(scene, pixel, vec4(result, 1.0));
+}

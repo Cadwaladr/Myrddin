@@ -26,7 +26,8 @@ Works on the layer's alpha. Tiles of 64x64 pixels, cells of 4x4 and 16x16 pixels
             each one pixel around, on its own cells. -> its motion, and whether it fits.
   pieces    tiles with changed content that touch are one piece. A piece is looked at further
             when a quarter of its arrived content is in tiles whose motion fits, and counts when
-            the field then leaves little of what "not moved" leaves (see EXPLAINS).
+            the field then leaves little of what "not moved" leaves (see EXPLAINS) and it is not
+            a picture that changes where it stands (see is_picture).
   field     the motion of each tile of a piece that counts: a plane through the motions that fit
             around it (two tiles around), so the field is smooth, a tile whose search went wrong
             is put right and one without an answer has one.
@@ -68,6 +69,15 @@ FIRST_NUM, FIRST_DEN = 1, 4   # a piece is looked at further when this share of 
 # for before, is 40 to 65 % for a flight display in a turn with other things over it: around
 # any limit, so that it moved in one frame and stood in the next.)
 EXPLAINS_NUM, EXPLAINS_DEN = 3, 5
+# ... and when it is not a picture (is_picture). The game's map, top left, is one: see-through, it
+# turns and scrolls inside its frame and sways with the frame when the view moves. Whole-pixel shifts
+# of its edges explain it well enough to count, and moved it comes out doubled and torn. In the
+# captures it has 20 to 34 tiles with content on most of their pixels; the panels at the bottom of
+# the view have 8 to 12, whatever else moves 4 at most. (Asking also how much of a piece's content
+# changed, or how far its motions spread, took in a ship's HUD that moves slowly: only a few pixels
+# of it change from frame to frame. It then stepped at the game's rate and fell behind the rest.)
+SOLID_NUM, SOLID_DEN = 3, 5      # a tile with content on this share of its pixels is solid
+SOLID_TILES = 16                 # a piece with this many of them is a picture, not something that moves
 RR = 2               # refine: +- pixels around the field
 SMOOTH = 2           # tiles around that the plane goes through
 OFF = 3.0            # a motion further than this from the plane is left out of it
@@ -141,6 +151,14 @@ class Frame:
         self.b_n, self.b_p = blocks(self.q_n), blocks(self.q_p)
         self.changed = np.abs(a_n - a_p) > EPS
         self.b_arrived = blocks(np.where(self.q_n - self.q_p > int(EPS * 1023), self.q_n, 0))
+        self.filled = self.per_tile((a_n > EPS) | (a_p > EPS))  # pixels with content, in either capture
+
+    def per_tile(self, mask):
+        """Pixels of `mask` per tile, in the cells of 4x4 pixels that lie wholly in the picture."""
+        hh, ww = self.h // 4 * 4, self.w // 4 * 4
+        full = np.zeros((self.th * TILE, self.tw * TILE), dtype=np.int64)
+        full[:hh, :ww] = mask[:hh, :ww]
+        return full.reshape(self.th, TILE, self.tw, TILE).sum(axis=(1, 3))
 
     def cells(self, tx, ty):
         py0, px0 = ty * TILE, tx * TILE
@@ -243,12 +261,18 @@ def around(f, mine):
     return out
 
 
-def pieces(tiles, label=None):
+def is_picture(f, label, l):
+    """Whether piece l is a picture that changes where it stands, not something that moves over
+    the screen: see SOLID."""
+    return int((SOLID_DEN * f.filled[label == l] >= SOLID_NUM * TILE * TILE).sum()) >= SOLID_TILES
+
+
+def pieces(tiles, label=None, f=None):
     """-> label[ty, tx] (-1: none), counts[label] = whether the piece counts: without `label`
     (first round, the tiles as around() gives them) the pieces are made, and one counts by the
     share of its content that fits; with it (the tiles as refine() gives them) by how much of
-    what "not moved" leaves the field leaves. -> also fitting[label], total[label] (content),
-    left[label] = (by the field, by "not moved")"""
+    what "not moved" leaves the field leaves and, given the Frame `f`, by not being a picture.
+    -> also fitting[label], total[label] (content), left[label] = (by the field, by "not moved")"""
     th, tw, _ = tiles.shape
     second = label is not None
     changed = not second
@@ -285,7 +309,8 @@ def pieces(tiles, label=None):
             if tiles[ty, tx, 2] == FITS:
                 fitting[l] = fitting.get(l, 0) + int(tiles[ty, tx, 4])
     if second:
-        counts = {l: fitting.get(l, 0) > 0 and EXPLAINS_DEN * left[l][0] <= EXPLAINS_NUM * left[l][1] for l in total}
+        counts = {l: fitting.get(l, 0) > 0 and EXPLAINS_DEN * left[l][0] <= EXPLAINS_NUM * left[l][1]
+                  and (f is None or not is_picture(f, label, l)) for l in total}
     else:
         counts = {l: fitting.get(l, 0) > 0 and FIRST_DEN * fitting.get(l, 0) >= FIRST_NUM * total[l] for l in total}
     return label, counts, fitting, total, left
@@ -560,7 +585,7 @@ def track(a_n, a_p, logs=None):
     label, counts, fitting, total, _ = pieces(tiles)
     first = field(tiles, label, counts)
     refined = refine(f, tiles, label, counts, first)
-    _, counts2, fitting2, total2, left2 = pieces(refined, label)
+    _, counts2, fitting2, total2, left2 = pieces(refined, label, f)
     motion = field(refined, label, counts2)
     if logs is not None:
         logs.update(own=log_own, active=active, tiles=refined, label=label, counts=counts2, fits=fitting2, total=total2, left=left2,

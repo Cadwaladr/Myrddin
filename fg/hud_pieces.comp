@@ -9,13 +9,16 @@
 //           that move leave 0.03 to 0.5 of it in the game, pieces whose content changes where it
 //           is 0.8 to 1. The share of the content in tiles that fit, which was asked for before,
 //           is around any limit for a flight display in a turn with other things over it: it
-//           moved in one frame and stood in the next.)
+//           moved in one frame and stood in the next.) And when it is not a picture that changes
+//           where it stands (Picture): moved, the game's map comes out doubled and torn. Mode 2 is
+//           mode 1 without that (PARAMS: pictures=0).
 // One invocation does all of it (the tiles are few).
 layout(local_size_x = 1) in;
 struct Tile {
     ivec4 own;     // its own search's answer: xy; z: 1 when it has one
     ivec4 around;  // the best of the answers around it, on its own cells: xy; z: state; w: what it leaves unexplained
-    ivec4 sums;    // x: arrived content in its changed cells; y: what "not moved" leaves; z: its piece (-1: none)
+    ivec4 sums;    // x: arrived content in its changed cells; y: what "not moved" leaves; z: its piece (-1: none);
+                   // w: its pixels with content
     vec4 piece;    // (of a piece's first tile) x: content that fits, y: all of it, z: 1 when the piece counts,
                    // w: (mode 1) what the field leaves unexplained in it
     vec4 first;    // the field, first round: xy; z: 1 when there is one
@@ -24,7 +27,8 @@ struct Tile {
     vec4 reach;    // those motions: xy, zw
 };
 layout(std430, binding = 6) buffer Markers {
-    uint seen, found, pieces, unused;
+    uint seen, found, pieces;
+    uint pictures; // pieces that would have moved and are held back as pictures
     Tile tiles[];
 } markers;
 layout(push_constant) uniform Constants {
@@ -34,6 +38,17 @@ layout(push_constant) uniform Constants {
 
 const int NONE = 0, FITS = 1, NOT = 2, LITTLE = 3;
 const int ROUNDS = 8; // there and back over the tiles, at most this often
+const uint SOLID_TILES = 16u; // of tiles with content on 3/5 of their pixels or more: a picture
+
+/// Whether a piece is a picture that changes where it stands, not something that moves over the
+/// screen ("is_picture" in proto/hud-motion/hudmotion.py, which says what the captures show).
+bool Picture(int name, int count) {
+    uint solid = 0u;
+    for (int i = 0; i < count && solid < SOLID_TILES; ++i) {
+        solid += uint(markers.tiles[i].sums.z == name && 5u * uint(markers.tiles[i].sums.w) >= 3u * 4096u);
+    }
+    return solid >= SOLID_TILES;
+}
 
 void main() {
     const int w = int(pc.tiles_w), h = int(pc.tiles_h), count = w * h;
@@ -91,7 +106,11 @@ void main() {
     uint pieces = 0u;
     for (int i = 0; i < count; ++i) {
         const vec4 piece = markers.tiles[i].piece;
-        const bool counts = piece.x > 0.0 && (second ? 5.0 * piece.w <= 3.0 * piece.z : 4.0 * piece.x >= piece.y);
+        bool counts = piece.x > 0.0 && (second ? 5.0 * piece.w <= 3.0 * piece.z : 4.0 * piece.x >= piece.y);
+        if (counts && pc.mode == 1.0 && Picture(i, count)) {
+            counts = false;
+            ++markers.pictures;
+        }
         markers.tiles[i].piece.z = counts ? 1.0 : 0.0;
         pieces += uint(counts);
     }
