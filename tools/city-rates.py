@@ -8,7 +8,9 @@ the inventory of a place, and when a hangar was granted and the armistice zone l
   spawned in the city   from a minute after that, until the zone is left, a hangar is granted or
                         a quantum target is chosen, which is the way out
   landed there          from where the zone is entered again after the hangar, until the same
-A line of the layer's log covers ten seconds and counts when all of them lie in such a stretch.
+A stretch also ends where the game goes back to its front end (the menu, the character creator).
+A line of the layer's log covers ten seconds and counts when all of them lie in such a stretch and
+frames were generated in it (a line from a time with generation switched off is left out).
 "typical" is the middle of those lines, "busy" the slowest tenth of them.
 """
 import collections
@@ -23,7 +25,7 @@ import sys
 
 HERE = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 CITIES = (("Orison", "Orison"), ("Lorville", "Lorville"), ("Levski", "Levski"), ("Area18", "Area 18"), ("NewBabbage", "New Babbage"))
-STAT = re.compile(r"\s*([\d.]+) STAT x(\d) real=([\d.]+)/s generated=[\d.]+/s shown=([\d.]+)/s")
+STAT = re.compile(r"\s*([\d.]+) STAT x(\d) real=([\d.]+)/s generated=([\d.]+)/s shown=([\d.]+)/s")
 MARKS = (("Hangar Request Completed", "hangar"), ("Entering Armistice Zone", "enter"), ("Leaving Armistice Zone", "leave"))
 
 
@@ -41,8 +43,8 @@ def layer_lines(pid):
     lines = []
     for line in open(os.path.join(HERE, "logs", "fg", f"fg-{pid}.log"), errors="replace"):
         m = STAT.match(line)
-        if m and float(m[3]) > 5.0:
-            lines.append((start + float(m[1]), int(m[2]), float(m[3]), float(m[4])))
+        if m and float(m[3]) > 5.0 and float(m[4]) > 0.0:
+            lines.append((start + float(m[1]), int(m[2]), float(m[3]), float(m[5])))
     return lines
 
 
@@ -61,6 +63,8 @@ def game_marks(io, path):
             marks += [(when, kind) for text, kind in MARKS if text in line]
         if "Player Selected Quantum Target" in line:
             marks.append((when, "quantum"))
+        if 'gamerules="SC_Frontend"' in line:
+            marks.append((when, "frontend"))
     return places, marks
 
 
@@ -81,6 +85,7 @@ def stretches(places, marks, last):
                 continue
             start = [t for t in entered if t - entered[0] < 5.0][-1]
         stop = min([t for t, kind in here if t >= start + 60.0 and kind in ("leave", "hangar", "quantum")] + [until])
+        stop = min([t for t, kind in marks if kind == "frontend" and t > start] + [stop])
         yield city, start, stop
 
 

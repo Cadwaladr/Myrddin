@@ -6,3 +6,8 @@ pair of frames yield several generated frames, and the recipe that builds it for
   ffx_src/       the SDK's sources and the build recipe (./build.sh -> build/ffx/ffx_fg/libffx_fg.a)
   lichii/        Vulkan test helpers and the compatibility header the layer is built with
                  (GPL-3.0-or-later)
+
+Adwaita Sans (SIL Open Font License 1.1): the letters of the layer's panel are a rendering of it
+(fg/hud_font.h, made by tools/make-hud-font.py from Fedora's adwaita-sans-fonts 50.0, font version 4.001).
+
+  adwaita-sans/LICENSE   the font's copyright notices and the licence text, as its package carries them

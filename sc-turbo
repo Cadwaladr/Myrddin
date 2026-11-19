@@ -19,7 +19,8 @@
 #                      "watch": record what the game does with the disk and with memory (see iowatch).
 #                      "sched=NAME[:MODE]": the kernel's CPU scheduler for as long as the game runs, a
 #                      sched_ext one of scx-scheds (lavd, bpfland, ...; MODE one of scx_loader's, default
-#                      gaming), the stock one again after it; SC_SCHED=NAME in sc-turbo.conf: always,
+#                      gaming), the stock one again after it (and after ten minutes more while the RSI
+#                      Launcher is open, for a game started again from it); SC_SCHED=NAME in sc-turbo.conf: always,
 #                      sched=stock: not this time. Needs scx-scheds, scx-tools and switching without a
 #                      password (tools/sc-sched rule); otherwise the game runs with the stock one.
 #                      "old": the build before the last one, kept in build/fg-prev; "older": the one

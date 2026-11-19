@@ -1,0 +1,914 @@
+#!/usr/bin/env python3
+"""What bounds the game's own frame rate on this machine, measured from outside while it is played.
+
+    tools/base-probe [SECONDS=20] [--pid PID] [--no-stacks] [--no-mem] [--keep-fg]
+    tools/base-probe report DIR          print a finished measurement again
+
+Two stretches of SECONDS each and a third of 10 s, in a busy place with a steady view:
+
+  1. counters   per thread, by the CPU's own counters (perf stat, user mode only): how much of the
+                time went by on P-cores and on E-cores, the clock it really ran at (is the power limit
+                or heat holding it back), instructions per cycle, the share of cycles stalled on
+                memory (what faster RAM could touch), the share spent walking page tables (what
+                huge pages could touch), and how long threads waited for a CPU.
+  2. stacks     sampled call stacks (perf record, user mode only): which module the time is in (the
+                game, Wine, the graphics driver, this project's layer), which Wine functions the game
+                calls into most, and how much of the game's own time sits in spin-wait loops.
+  3. memory     sampled loads that had to wait for their data (perf record with the address read, user
+                mode only): where the data came from (RAM, a fetch already under way, the L3 cache),
+                which kind of memory it was (the game's own, and whether a huge page could hold it;
+                files mapped from disk; the graphics driver's memory), and which code did the loads.
+
+Nothing is attached to the game and nothing in it is changed: the counters and samples are taken by
+the kernel (perf_event_open, no ptrace), the rest is read from /proc and /sys. The game's executable
+is read from disk (never from memory) to tell spin loops from work. Frame generation is switched off
+for the measurement, as the A/B tools do it, and back on afterwards (--keep-fg: left as it is).
+
+Everything is kept in logs/base/probe-TIME/ (report.txt, the raw files).
+"""
+import bisect
+import collections
+import os
+import re
+import struct
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+FG_DIR = os.environ.get("FG_DIR", os.path.join(HERE, "logs/fg"))
+COMM = os.environ.get("SC_COMM", "StarCitizen.exe")
+
+CORE = ["cycles", "instructions", "ref-cycles", "cycle_activity.stalls_l3_miss", "cycle_activity.stalls_total",
+        "mem_load_retired.l3_miss", "dtlb_load_misses.walk_active", "dtlb_store_misses.walk_active",
+        "itlb_misses.walk_active"]
+ATOM = ["cycles", "instructions", "ref-cycles", "mem_bound_stalls.load", "mem_bound_stalls.load_dram_hit",
+        "mem_load_uops_retired.dram_hit"]
+
+
+def read(path, default=""):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def cpulist(text):
+    out = set()
+    for part in text.split(","):
+        a, _, b = part.partition("-")
+        if a.strip():
+            out.update(range(int(a), int(b or a) + 1))
+    return out
+
+
+ONLINE = cpulist(read("/sys/devices/system/cpu/online", "0"))
+ECORES = cpulist(read("/sys/devices/cpu_atom/cpus"))
+PCORES = cpulist(read("/sys/devices/cpu_core/cpus")) or ONLINE
+HYBRID = bool(ECORES)
+
+
+def tsc_hz():
+    for line in open("/proc/cpuinfo"):
+        if line.startswith("bogomips"):
+            return float(line.split(":")[1]) / 2 * 1e6
+    return 0.0
+
+
+def game_pid():
+    best = None
+    for d in os.listdir("/proc"):
+        if d.isdigit() and read(f"/proc/{d}/comm") == COMM[:15]:
+            try:
+                n = len(os.listdir(f"/proc/{d}/task"))
+            except OSError:
+                continue
+            if best is None or n > best[1]:
+                best = (int(d), n)
+    return best[0] if best else None
+
+
+def threads(pid):
+    out = {}
+    try:
+        tids = os.listdir(f"/proc/{pid}/task")
+    except OSError:
+        return out
+    for tid in tids:
+        name = read(f"/proc/{pid}/task/{tid}/comm")
+        if name:
+            out[int(tid)] = name
+    return out
+
+
+def group(pid, tid, name):
+    if tid == pid:
+        return "main thread"
+    for prefix, label in (("BatchWorker", "BatchWorkers"), ("BackgroundWorke", "BackgroundWorkers"), ("Physics", "Physics"),
+                          ("CAudioThread", "Audio"), ("vkd3d", "vkd3d"), ("sc_fg", "layer (sc_fg)"), ("Network", "Network")):
+        if name.startswith(prefix):
+            return label
+    return "other"
+
+
+def schedstat(pid, tids):
+    out = {}
+    for tid in tids:
+        f = read(f"/proc/{pid}/task/{tid}/schedstat").split()
+        s = read(f"/proc/{pid}/task/{tid}/stat")
+        if len(f) == 3 and s:
+            rest = s[s.rindex(")") + 2:].split()
+            out[tid] = (int(f[0]), int(f[1]), int(f[2]), int(rest[11]), int(rest[12]))  # run ns, wait ns, slices, utime, stime
+    return out
+
+
+def cpu_times():
+    out = {}
+    for line in open("/proc/stat"):
+        f = line.split()
+        if f[0].startswith("cpu") and f[0] != "cpu":
+            v = [int(x) for x in f[1:9]]
+            out[int(f[0][3:])] = (sum(v), v[3] + v[4])
+    return out
+
+
+def freq(cpu):
+    base = f"/sys/devices/system/cpu/cpu{cpu}/cpufreq/"
+    return int(read(base + "cpuinfo_avg_freq") or read(base + "scaling_cur_freq") or 0) / 1e6
+
+
+def throttle():
+    base = "/sys/devices/system/cpu/cpu0/thermal_throttle/"
+    return {k: int(read(base + k, "0") or 0) for k in ("package_throttle_count", "package_throttle_total_time_ms", "core_throttle_count")}
+
+
+def temperature():
+    for d in os.listdir("/sys/class/hwmon"):
+        h = f"/sys/class/hwmon/{d}"
+        if read(h + "/name") == "coretemp":
+            return int(read(h + "/temp1_input", "0")) / 1000
+    return 0.0
+
+
+def io_counts(pid):
+    """Bytes the process asked to read (page cache included), bytes that came from a disk, page faults."""
+    out = {}
+    for line in read(f"/proc/{pid}/io").splitlines():
+        k, _, v = line.partition(":")
+        out[k] = int(v)
+    s = read(f"/proc/{pid}/stat")
+    if s:
+        f = s[s.rindex(")") + 2:].split()
+        out["minflt"], out["majflt"] = int(f[7]), int(f[9])
+    return out
+
+
+def gpu_memory(pid):
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-gpu=memory.used,memory.total", "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=5)
+        used, total = [int(x) for x in r.stdout.strip().split(",")]
+        return used, total
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+class Out:
+    def __init__(self, path):
+        self.f = open(path, "w")
+
+    def __call__(self, text=""):
+        print(text, flush=True)
+        self.f.write(text + "\n")
+        self.f.flush()
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# stretch 1: counters
+
+def counters(pid, secs, out_dir, say):
+    names = threads(pid)
+    before = schedstat(pid, names)
+    time.sleep(1.0)
+    mid = schedstat(pid, names)
+    hz = os.sysconf("SC_CLK_TCK")
+    busy = [t for t in names if t in before and t in mid and (mid[t][3] + mid[t][4] - before[t][3] - before[t][4]) / hz > 0.02]
+    chosen = sorted(set(busy) | {t for t, n in names.items() if group(pid, t, n) in ("main thread", "BatchWorkers", "Physics")})
+    if HYBRID:  # groups: the events of one group count over the same moments, so their ratios are exact
+        g1 = "{" + ",".join(f"cpu_core/{e}/u" for e in CORE[:6]) + "}"
+        g2 = "{cpu_core/cycles/u," + ",".join(f"cpu_core/{e}/u" for e in CORE[6:]) + "}"
+        g3 = "{" + ",".join(f"cpu_atom/{e}/u" for e in ATOM) + "}"
+        events = [g1, g2, g3]
+    else:
+        events = ["{" + ",".join(e + ":u" for e in CORE[:6]) + "}", "{cycles:u," + ",".join(e + ":u" for e in CORE[6:]) + "}"]
+    csv = os.path.join(out_dir, "stat.csv")
+    cmd = ["perf", "stat", "--no-scale", "-x", ";", "--per-thread", "-t", ",".join(map(str, chosen)), "-e", ",".join(events), "-o", csv, "--", "sleep", str(secs)]
+    say(f"stretch 1: counters on {len(chosen)} of {len(names)} threads for {secs:.0f} s")
+    start = schedstat(pid, names)
+    c0, t0, th0, io0 = cpu_times(), time.time(), throttle(), io_counts(pid)
+    p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    fsum, fn, temps, where = collections.Counter(), collections.Counter(), [], collections.Counter()
+    while p.poll() is None:
+        time.sleep(0.25)
+        for c in ONLINE:
+            v = freq(c)
+            if v:
+                fsum[c] += v
+                fn[c] += 1
+        temps.append(temperature())
+        s = read(f"/proc/{pid}/task/{pid}/stat")
+        if s:
+            where[int(s[s.rindex(")") + 2:].split()[36])] += 1
+    err = p.stderr.read()
+    wall = time.time() - t0
+    end, c1, th1, io1 = schedstat(pid, names), cpu_times(), throttle(), io_counts(pid)
+    if p.returncode != 0 or not os.path.exists(csv):
+        say(f"perf stat failed (exit {p.returncode}): " + err.strip()[:400])
+        return
+    # --- per thread: (group, event) -> raw count, and the time (s) that group was counting
+    val = collections.defaultdict(dict)
+    ran = collections.defaultdict(dict)
+    seen = collections.defaultdict(int)
+    for line in open(csv):
+        f = line.rstrip("\n").split(";")
+        if len(f) < 5 or line.startswith("#"):
+            continue
+        m = re.match(r"(.*)-(\d+)$", f[0])
+        if not m:
+            continue
+        t, e = int(m.group(2)), f[3]
+        if e.endswith("cycles/u") and "ref-" not in e or e == "cycles:u":
+            seen[t] += 1  # every group starts with cycles: 1 = P counters, 2 = P page walks, 3 = E counters
+        gi = seen[t] if HYBRID else seen[t]
+        try:
+            val[t][(gi, e)] = float(f[1])
+            ran[t][gi] = float(f[4]) / 1e9
+        except ValueError:
+            pass  # <not counted>: the thread never ran on that kind of core
+    tsc = tsc_hz()
+
+    def ev(tids, gi, name):
+        return sum(val[t].get((gi, name), 0.0) for t in tids)
+
+    def ran_s(tids, gi):
+        return sum(ran[t].get(gi, 0.0) for t in tids)
+
+    groups = collections.defaultdict(list)
+    for t in chosen:
+        groups[group(pid, t, names.get(t, "?"))].append(t)
+    order = ["main thread", "BatchWorkers", "Physics", "Audio", "BackgroundWorkers", "vkd3d", "Network", "layer (sc_fg)", "other"]
+    busy_cpu = {c: 1 - (c1[c][1] - c0[c][1]) / max(c1[c][0] - c0[c][0], 1) for c in ONLINE if c in c0 and c in c1}
+    bp = [c for c in PCORES if busy_cpu.get(c, 0) > 0.5 and fn[c]]
+    be = [c for c in ECORES if busy_cpu.get(c, 0) > 0.5 and fn[c]]
+    say()
+    say(f"the machine in that stretch: {sum(busy_cpu.values()):.1f} of {len(ONLINE)} CPUs busy "
+        f"(P {sum(busy_cpu[c] for c in PCORES if c in busy_cpu):.1f} of {len(PCORES)}, E {sum(busy_cpu[c] for c in ECORES if c in busy_cpu):.1f} of {len(ECORES)}); "
+        f"package {max(temps, default=0):.0f} C at most; heat throttling {th1['package_throttle_count'] - th0['package_throttle_count']} times "
+        f"({th1['package_throttle_total_time_ms'] - th0['package_throttle_total_time_ms']} ms)")
+    if io0 and io1:
+        d = lambda k: (io1.get(k, 0) - io0.get(k, 0)) / wall
+        gm = gpu_memory(pid)
+        say(f"streaming in that stretch: the game read {d('rchar') / 1e6:.1f} MB/s ({d('read_bytes') / 1e6:.1f} from the disk, the rest from the page cache) in {d('syscr'):.0f} reads/s; "
+            f"{d('minflt') / 1e3:.1f} thousand page faults/s" + (f"; GPU memory in use {gm[0]} of {gm[1]} MB (everything on the card)" if gm else ""))
+    if bp:
+        say(f"clock of the busy CPUs (sysfs): P {sum(fsum[c] / fn[c] for c in bp) / len(bp):.2f} GHz (slowest {min(fsum[c] / fn[c] for c in bp):.2f}; 5.10 is the most)"
+            + (f", E {sum(fsum[c] / fn[c] for c in be) / len(be):.2f} GHz (3.90 the most)" if be else ""))
+    say()
+    say("per kind of thread (user mode). cores = CPUs' worth of time; E = share of that time on E-cores; GHz = the clock it")
+    say("ran at; IPC = instructions per cycle; mem = cycles stalled waiting for RAM (P: L3 miss outstanding, E: load from RAM);")
+    say("tlb = cycles walking page tables (P only); wait = time ready but without a CPU, against time running")
+    say(f"  {'threads':<19}{'n':>3} {'cores':>6} {'E %':>5} | {'P GHz':>5} {'P IPC':>5} {'mem %':>5} {'stall %':>7} {'tlb %':>5} | {'E GHz':>5} {'E IPC':>5} {'mem %':>5} | {'wait %':>6} {'slices/s':>8}")
+    rows = {}
+    for g in order + ["all counted"]:
+        tids = groups.get(g) if g != "all counted" else chosen
+        if not tids:
+            continue
+        pre, suf = ("cpu_core/", "/u") if HYBRID else ("", ":u")
+        cc, ci, cr = ev(tids, 1, f"{pre}cycles{suf}"), ev(tids, 1, f"{pre}instructions{suf}"), ev(tids, 1, f"{pre}ref-cycles{suf}")
+        l3 = ev(tids, 1, f"{pre}cycle_activity.stalls_l3_miss{suf}")
+        st = ev(tids, 1, f"{pre}cycle_activity.stalls_total{suf}")
+        l3n = ev(tids, 1, f"{pre}mem_load_retired.l3_miss{suf}")
+        wc = ev(tids, 2, f"{pre}cycles{suf}")
+        walk = sum(ev(tids, 2, f"{pre}{e}{suf}") for e in CORE[6:])
+        ac, ai, ar = ev(tids, 3, "cpu_atom/cycles/u"), ev(tids, 3, "cpu_atom/instructions/u"), ev(tids, 3, "cpu_atom/ref-cycles/u")
+        adram, dram = ev(tids, 3, "cpu_atom/mem_bound_stalls.load_dram_hit/u"), ev(tids, 3, "cpu_atom/mem_load_uops_retired.dram_hit/u")
+        run = sum(end[t][0] - start[t][0] for t in tids if t in end and t in start) / 1e9
+        wait = sum(end[t][1] - start[t][1] for t in tids if t in end and t in start) / 1e9
+        slices = sum(end[t][2] - start[t][2] for t in tids if t in end and t in start)
+        te, tp1 = ran_s(tids, 3), ran_s(tids, 1)   # time on E-cores; time the P group counted
+        tp = max(run - te, tp1) if tp1 else 0.0    # time on P-cores: the kernel's run time less the E time
+        up = tp / tp1 if tp1 else 0.0              # (what the P group missed, if the counters had to take turns)
+        rows[g] = dict(tp=tp, te=te, run=run, counted=tp1 + ran_s(tids, 2) + te, l3n=l3n * up, dram=dram)
+        pct = lambda a, b: f"{100 * a / b:.1f}" if b else "-"
+        num = lambda a, b, fmt="{:.2f}": fmt.format(a / b) if b else "-"
+        say(f"  {g:<19}{len(tids):>3} {(tp + te) / wall:>6.2f} {pct(te, tp + te):>5} | {num(cc, cr / tsc * 1e9 if tsc else 0):>5} {num(ci, cc):>5} {pct(l3, cc):>5} {pct(st, cc):>7} {pct(walk, wc):>5} | "
+            f"{num(ac, ar / tsc * 1e9 if tsc else 0):>5} {num(ai, ac):>5} {pct(adram, ac):>5} | {pct(wait, run):>6} {slices / wall:>8.0f}")
+    a = rows.get("all counted")
+    if a:
+        say()
+        say(f"check: {a['run'] / wall:.2f} CPUs' worth of run time by the kernel's accounting; the three counter groups were counting for {a['counted'] / wall:.2f}")
+        say("       (the two P-core groups take turns on the same four counters, so the two figures should be close)")
+        say(f"loads that had to come from RAM: {(a['l3n'] + a['dram']) / wall / 1e6:.1f} million a second "
+            f"(at 64 bytes each {(a['l3n'] + a['dram']) * 64 / wall / 1e9:.2f} GB/s; prefetched and written data not included, so the real traffic is higher)")
+    m = rows.get("main thread")
+    if m:
+        on_e = sum(n for c, n in where.items() if c in ECORES) / max(sum(where.values()), 1)
+        say(f"main thread: last seen on an E-core in {100 * on_e:.0f} % of {sum(where.values())} looks")
+    say()
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# stretch 2: stacks
+
+class PE:
+    """Sections and exports of a PE file on disk."""
+
+    def __init__(self, path):
+        self.path, self.ok, self.exports, self.sections, self.size, self.base = path, False, [], [], 0, 0
+        self.pdata, self.funcs = (0, 0), None
+        try:
+            with open(path, "rb") as f:
+                head = f.read(0x1000)
+                pe = struct.unpack_from("<I", head, 0x3C)[0]
+                if head[:2] != b"MZ" or head[pe:pe + 4] != b"PE\0\0":
+                    return
+                nsec, optsize = struct.unpack_from("<H", head, pe + 6)[0], struct.unpack_from("<H", head, pe + 20)[0]
+                opt = pe + 24
+                if struct.unpack_from("<H", head, opt)[0] != 0x20B:
+                    return
+                self.base = struct.unpack_from("<Q", head, opt + 24)[0]
+                self.size = struct.unpack_from("<I", head, opt + 56)[0]
+                exp_rva, exp_size = struct.unpack_from("<II", head, opt + 112)
+                self.pdata = struct.unpack_from("<II", head, opt + 112 + 8 * 3)
+                sec = opt + optsize
+                if sec + 40 * nsec > len(head):
+                    f.seek(0)
+                    head = f.read(sec + 40 * nsec)
+                for i in range(nsec):
+                    name, vsize, va, rsize, raw = struct.unpack_from("<8sIIII", head, sec + 40 * i)
+                    chars = struct.unpack_from("<I", head, sec + 40 * i + 36)[0]
+                    self.sections.append((va, max(vsize, rsize), raw, rsize, name.rstrip(b"\0").decode("latin1"), bool(chars & 0x20000000)))
+                self.ok = True
+                if exp_rva and exp_size:
+                    off = self.offset(exp_rva)
+                    if off is not None:
+                        f.seek(off)
+                        d = f.read(40)
+                        nfunc, nname, afunc, aname, aord = struct.unpack_from("<IIIII", d, 20)
+                        f.seek(self.offset(afunc)); funcs = struct.unpack(f"<{nfunc}I", f.read(4 * nfunc))
+                        f.seek(self.offset(aname)); nameptrs = struct.unpack(f"<{nname}I", f.read(4 * nname))
+                        f.seek(self.offset(aord)); ords = struct.unpack(f"<{nname}H", f.read(2 * nname))
+                        for ptr, o in zip(nameptrs, ords):
+                            f.seek(self.offset(ptr))
+                            s = f.read(128).split(b"\0")[0].decode("latin1")
+                            if o < nfunc and funcs[o] and not (exp_rva <= funcs[o] < exp_rva + exp_size):
+                                self.exports.append((funcs[o], s))
+                        self.exports.sort()
+        except (OSError, struct.error, TypeError):
+            pass
+        self.rvas = [e[0] for e in self.exports]
+
+    def function(self, rva):
+        """(start, end) of the function an address is in, from the file's unwind table; None if it has none."""
+        if self.funcs is None:
+            self.funcs = ([], [])
+            rva0, size = self.pdata
+            off = self.offset(rva0) if rva0 else None
+            if off is not None:
+                import array
+                a = array.array("I")
+                with open(self.path, "rb") as f:
+                    f.seek(off)
+                    a.frombytes(f.read(size - size % 12))
+                self.funcs = (a[0::3], a[1::3])
+        begins, ends = self.funcs
+        i = bisect.bisect_right(begins, rva) - 1
+        if i >= 0 and rva < ends[i]:
+            return begins[i], ends[i]
+        return None
+
+    def offset(self, rva):
+        for va, size, raw, rsize, _, _ in self.sections:
+            if va <= rva < va + size:
+                return raw + rva - va if rva - va < rsize else None
+        return None
+
+    def executable(self, rva):
+        return any(va <= rva < va + size and code for va, size, _, _, _, code in self.sections)
+
+    def symbol(self, rva):
+        i = bisect.bisect_right(self.rvas, rva) - 1
+        if i >= 0 and rva - self.exports[i][0] < 0x4000:
+            return self.exports[i][1]
+        return None
+
+
+def kind(path):
+    p = path.lower()
+    b = os.path.basename(p)
+    if "/bin64/" in p or b == COMM.lower():
+        return "game"
+    if "libsc_fg" in b:
+        return "layer"
+    if "nvidia" in b or b.startswith("libglx") or "nvoptix" in b:
+        return "nvidia driver"
+    if "/x86_64-unix/" in p or "/lib/wine/" in p and p.endswith(".so"):
+        return "wine (unix side)"
+    if b in ("d3d12core.dll", "d3d12.dll", "dxgi.dll", "d3d11.dll") or "vkd3d" in b or "dxvk" in b:
+        return "vkd3d/dxvk"
+    if "/x86_64-windows/" in p or "/windows/system32/" in p or p.endswith((".dll", ".drv", ".exe")):
+        return "wine (windows side)"
+    if b.startswith(("libc.", "libm.", "ld-linux", "libpthread", "libstdc++", "libgcc")):
+        return "libc"
+    if "mangohud" in p:
+        return "mangohud"
+    if "vulkan" in b:
+        return "vulkan loader"
+    if path.startswith("[") or "anon" in p or not path:
+        return "unknown"
+    return "other library"
+
+
+SPIN_APIS = re.compile(r"Yield|SwitchToThread|Sleep|WaitOnAddress|WaitFor|EnterCriticalSection|AcquireSRW|SleepConditionVariable|DelayExecution|WakeAddress|WakeConditionVariable|ReleaseSRW|LeaveCriticalSection|SetEvent|ReleaseSemaphore|NtWait|AlertThread", re.I)
+
+
+class Images:
+    """Every PE file the process has mapped by name, plus the game's executable at its preferred base (Wine reads an
+    image whose file alignment is smaller than a page into anonymous memory, so its name is not in the map)."""
+
+    def __init__(self, maps):
+        self.maps = maps
+        images = []  # (start, end, PE, kind, name)
+        seen = {}
+        for a, b, perms, off, path in maps:
+            if path.lower().endswith((".dll", ".exe", ".drv", ".sys")) and path not in seen:
+                seen[path] = a if off == 0 else None
+        for path, base in seen.items():
+            pe = PE(path)
+            if pe.ok and base is not None:
+                images.append((base, base + pe.size, pe, kind(path), os.path.basename(path)))
+        self.game_exe = None
+        for cand in set([p for p in seen if os.path.basename(p).lower() == COMM.lower()]):
+            self.game_exe = cand
+        if self.game_exe is None:  # not mapped by name: find it on disk next to the prefix
+            prefix = read(os.path.join(HERE, "sc-turbo.conf"))
+            m = re.search(r'SC_PREFIX="?([^"\n]+)', prefix)
+            if m:
+                cand = os.path.join(m.group(1), "drive_c/Program Files/Roberts Space Industries/StarCitizen/LIVE/Bin64", COMM)
+                if os.path.exists(cand):
+                    pe = PE(cand)
+                    if pe.ok and any(a <= pe.base < b for a, b, *_ in maps):
+                        images.append((pe.base, pe.base + pe.size, pe, "game", COMM))
+                        self.game_exe = cand
+        images.sort(key=lambda i: i[0])
+        self.images = images
+        self.starts = [i[0] for i in images]
+        self.map_starts = [m[0] for m in maps]
+
+    def where(self, addr, sym=None, dso=None):
+        """(kind, module, symbol, rva, PE) of an address."""
+        images, maps = self.images, self.maps
+        i = bisect.bisect_right(self.starts, addr) - 1
+        if i >= 0 and addr < images[i][1]:
+            _, _, pe, k, name = images[i]
+            rva = addr - images[i][0]
+            return k, name, pe.symbol(rva) or (sym if sym and sym != "[unknown]" else None), rva, pe
+        if dso and not dso.startswith("["):
+            return kind(dso), os.path.basename(dso), sym if sym != "[unknown]" else None, None, None
+        j = bisect.bisect_right(self.map_starts, addr) - 1
+        if j >= 0 and addr < maps[j][1] and maps[j][4]:
+            return kind(maps[j][4]), os.path.basename(maps[j][4]), None, None, None
+        return "unknown", "?", None, None, None
+
+
+def code_name(k, mod, sym, rva, pe):
+    """One name for a place in the code: the game's functions by the executable's unwind table, the rest by symbol."""
+    if k == "game" and rva is not None and pe is not None and mod.lower() == COMM.lower():
+        fn = pe.function(rva)
+        return f"game +0x{fn[0]:x} ({fn[1] - fn[0]} bytes)" if fn else f"game +0x{rva & ~63:x}"
+    return f"{mod}!{sym}" if sym else f"{mod} ({k})"
+
+
+def snapshot(pid, out_dir, tag, say):
+    """The process's threads by name and its memory map, as they are now; False if they cannot be read."""
+    names = threads(pid)
+    with open(os.path.join(out_dir, f"threads{tag}.txt"), "w") as f:
+        for t, n in sorted(names.items()):
+            f.write(f"{t} {group(pid, t, n)}\t{n}\n")
+    try:
+        with open(os.path.join(out_dir, f"maps{tag}.txt"), "w") as f:
+            f.write(open(f"/proc/{pid}/maps").read())
+        exe = os.readlink(f"/proc/{pid}/exe")
+    except OSError as e:
+        say(f"could not read the process's map: {e}")
+        return False
+    with open(os.path.join(out_dir, "exe.txt"), "w") as f:
+        f.write(exe + "\n")
+    return True
+
+
+def load_groups(path):
+    groups = {}
+    for line in open(path):
+        a, _, n = line.rstrip("\n").partition("\t")
+        t, _, g = a.partition(" ")
+        groups[int(t)] = g
+    return groups
+
+
+def load_maps(path):
+    out = []
+    for line in open(path):
+        f = line.split(None, 5)
+        a, b = f[0].split("-")
+        out.append((int(a, 16), int(b, 16), f[1], int(f[2], 16), f[5].strip() if len(f) > 5 else ""))
+    return out
+
+
+def stacks(pid, secs, out_dir, say, record=True):
+    names_file = os.path.join(out_dir, "threads.txt")
+    maps_file = os.path.join(out_dir, "maps.txt")
+    data = os.path.join(out_dir, "stacks.data")
+    if record:
+        if not snapshot(pid, out_dir, "", say):
+            return
+        say(f"stretch 2: sampled stacks for {secs:.0f} s")
+        r = subprocess.run(["perf", "record", "-q", "--user-callchains", "--call-graph", "lbr", "-e", "cycles:u", "-F", os.environ.get("PROBE_HZ", "299"),
+                            "-p", str(pid), "-o", data, "--", "sleep", str(secs)], capture_output=True, text=True)
+        if r.returncode != 0 or not os.path.exists(data) or os.path.getsize(data) == 0:
+            say(f"perf record failed (exit {r.returncode}): " + (r.stderr or r.stdout).strip()[:400])
+            return
+    groups = load_groups(names_file)
+    maps = load_maps(maps_file)
+    img = Images(maps)
+    where, game_exe = img.where, img.game_exe
+
+    pause_cache = {}
+    exe_bytes = {}
+
+    def spin(pe, rva):
+        """Is a PAUSE instruction (F3 90) within a few bytes of this address in the file on disk?"""
+        key = (pe.path, rva >> 4)
+        if key not in pause_cache:
+            off = pe.offset(rva)
+            hit = False
+            if off is not None:
+                if pe.path not in exe_bytes:
+                    exe_bytes[pe.path] = open(pe.path, "rb")
+                f = exe_bytes[pe.path]
+                f.seek(max(off - 40, 0))
+                hit = b"\xf3\x90" in f.read(88)
+            pause_cache[key] = hit
+        return pause_cache[key]
+
+    p = subprocess.Popen(["perf", "script", "-i", data, "--no-inline", "-F", "tid,ip,sym,dso"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, errors="replace")
+    total = collections.Counter()               # group -> samples
+    by_kind = collections.defaultdict(collections.Counter)   # group -> kind -> samples (leaf)
+    by_sym = collections.defaultdict(collections.Counter)    # (group, kind) -> "module!symbol" -> samples (leaf)
+    by_api = collections.defaultdict(collections.Counter)    # group -> "module!symbol" the game called -> samples (whole call)
+    spins = collections.Counter()               # group -> leaf samples in the game next to a PAUSE
+    hot = collections.defaultdict(collections.Counter)       # group -> game rva (64-byte bucket) -> samples
+    hot_spin = {}
+    leaf = collections.Counter()                # code_name of the leaf -> samples (all threads)
+    frames, tid = [], None
+    frame_re = re.compile(r"^\s+([0-9a-f]+)\s+(.*?)\s+\((.*)\)\s*$")
+
+    def flush():
+        if tid is None or not frames:
+            return
+        g = groups.get(tid, "other")
+        res = [where(a, s, d) for a, s, d in frames]
+        k, mod, sym, rva, pe = res[0]
+        leaf[code_name(k, mod, sym, rva, pe)] += 1
+        for gg in (g, "all threads"):
+            total[gg] += 1
+            by_kind[gg][k] += 1
+            if k == "game" and rva is not None:
+                is_spin = spin(pe, rva)
+                if is_spin:
+                    spins[gg] += 1
+                if mod.lower() == COMM.lower():
+                    fn = pe.function(rva) or (rva & ~63, (rva & ~63) + 64)
+                    hot[gg][fn] += 1
+                    if is_spin:
+                        hot_spin[fn] = hot_spin.get(fn, 0) + (1 if gg != "all threads" else 0)
+            else:
+                by_sym[(gg, k)][f"{mod}!{sym or '?'}"] += 1
+                # the call the game made: the frame just below the first game frame up the stack
+                for i in range(1, len(res)):
+                    if res[i][0] == "game":
+                        ek, emod, esym, _, _ = res[i - 1]
+                        by_api[gg][f"{emod}!{esym or '?'}"] += 1
+                        break
+                else:
+                    by_api[gg]["(no game frame in the stack)"] += 1
+
+    for line in p.stdout:
+        m = frame_re.match(line)
+        if m:
+            frames.append((int(m.group(1), 16), m.group(2).split("+")[0], m.group(3)))
+        elif line.strip():
+            flush()
+            frames = []
+            try:
+                tid = int(line.split()[0])
+            except ValueError:
+                tid = None
+    flush()
+    p.wait()
+    if not total["all threads"]:
+        say("no samples")
+        return
+    kinds = [k for k, _ in by_kind["all threads"].most_common()]
+    say()
+    say(f"where the CPU time is, by sampled stacks ({total['all threads']} samples, user mode; % of each kind of thread's samples)")
+    say(f"  {'threads':<19}{'samples':>8} " + " ".join(f"{k[:19]:>19}" for k in kinds) + f" {'game: spin':>11}")
+    order = ["all threads", "main thread", "BatchWorkers", "Physics", "Audio", "BackgroundWorkers", "vkd3d", "layer (sc_fg)", "other"]
+    for g in order:
+        if total[g]:
+            say(f"  {g:<19}{total[g]:>8} " + " ".join(f"{100 * by_kind[g][k] / total[g]:>19.1f}" for k in kinds) + f" {100 * spins[g] / total[g]:>11.1f}")
+    say("  (game: spin = samples in the game's own code within a few bytes of a PAUSE instruction: spin-wait loops)")
+    if game_exe is None:
+        say("  the game's executable was not found in the process's map: its samples are under 'unknown'")
+    for g in ("main thread", "BatchWorkers", "all threads"):
+        if not total[g]:
+            continue
+        say()
+        say(f"{g}: calls out of the game's code that cost the most (% of its samples, the whole call)")
+        for name, n in by_api[g].most_common(18):
+            say(f"  {100 * n / total[g]:>5.2f}  {name}")
+        if not by_api[g]:
+            say("  (none: every sample was in the game's own code)")
+        for k in ("wine (windows side)", "wine (unix side)", "libc", "nvidia driver", "vkd3d/dxvk", "layer", "unknown"):
+            top = by_sym[(g, k)].most_common(8)
+            if top and by_kind[g][k] / total[g] > 0.003:
+                say(f"{g}: {k}, {100 * by_kind[g][k] / total[g]:.1f} % of its samples; where")
+                for name, n in top:
+                    say(f"  {100 * n / total[g]:>5.2f}  {name}")
+    for g in ("main thread", "BatchWorkers"):
+        if total[g] and hot[g]:
+            say()
+            say(f"{g}: the functions of the game's own code it is in most (by the executable's unwind table; % of its samples)")
+            for (a, b), n in hot[g].most_common(15):
+                say(f"  {100 * n / total[g]:>5.2f}  +0x{a:x} ({b - a} bytes){'   spin-wait loop' if hot_spin.get((a, b)) else ''}")
+    say()
+    return leaf
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# stretch 3: memory
+
+# Intel's load-latency sampling; the first set that perf accepts on this CPU is used
+MEM_EVENTS = [
+    ["-e", "{cpu_core/mem-loads-aux/,cpu_core/mem-loads,ldlat=30/}:P", "-e", "cpu_atom/mem-loads,ldlat=30/P"],
+    ["-e", "{cpu_core/mem-loads-aux/,cpu_core/mem-loads,ldlat=30/}:P"],
+    ["-e", "{cpu/mem-loads-aux/,cpu/mem-loads,ldlat=30/}:P"],
+    ["-e", "cpu/mem-loads,ldlat=30/P"],
+]
+HUGE = 2 << 20
+OWN_BIG = "the game's own memory, where a huge page could hold it"
+OWN_SMALL = "the game's own memory, area too small for a huge page (or its edge)"
+
+
+def size_class(n):
+    for limit, label in ((HUGE, "under 2 MiB"), (64 << 20, "2 to 64 MiB"), (1 << 30, "64 MiB to 1 GiB")):
+        if n < limit:
+            return label
+    return "1 GiB and more"
+
+
+def memory(pid, secs, out_dir, say, record=True, leaf_time=None):
+    names_file = os.path.join(out_dir, "threads-mem.txt")
+    maps_file = os.path.join(out_dir, "maps-mem.txt")
+    data = os.path.join(out_dir, "mem.data")
+    if record:
+        if not snapshot(pid, out_dir, "-mem", say):
+            return
+        say(f"stretch 3: sampled loads that waited for their data, {secs:.0f} s")
+        r = None
+        for ev in MEM_EVENTS:
+            r = subprocess.run(["perf", "record", "-q", "-d", "-W", "--all-user", *ev, "-F", os.environ.get("PROBE_MEM_HZ", "1000"),
+                                "-p", str(pid), "-o", data, "--", "sleep", str(secs)], capture_output=True, text=True)
+            if r.returncode == 0 and os.path.exists(data) and os.path.getsize(data) > 0:
+                with open(os.path.join(out_dir, "mem-events.txt"), "w") as f:
+                    f.write(" ".join(ev) + "\n")
+                break
+        else:
+            say("perf could not sample loads with their addresses on this CPU: " + ((r.stderr or r.stdout).strip()[:300] if r else ""))
+            return
+    elif not os.path.exists(data):
+        return
+    groups = load_groups(names_file)
+    maps = load_maps(maps_file)
+    img = Images(maps)
+    map_starts = img.map_starts
+
+    def mem_kind(addr):
+        """(kind, detail, area) of a data address."""
+        i = bisect.bisect_right(img.starts, addr) - 1
+        if i >= 0 and addr < img.images[i][1]:
+            name = img.images[i][4]
+            if img.images[i][3] == "game" and name.lower() == COMM.lower():
+                return "the game's executable (constants and globals)", name, None
+            return "program files (constants and globals)", name, None
+        j = bisect.bisect_right(map_starts, addr) - 1
+        if j < 0 or addr >= maps[j][1]:
+            return "not in the map (mapped since, or freed)", "", None
+        a, b, _, _, path = maps[j]
+        if not path or path.startswith("[anon") or path == "[heap]":
+            blk = addr & ~(HUGE - 1)
+            return (OWN_BIG if blk >= a and blk + HUGE <= b else OWN_SMALL), size_class(b - a), (a, b)
+        if path.startswith("[stack"):
+            return "stacks", "", None
+        base = os.path.basename(path.replace(" (deleted)", ""))
+        if path.startswith(("/dev/nvidia", "/dev/dri")):
+            return "the graphics driver's memory (a mapped device)", base, None
+        if path.startswith(("/memfd:", "/dev/shm/", "/SYSV")) or "(deleted)" in path:
+            return "shared memory", base, None
+        if path.lower().endswith((".dll", ".exe", ".drv", ".sys")) or ".so" in base.lower():
+            return "program files (constants and globals)", base, None
+        return "files mapped from disk", base, None
+
+    code_cache = {}
+
+    def code_label(ip, perf_sym):
+        if ip not in code_cache:
+            k, mod, sym, rva, pe = img.where(ip)
+            if pe is None and perf_sym and perf_sym != "[unknown]":
+                sym = perf_sym
+            code_cache[ip] = code_name(k, mod, sym, rva, pe)
+        return code_cache[ip]
+
+    def source(lvl):
+        if "RAM" in lvl or "miss" in lvl:
+            return "RAM"
+        if "LFB" in lvl:
+            return "a fetch already under way (a prefetch running late)"
+        if "Uncached" in lvl or "I/O" in lvl:
+            return "uncached memory (a device)"
+        for c in ("L3", "L2", "L1"):
+            if c in lvl:
+                return f"the {c} cache"
+        return "not told"
+
+    tot = collections.Counter()                              # group -> waiting (cycles x period)
+    src = collections.defaultdict(collections.Counter)       # group -> source -> waiting
+    walk = collections.Counter()                             # group -> waiting of loads that also missed the TLB
+    kinds = collections.defaultdict(collections.Counter)     # group -> kind of memory -> waiting
+    walk_kind = collections.Counter()                        # kind -> waiting with a TLB miss (all threads)
+    detail = collections.defaultdict(collections.Counter)    # kind -> name or size class -> waiting (all threads)
+    areas = collections.Counter()                            # (start, end, kind) -> waiting (the game's own memory)
+    code = collections.Counter()                             # function -> waiting (all threads)
+    code_kind = collections.defaultdict(collections.Counter) # function -> kind of memory -> waiting
+    code_n = collections.Counter()                           # function -> samples
+    samples = 0
+    p = subprocess.Popen(["perf", "script", "-i", data, "-F", "tid,period,ip,sym,addr,weight,data_src"], stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, text=True, errors="replace")
+    for line in p.stdout:
+        parts = line.split("|")
+        if len(parts) < 3:
+            continue
+        head, tail = parts[0].split(), parts[-1].split(None, 4)   # ... | BLK x  weight  ip  symbol+offset
+        try:
+            tid, period, addr = int(head[0]), int(head[1]), int(head[2], 16)
+            weight, ip = int(tail[2]), int(tail[3], 16)
+        except (ValueError, IndexError):
+            continue
+        perf_sym = tail[4].strip().split("+")[0] if len(tail) > 4 else None
+        if not addr or not weight:
+            continue
+        lvl = next((x[4:].strip() for x in parts if x.startswith("LVL ")), "")
+        tlb = next((x[4:].strip() for x in parts if x.startswith("TLB ")), "")
+        w = weight * max(period, 1)
+        k, what, area = mem_kind(addr)
+        samples += 1
+        for g in (groups.get(tid, "other"), "all threads"):
+            tot[g] += w
+            src[g][source(lvl)] += w
+            kinds[g][k] += w
+            if "miss" in tlb:
+                walk[g] += w
+        if "miss" in tlb:
+            walk_kind[k] += w
+        detail[k][what] += w
+        if area:
+            areas[(area[0], area[1], k)] += w
+        label = code_label(ip, perf_sym)
+        code[label] += w
+        code_kind[label][k] += w
+        code_n[label] += 1
+    p.wait()
+    total = tot["all threads"]
+    if not total:
+        say("no samples of waiting loads")
+        return
+    cols = [g for g in ("all threads", "main thread", "BatchWorkers", "Physics") if tot[g]]
+
+    def row(label, values):
+        say(f"    {label:<70}" + "".join(f"{100 * values(g) / tot[g]:>14.1f}" for g in cols))
+
+    say()
+    say(f"loads that waited for their data ({samples} samples of loads that took 30 cycles and more; % of each kind of thread's waiting,")
+    say("every load counted for itself: loads that wait side by side weigh more here than a chain of loads that wait one after another)")
+    say(f"  {'where the data came from':<72}" + "".join(f"{g:>14}" for g in cols))
+    for name, _ in src["all threads"].most_common():
+        row(name, lambda g, name=name: src[g][name])
+    row("the load also missed the TLB (a page walk on top of the wait)", lambda g: walk[g])
+    say("  which memory it was")
+    for name, _ in kinds["all threads"].most_common():
+        if kinds["all threads"][name] / total >= 0.001:
+            row(name, lambda g, name=name: kinds[g][name])
+    big, small = kinds["all threads"][OWN_BIG], kinds["all threads"][OWN_SMALL]
+    if leaf_time and sum(leaf_time.values()):
+        # the CPU time of each function (stretch 2), split by where that function's slow loads went
+        t_all = sum(leaf_time.values())
+        by_time = collections.Counter()
+        for label, n in leaf_time.items():
+            ck = code_kind.get(label)
+            if ck and code_n[label] >= 5:
+                tw = sum(ck.values())
+                for k, w in ck.items():
+                    by_time[k] += n * w / tw
+            else:
+                by_time["(code with no slow loads sampled, or too few)"] += n
+        say()
+        say("the same by CPU time: each function's share of the CPU time (stretch 2), split by where its slow loads went.")
+        say("Side-by-side loads count once this way; a function that also computes a lot is counted whole, so read it as an upper bound.")
+        for k, v in by_time.most_common():
+            if v / t_all >= 0.001:
+                say(f"    {k:<70}{100 * v / t_all:>14.1f}")
+    say()
+    say(f"what huge pages could reach: {100 * big / total:.0f} % of the waiting is in memory a huge page could hold"
+        + (f"; {100 * walk_kind[OWN_BIG] / big:.0f} % of that waiting had a page walk on top" if big else ""))
+    if big + small:
+        own = collections.Counter()
+        for k in (OWN_BIG, OWN_SMALL):
+            own.update(detail[k])
+        say("the game's own memory, by the size of the area the load was in: "
+            + ", ".join(f"{label} {100 * own[label] / (big + small):.0f} %" for label in ("under 2 MiB", "2 to 64 MiB", "64 MiB to 1 GiB", "1 GiB and more")))
+        say("the areas of the game's own memory with the most waiting (% of all waiting):")
+        for (a, b, k), w in areas.most_common(8):
+            say(f"  {100 * w / total:>5.1f}  {(b - a) / 2**20:>8.1f} MiB at 0x{a:x}")
+        say(f"  ({len(areas)} areas were hit in all)")
+    for k in kinds["all threads"]:
+        if k not in (OWN_BIG, OWN_SMALL) and kinds["all threads"][k] / total >= 0.01 and any(detail[k]):
+            say(f"{k}: " + ", ".join(f"{name or '?'} {100 * w / total:.1f} %" for name, w in detail[k].most_common(5)))
+    say()
+    say("the code whose loads waited most (% of all waiting)")
+    for name, w in code.most_common(14):
+        say(f"  {100 * w / total:>5.1f}  {name}")
+    say()
+
+
+def main():
+    args = sys.argv[1:]
+    if args and args[0] == "report":
+        d = args[1]
+        say = Out(os.path.join(d, "report-again.txt"))
+        leaf = stacks(0, 0, d, say, record=False)
+        memory(0, 0, d, say, record=False, leaf_time=leaf)
+        return
+    pid, do_stacks, do_mem, keep = None, True, True, False
+    if "--pid" in args:
+        i = args.index("--pid"); pid = int(args[i + 1]); del args[i:i + 2]
+    if "--no-stacks" in args:
+        do_stacks = False; args.remove("--no-stacks")
+    if "--no-mem" in args:
+        do_mem = False; args.remove("--no-mem")
+    if "--keep-fg" in args:
+        keep = True; args.remove("--keep-fg")
+    secs = float(args[0]) if args else 20.0
+    pid = pid or game_pid()
+    if not pid:
+        sys.exit(f"{COMM} is not running")
+    out_dir = os.path.join(HERE, "logs/base", time.strftime("probe-%Y%m%d-%H%M%S"))
+    os.makedirs(out_dir, exist_ok=True)
+    say = Out(os.path.join(out_dir, "report.txt"))
+    off = os.path.join(FG_DIR, "OFF")
+    made_off = False
+    try:
+        if not keep and os.path.isdir(FG_DIR) and not os.path.exists(off):
+            open(off, "w").close()
+            made_off = True
+            say("generation off for the measurement")
+            time.sleep(3)
+        say(f"{COMM} pid {pid}, {len(threads(pid))} threads; {time.strftime('%F %T')}; kernel {os.uname().release}; scheduler {read('/sys/kernel/sched_ext/root/ops') or 'stock'}")
+        counters(pid, secs, out_dir, say)
+        leaf = stacks(pid, secs, out_dir, say) if do_stacks else None
+        if do_mem:
+            try:
+                memory(pid, min(secs, 10.0), out_dir, say, leaf_time=leaf)
+            except Exception as e:  # the newest stretch must never cost the other two
+                say(f"stretch 3 failed: {type(e).__name__}: {e}")
+    finally:
+        if made_off:
+            try:
+                os.remove(off)
+                say("generation back on")
+            except OSError:
+                pass
+    say(f"kept in {out_dir}")
+
+
+if __name__ == "__main__":
+    main()

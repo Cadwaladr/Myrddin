@@ -9,8 +9,11 @@
 #   tools/sc-sched set SCHED [MODE]      a sched_ext scheduler in one of scx_loader's modes (default:
 #                                        gaming; "scxctl modes -s SCHED --show-args" lists them)
 #   tools/sc-sched follow SCHED [MODE]   SCHED now, and the stock scheduler again once the game has come and
-#                                        gone (30 minutes for it to start; what sc-turbo's "sched=" does).
-#                                        If something else changed the scheduler meanwhile, it is left alone.
+#                                        gone (what sc-turbo's "sched=" does): 30 minutes for it to start; when
+#                                        it ends, as long as the RSI Launcher runs, 10 minutes for it to come
+#                                        back (a launch from the launcher's own button does not go through
+#                                        sc-turbo). Only the newest launch's follower acts (logs/sched.follow);
+#                                        if something else changed the scheduler meanwhile, it is left alone.
 #   tools/sc-sched allowed               whether switching works here without a password (exit 0: yes)
 #   tools/sc-sched rule                  prints a polkit rule that lets you (in your own active local
 #                                        session) switch without a password, which scx_loader asks for
@@ -21,6 +24,7 @@
 #
 # "set" waits until the kernel says the scheduler is in place (10 s at most) and fails otherwise.
 set -u
+here="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 st=/sys/kernel/sched_ext/state
 ops=/sys/kernel/sched_ext/root/ops
 now() { local s; s=$(cat "$st" 2>/dev/null || echo "no sched_ext"); [ "$s" = enabled ] && echo "sched_ext: $(cat "$ops" 2>/dev/null)" || echo "stock ($s)"; }
@@ -47,15 +51,28 @@ set)
     now ;;
 follow)
     want="${2:?follow SCHED [MODE]}"; mode="${3:-gaming}"; comm="${SC_COMM:-StarCitizen.exe}"
-    "$0" set "$want" "$mode" || exit 1
+    owner="$here/logs/sched.follow"; mkdir -p "$here/logs"; echo $$ > "$owner"
+    stamp() { sed "s/^/$(date '+%F %T') [$$] /"; }
+    game() { pgrep -x "${comm:0:15}" >/dev/null; }
+    launcher() { pgrep -f '[R]SI Launcher\.exe' >/dev/null; }
+    ours() { [ "$(cat "$owner" 2>/dev/null)" = $$ ]; }
+    out="$("$0" set "$want" "$mode")" || { echo "$out" | stamp; exit 1; }
+    echo "$out" | stamp
     mine="$(cat "$ops" 2>/dev/null)"
-    echo "$(date '+%F %T') $(now) until $comm has come and gone"
-    for i in $(seq 900); do pgrep -x "${comm:0:15}" >/dev/null && break; sleep 2; done
-    pgrep -x "${comm:0:15}" >/dev/null && echo "$(date '+%F %T') $comm runs"
-    while pgrep -x "${comm:0:15}" >/dev/null; do sleep 2; done
-    if [ "$(cat "$st" 2>/dev/null)" = enabled ] && [ "$(cat "$ops" 2>/dev/null)" = "$mine" ]; then
-        "$0" set stock | sed "s/^/$(date '+%F %T') /"
-    else echo "$(date '+%F %T') changed meanwhile, left as it is: $(now)"; fi ;;
+    echo "until $comm has come and gone" | stamp
+    for i in $(seq 900); do game && break; ours || break; sleep 2; done
+    while ours; do
+        game || break
+        echo "$comm runs" | stamp
+        while game && ours; do sleep 2; done
+        ours || break
+        echo "$comm has ended; waiting for it to come back while the RSI Launcher runs" | stamp
+        for i in $(seq 300); do game && break; launcher || break; ours || break; sleep 2; done
+    done
+    if ! ours; then echo "a newer launch follows the scheduler now: left to it" | stamp
+    elif [ "$(cat "$st" 2>/dev/null)" = enabled ] && [ "$(cat "$ops" 2>/dev/null)" = "$mine" ]; then
+        "$0" set stock 2>&1 | stamp; rm -f "$owner"
+    else echo "changed meanwhile, left as it is: $(now)" | stamp; rm -f "$owner"; fi ;;
 allowed)
     command -v scxctl >/dev/null && [ -e "$st" ] &&
         pkcheck --action-id org.scx.loader.manage-schedulers --process $$ >/dev/null 2>&1 ;;

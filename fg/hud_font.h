@@ -1,5 +1,13 @@
 // The performance panel's letters. Made by tools/make-hud-font.py from AdwaitaSans-Regular.ttf
-// (Adwaita Sans, SIL Open Font License 1.1); not edited by hand.
+// (Adwaita Sans); not edited by hand.
+//
+// The table below is a rendering of Adwaita Sans and is licensed under the SIL Open Font License,
+// Version 1.1, not under the GPL. The font's copyright notices and the licence text are in
+// third_party/adwaita-sans/LICENSE:
+//   Copyright (c) 2016, The Inter Project Authors (https://github.com/rsms/inter)
+//   Copyright (c) 2015-2025, Renzhi Li (aka. Belleve Invis, belleve@typeof.net)
+//   Copyright (c) 2025, Jamie Gravendeel (https://jamie.garden)
+//   Copyright (c) 2025, Florian Müllner
 #pragma once
 #include <cstdint>
 
