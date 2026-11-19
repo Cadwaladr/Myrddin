@@ -5,6 +5,9 @@
 *.a
 __pycache__/
 *.pyc
+# the AppImage's build folders (the image itself is a release file)
+/appimage/out/
+/appimage/work/
 # this machine's settings and backups of desktop files
 /sc-turbo.conf
 /backups/
@@ -14,3 +17,5 @@ __pycache__/
 # never part of the repository: assistant session data and chat records of any kind
 /.claude/
 *.jsonl
+# working notes of the AppImage builds
+/appimage/NOTES-*.md

@@ -1,0 +1,9 @@
+#!/bin/sh
+# Myrddin's AppRun. On purpose it changes nothing in the environment but MYRDDIN_PAYLOAD: the app
+# starts the game through Wine as a child, and that child must not inherit the AppImage's
+# libraries or Qt paths. Qt and its libraries are found through RUNPATH and usr/bin/qt.conf.
+# (APPDIR, APPIMAGE, ARGV0 and OWD come from the AppImage runtime, not from here.)
+APPDIR="${APPDIR:-$(dirname "$(readlink -f "$0")")}"
+MYRDDIN_PAYLOAD="$APPDIR/usr/share/myrddin/payload"
+export MYRDDIN_PAYLOAD
+exec "$APPDIR/usr/bin/myrddin" "$@"

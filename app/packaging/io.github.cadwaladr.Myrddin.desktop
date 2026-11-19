@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Myrddin
+GenericName=Frame generation for Star Citizen
+Comment=Launch Star Citizen with frame generation and change its settings
+Exec=myrddin
+Icon=io.github.cadwaladr.Myrddin
+Terminal=false
+Categories=Game;
+StartupWMClass=io.github.cadwaladr.Myrddin
+Keywords=frame generation;star citizen;vulkan;

@@ -184,31 +184,89 @@ its source. The Wayland packages are only needed for the test program. The tests
 (`tools/test-chain.sh`, `tools/fg-validate.sh`) run in a headless Weston and need `weston`,
 `python3-numpy` and `python3-pillow`.
 
-## Running
-
-### With the launcher window
+The window of the AppImage is a Qt 6 program in [`app/`](app/README.md) (Qt 6.5 or later: `sudo
+dnf install qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg-devel`):
 
 ```sh
-./sc-turbo gui            # open it
+cmake -S app -B build/app -G Ninja && cmake --build build/app
+build/app/myrddin --runtime .    # the window, on the sc-turbo of this checkout
+```
+
+The AppImage itself is built in containers, with podman, by the scripts in
+[`appimage/`](appimage/README.md): the layer once more so that it loads on any distribution,
+the window with Qt's official libraries, then the image and its tests.
+
+## Running
+
+### With the AppImage
+
+`Myrddin-x86_64.AppImage` is one file with a window, `sc-turbo`, its tools and the layer. There
+is no download yet: build it as described [above](#building-from-source).
+
+```sh
+chmod +x Myrddin-x86_64.AppImage
+./Myrddin-x86_64.AppImage              # the window
+./Myrddin-x86_64.AppImage fg 4 hud     # or any command from the list below, without the window
+```
+
+The first start asks where the game is (it looks where the LUG Helper puts it) and checks what a
+launch needs: the launch script, a runner with vkd3d-proton, the NVIDIA driver, the display.
+After that the window has five pages:
+
+- Play: the multiplier (Off, ×2, ×3, ×4) and the launch. While the game runs it shows the shown
+  frame rate, the game's own and the frame time, and a change of multiplier acts at once.
+- Setup: the game's folder and launch script, the system check with its fixes, an entry in the
+  application menu, and a `myrddin` command for the terminal.
+- Options: display and refresh rate, MangoHud, the panel with its corner and key, moving HUD
+  elements, the CPU scheduler, recording, and the switches that act on a running game.
+- Session: frame rates over the last fifteen minutes, the reports `sc-turbo` can make, and what
+  the last launch printed.
+- About: versions and licences.
+
+Besides what [Requirements and limitations](#requirements-and-limitations) lists, the AppImage
+needs:
+
+- x86-64 and glibc 2.35 or newer (Ubuntu 22.04, Debian 12, Fedora 36 and later).
+- FUSE 3 to mount itself: `/dev/fuse` and `fusermount3`, package `fuse3`. Without it,
+  `./Myrddin-x86_64.AppImage --appimage-extract-and-run` unpacks about 110 MB into `/tmp` and
+  starts from there; the copy stays until `/tmp` is cleared.
+- A desktop's usual libraries, on Wayland or X11: libglvnd (OpenGL, EGL), libX11 and libxcb,
+  libwayland-client, fontconfig, FreeType, and the GPU driver's OpenGL. Qt, the window's font and
+  everything else are inside.
+- `bash` and `python3` for `sc-turbo` and its tools, as from a checkout.
+
+The window does not talk to the game. It writes `sc-turbo.conf`, runs `sc-turbo` and reads the
+layer's log. At its first start it copies `sc-turbo`, the tools and the layer to
+`~/.local/share/myrddin/runtime`: the layer is loaded into the game, the game can outlive the
+window, and the AppImage's own files are gone when it closes. Logs and `sc-turbo.conf` stay
+there across updates, and a newer AppImage replaces the rest only while the game and the RSI
+Launcher are closed. The window's own choices are in `~/.config/myrddin/myrddin.conf`. It has
+been tested on the machine under [Tested configuration](#tested-configuration), and in Ubuntu
+22.04, Debian 12, Fedora and Arch containers without a game.
+
+### From a checkout
+
+```sh
+./sc-turbo gui            # a small launcher window
 ./sc-turbo gui install    # put it in the desktop's application menu ("Myrddin")
 ```
 
-The window has one entry per game. `−  4x  +` under the icon sets the multiplier (1x: no frame
+This window has one entry per game. `−  4x  +` under the icon sets the multiplier (1x: no frame
 generation), and a click on the icon launches the game with it. While the game runs the buttons
 act at once, and the line under them shows what the layer is doing: its multiplier at the
 moment, the shown frame rate and the game's own. The games are listed in
 [`gui/games.ini`](gui/games.ini). The icon is looked up on the machine (the LUG Helper installs
-one for Star Citizen), and none is part of this project. The window needs GTK 4, libadwaita and
+one for Star Citizen), and none is part of this project. It needs GTK 4, libadwaita and
 PyGObject (Fedora: `python3-gobject gtk4 libadwaita`).
 
-The window and the commands below start the game through your install's launch script, by
+Both windows and the commands below start the game through your install's launch script, by
 default the LUG Helper's `sc-launch.sh` in `~/Games/star-citizen`. If your game is somewhere
-else, set `SC_PREFIX` first (see [Settings](#settings)). In the game, select DLSS as the
-upscaler.
+else, name its folder on the AppImage's Setup page or set `SC_PREFIX` (see
+[Settings](#settings)). In the game, select DLSS as the upscaler.
 
 ### From a terminal
 
-These do what the window does:
+These do what the windows do:
 
 ```sh
 ./sc-turbo fg 3                  # launch with frame generation, ×3 (2, 3 or 4; the number comes first)
@@ -378,7 +436,9 @@ the spread. Covering the rest needs a change in how the Wine runner commits memo
 ## Repository layout
 
 - `fg/`: the frame-generation layer (`sc_fg.cpp`), its compute shaders and the panel
-- `gui/`: the launcher window (`myrddin-gui`, GTK 4 and libadwaita) and its list of games
+- `app/`: the AppImage's window (`myrddin`, Qt 6 Quick) and its tests
+- `appimage/`: the scripts that build and test the AppImage
+- `gui/`: the small launcher window (`myrddin-gui`, GTK 4 and libadwaita) and its list of games
 - `probe/`: the passive probe layer and the test programs, among them the two-device test chain
 - `tools/`: tests and validation, in-session comparisons, log readers, thread and display tools,
   the panel's key, and the `base-*` tools the measurements under
@@ -405,6 +465,13 @@ are listed below.
 | AMD FidelityFX SDK 1.1.4, with changes that yield several generated frames per pair | MIT, Copyright (C) 2024 Advanced Micro Devices, Inc. (`third_party/ffx_src/FidelityFX-SDK/LICENSE.txt`) |
 | Linux build recipe for the SDK and Vulkan test helpers, from the Lichii project | GPL-3.0-or-later, Copyright 2026 Eden Emulator Project |
 | Adwaita Sans, a variation of Inter, drawn into `fg/hud_font.h` for the panel | SIL Open Font License 1.1 (copyright notices and licence text in `third_party/adwaita-sans/LICENSE`) |
+| Inter, the font of the AppImage's window (`app/assets/InterVariable.ttf`) | SIL Open Font License 1.1, Copyright (c) 2016 The Inter Project Authors (`app/assets/Inter-LICENSE.txt`) |
+| Qt 6, which the AppImage's window is built on (linked, not in this repository) | LGPL-3.0 |
+
+An AppImage also carries Qt itself, ICU and a number of system libraries. Their licence texts
+are inside it under `usr/share/licenses/myrddin`, with a list of every part, its version and
+where its source is (`THIRD-PARTY-APPIMAGE.txt`; the About page opens the folder). Portions of
+that software are copyright © The FreeType Project (www.freetype.org).
 
 Star Citizen is a trademark of Cloud Imperium Games. FidelityFX and FSR are trademarks of AMD,
 DLSS of NVIDIA, and Claude and Claude Code of Anthropic. Myrddin is an independent project, and

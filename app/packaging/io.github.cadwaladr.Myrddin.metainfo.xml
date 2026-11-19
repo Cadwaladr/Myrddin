@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.cadwaladr.Myrddin</id>
+  <name>Myrddin</name>
+  <summary>Frame generation for Star Citizen on Linux</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <description>
+    <p>Myrddin launches Star Citizen under Wine with a Vulkan layer that generates frames between the game's own, and lets you change its settings while the game runs.</p>
+    <p>This is an independent project. It is not affiliated with or endorsed by Cloud Imperium Games.</p>
+  </description>
+  <launchable type="desktop-id">io.github.cadwaladr.Myrddin.desktop</launchable>
+  <url type="homepage">https://github.com/Cadwaladr/Myrddin</url>
+  <developer id="io.github.cadwaladr"><name>Cadwaladr</name></developer>
+  <provides><binary>myrddin</binary></provides>
+  <releases>
+    <release version="0.1.0" date="2026-11-19">
+      <description><p>The first version of the window.</p></description>
+    </release>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>
