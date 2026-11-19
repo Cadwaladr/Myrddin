@@ -101,13 +101,13 @@ def main():
         for city, start, stop in stretches(places, marks, lines[-1][0]):
             found[city] += [line for line in lines if start + 10.0 <= line[0] <= stop]
     tenth = lambda values: sorted(values)[int(0.1 * (len(values) - 1))]
-    print("| City | Time measured | The game's own frames per second: typical (busy) | Shown with frame generation: typical (busy) |")
-    print("|---|---|---|---|")
+    print("| City | The game's own frames per second: typical (busy) | Shown with frame generation: typical (busy) |")
+    print("|---|---|---|")
     for city, part in sorted(found.items(), key=lambda item: -len(item[1])):
         if len(part) < 6:
             continue
         real, shown = [p[2] for p in part], [p[3] for p in part]
-        print(f"| {city} | {len(part) / 6:.0f} min | {statistics.median(real):.0f} ({tenth(real):.0f}) | {statistics.median(shown):.0f} ({tenth(shown):.0f}) |")
+        print(f"| {city} | {statistics.median(real):.0f} ({tenth(real):.0f}) | {statistics.median(shown):.0f} ({tenth(shown):.0f}) |")
 
 
 if __name__ == "__main__":

@@ -54,11 +54,11 @@ Frame rates on the test machine in the game's cities, on foot, with hangars and 
 is the middle of the ten-second averages, "busy" the slowest tenth of them
 (`tools/city-rates.py` makes this table from a session's logs):
 
-| City | Time measured | The game's own frames per second: typical (busy) | Shown with frame generation: typical (busy) |
-|---|---|---|---|
-| Orison | 26 min | 27 (20) | 108 (82) |
-| Lorville | 9 min | 29 (25) | 111 (99) |
-| Levski | 5 min | 26 (22) | 102 (88) |
+| City | The game's own frames per second: typical (busy) | Shown with frame generation: typical (busy) |
+|---|---|---|
+| Orison | 27 (20) | 108 (82) |
+| Lorville | 29 (25) | 111 (99) |
+| Levski | 26 (22) | 102 (88) |
 
 The table comes from three sessions in a row, and rates differ from session to session: in two
 sessions earlier the same day Orison typically ran at 39 frames a second and showed 118.
