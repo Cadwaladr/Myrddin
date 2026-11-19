@@ -70,9 +70,14 @@ is shown a little later than it would be without them.
 under it sets the multiplier, before the launch and while the game runs. Everything it does is
 also a command of `sc-turbo`.
 
+**A CPU scheduler for the game, optional.** The game is held back by its CPU in the cities.
+`sc-turbo fg 3 sched=lavd` runs one of the kernel's sched_ext schedulers while the game runs and
+puts the stock one back after it; see [A different CPU scheduler](#a-different-cpu-scheduler-optional).
+
 **Measurement.** A passive probe layer, comparisons of two settings within one session
-(`sc-turbo fg-ab`, `sc-turbo threads-ab`), and a headless test chain that exercises the
-frame-generation layer without the game.
+(`sc-turbo fg-ab`, `sc-turbo threads-ab`, `tools/sc-ab-sched.sh` for the scheduler), where the
+time goes between a frame and the display (`sc-turbo latency`), and a headless test chain that
+exercises the frame-generation layer without the game.
 
 ## Tested configuration
 
@@ -81,10 +86,10 @@ This is the only configuration Myrddin has run on.
 | | |
 |---|---|
 | Distribution | Fedora Linux 44 |
-| Kernel | 7.2.15-200.fc44.x86_64 |
+| Kernel | 7.3.4-200.fc44.x86_64 (7.2.15 before 2026-11-19); with the optional CPU scheduler: scx-scheds 1.1.4, scx-tools 1.1.3 |
 | Architecture | x86_64 |
-| Desktop | KDE Plasma 6.8.2 (KWin 6.8.2-3), Wayland session; before that COSMIC 1.11.0, where most of the development took place |
-| GPU and driver | NVIDIA GeForce RTX 4070 SUPER, 12 GB; driver 615.78.08 |
+| Desktop | KDE Plasma 6.8.3 (KWin 6.8.3-1; 6.8.2 before 2026-11-19), Wayland session; before that COSMIC 1.11.0, where most of the development took place |
+| GPU and driver | NVIDIA GeForce RTX 4070 SUPER, 12 GB; driver 620.70.06 (615.78.08 before 2026-11-19) |
 | CPU | Intel Core i5-13600K (6 P-cores with SMT, 8 E-cores) |
 | Wine runner | the Star Citizen LUG's, unchanged: `lug-wine-tkg-experimental-wayland-git-11.22-1` and `-11.20-2` (Wine 11.22 and 11.20, Wayland driver) |
 | Game | Star Citizen Alpha 4.10.3 (LIVE), Vulkan renderer, DLSS |
@@ -197,7 +202,9 @@ And more than the window has:
 ./sc-turbo fg 3 hud              # launch with MangoHud: its frame rate is the shown one
 ./sc-turbo fg 3 nomarkers        # launch with moving HUD content left at the game's own rate
 ./sc-turbo fg 3 watch            # launch and record the game's disk, memory and GPU memory use
+./sc-turbo fg 3 sched=lavd       # launch with the scx_lavd CPU scheduler while the game runs (see below)
 ./sc-turbo iowatch report        #   afterwards: that, frame rates and the game's log, place by place
+./sc-turbo latency               # where the time goes between a frame and the display, per multiplier
 ./sc-turbo fg 3 panel            # launch with the layer's own panel available; then:
 ./sc-turbo fg-panel              #   step the panel (off, rate, both rates, with the graph)
 ./sc-turbo fg-panel-key install  #   KDE Plasma, COSMIC: Ctrl+Shift+` steps the panel
@@ -213,6 +220,52 @@ the display with the most pixels: a TV beside the monitor) and tells the layer t
 `SC_MONITOR` and `SC_FG_TARGET`, in the environment or in `sc-turbo.conf`, override both.
 
 Logs and dumps go to `logs/` inside the project.
+
+### A different CPU scheduler (optional)
+
+In the cities the game is held back by its CPU, not by the GPU: its main thread and its job
+system keep most of the CPU's threads busy, and threads wait for a free one. Linux can run a
+scheduler of its own choosing for that (sched_ext), and the [scx](https://github.com/sched-ext/scx)
+project has several made for games. `sched=NAME` starts one for as long as the game runs:
+
+```sh
+./sc-turbo fg 3 sched=lavd           # scx_lavd in scx_loader's "gaming" mode
+./sc-turbo fg 3 sched=bpfland:gaming # another scheduler, or another of its modes
+./sc-turbo run                       # SC_SCHED applies here too
+```
+
+`SC_SCHED=lavd` in `sc-turbo.conf` does it at every launch (`sched=stock`: not this time). When
+the game has ended the stock scheduler comes back (`logs/sched.out` says when). If anything goes
+wrong with a sched_ext scheduler, the kernel throws it out and goes back to the stock one by
+itself.
+
+Measured on the test machine, in a city on foot, with frame generation off for the test and the
+two schedulers switched back and forth in one session (25 seconds each, four times, twice):
+scx_lavd gave about 3 % more of the game's own frames than the stock scheduler, and fewer long
+frames (the 99th percentile of the frame time 2 to 7 ms shorter). scx_bpfland gave about the same
+frame rate, with one long hitch. The frame rate varies by more than that from one stretch to the
+next, so the gain is small and not certain; in play scx_lavd felt more responsive.
+
+It needs:
+
+- a kernel with sched_ext (Linux 6.12 or later; Fedora's has it);
+- `scx-scheds` and `scx-tools` (the schedulers, `scx_loader` and `scxctl`; on Fedora 44 from the
+  Terra repository);
+- switching without a password. `scx_loader` asks for an administrator's password every time,
+  and a dialog over the game will not do, so a polkit rule lets your own user, in your own
+  active local session, start and stop sched_ext schedulers (nothing else):
+
+  ```sh
+  tools/sc-sched rule > /tmp/sc-sched.rules
+  sudo install -m 644 /tmp/sc-sched.rules /etc/polkit-1/rules.d/49-sc-sched.rules
+  ```
+
+  Removing that file undoes it. Without the rule, `sched=` says so at launch and the game runs
+  with the stock scheduler.
+
+`tools/sc-sched state` shows what runs, `tools/sc-sched set stock` stops a sched_ext scheduler
+by hand, and `tools/sc-ab-sched.sh lavd` compares one with the stock scheduler in a running game
+(hold a steady view for about four minutes).
 
 ### If the game stands still or closes by itself
 

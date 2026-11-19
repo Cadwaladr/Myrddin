@@ -100,6 +100,20 @@ regression() {
     # has no vkd3d-proton) is left as the game asked: as many presents as frames, and the one line saying so.
     reg own "" --engine StarEngine
     say "own: $(grep -c 'swapchain: .*(untouched)' logs/test/own/fg-*.log) swapchain left as asked, $(grep -c "this one is the game's own" logs/test/own/fg-*.log) line saying so"
+    # Presents as vkd3d-proton makes them where the driver reports when frames reach the display: the layer
+    # takes the reports in as they pass (reports about as many as frames, unmatched 0). The GPU's boost
+    # switched on and off in the running program: two lines, result 0.
+    TEST_AT="4:PARAMS=boost=1 8:PARAMS=boost=0" reg timing "" --timing
+    say "timing: $(grep STAT logs/test/timing/fg-*.log | tail -1 | grep -o 'present to display ms.*unmatched=[0-9]*'), $(grep -c "the GPU's boost is o[nf]* *f* *(result 0)" logs/test/timing/fg-*.log) boost switches, $(grep -c 'the display reports when' logs/test/timing/fg-*.log) line about the reports"
+    # Presents as the game makes them, without vsync: no id, no request for the time, the present mode given with
+    # each. The layer's own requests (timing=1), switched on in the running program: reports for real and generated
+    # frames, unmatched 0, and no present that failed.
+    TEST_AT="3:PARAMS=timing=1" reg unlocked "" --unlocked
+    say "unlocked: $(grep STAT logs/test/unlocked/fg-*.log | tail -1 | grep -o 'present to display ms.*unmatched=[0-9]*'); $(grep STAT logs/test/unlocked/fg-*.log | tail -1 | grep -o 'generated frames to display.*'); $(grep -c 'that asked for its time failed' logs/test/unlocked/fg-*.log) failed"
+    # ... and with another thread taking some of the reports, as something in the game's process does: frames must
+    # still be paired with their own reports (the delay stays what it was, it does not grow).
+    TEST_AT="3:PARAMS=timing=1" reg stolen "" --unlocked --steal 700
+    say "stolen: $(grep STAT logs/test/stolen/fg-*.log | tail -1 | grep -o 'present to display ms.*unmatched=[0-9]*'); $(grep STAT logs/test/stolen/fg-*.log | tail -1 | grep -o 'generated frames to display.*'); $(grep -c 'that asked for its time failed' logs/test/stolen/fg-*.log) failed"
 }
 panel() {
     say "## panel: the performance panel on (it is off in everything above)"

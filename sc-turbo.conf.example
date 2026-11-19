@@ -15,3 +15,7 @@
 # MangoHud at every launch with frame generation ("sc-turbo fg N hud" does it for one launch).
 # It sits below the layer, so its frame rate counts the generated frames too.
 #SC_MANGOHUD=1
+
+# A sched_ext CPU scheduler while the game runs ("sc-turbo fg N sched=lavd" does it for one launch;
+# needs scx-scheds, scx-tools and the polkit rule of "tools/sc-sched rule", see the README).
+#SC_SCHED=lavd

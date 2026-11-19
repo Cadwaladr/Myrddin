@@ -35,6 +35,13 @@
  *     --dup N          every Nth frame is presented twice
  *     --early          the hand-over is recorded before the frame's submit (a chain that is one off)
  *     --fifo           FIFO present mode (default: mailbox when there is one)
+ *     --timing         FIFO, and presents as vkd3d-proton makes them where the driver has VK_EXT_present_timing:
+ *                      an id and a request for the time on each, a thread that waits for them and asks for the
+ *                      times; the swapchain is made for VK_NV_low_latency2, which the layer's GPU boost needs
+ *     --unlocked       presents as the game makes them, without vsync: the swapchain as above, but no ids and no
+ *                      requests, and each present says IMMEDIATE (what vkd3d-proton does for a sync interval of 0)
+ *     --steal MS       with --unlocked: a thread of its own asks for the reports on present times every MS
+ *                      milliseconds and so takes those that are ready (something in the game's process does that)
  *     --unprotected    nothing keeps the shared image from being overwritten before it is copied out
  *     --engine NAME    the engine's name the instance is made with ("StarEngine": the game's own renderer,
  *                      whose swapchain the layer must leave as it is)
@@ -245,6 +252,15 @@ static VkCommandBuffer blit_cbs[RING];
 static VkSemaphore acquired[RING], rendered[RING];
 static double worker_ms, stall_ms;
 static unsigned presents, stall_frame;
+/* --timing: presents as vkd3d-proton makes them where the driver has VK_EXT_present_timing: every one
+ * with an id and a request for its time, and a thread that waits for each and asks for the times. */
+static int timing, timing_quit, unlocked, steal_ms;
+static unsigned steal_taken;
+static uint64_t timing_sent, timing_domain_id;
+static unsigned timing_reports;
+static VkPresentStageFlagsEXT timing_stage;
+static PFN_vkWaitForPresent2KHR wait_present2;
+static PFN_vkGetPastPresentationTimingEXT past_timing;
 /* the stage in front of the game thread (--sim-ms) */
 static double sim_ms, sim_jitter_ms, sim_change_s, sim_change_ms, sim_dip_s, sim_dip_length_ms, sim_dip_ms, sim_start;
 static int sim_ready; /* frames prepared and not taken yet: 0 or 1 */
@@ -273,9 +289,56 @@ static void present_once(int bb)
     CHECK(vkQueueSubmit(queue_b, 1, &si, VK_NULL_HANDLE));
     VkPresentInfoKHR pi = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &rendered[k],
         .swapchainCount = 1, .pSwapchains = &swapchain, .pImageIndices = &index};
+    uint64_t id = timing_sent + 1;
+    VkPresentId2KHR ids = {.sType = VK_STRUCTURE_TYPE_PRESENT_ID_2_KHR, .swapchainCount = 1, .pPresentIds = &id};
+    VkPresentTimingInfoEXT when = {.sType = VK_STRUCTURE_TYPE_PRESENT_TIMING_INFO_EXT, .timeDomainId = timing_domain_id,
+        .presentStageQueries = timing_stage, .targetTimeDomainPresentStage = timing_stage};
+    VkPresentTimingsInfoEXT whens = {.sType = VK_STRUCTURE_TYPE_PRESENT_TIMINGS_INFO_EXT, .pNext = &ids, .swapchainCount = 1, .pTimingInfos = &when};
+    if (timing) pi.pNext = &whens;
+    const VkPresentModeKHR immediate = VK_PRESENT_MODE_IMMEDIATE_KHR;
+    VkSwapchainPresentModeInfoKHR mode_now = {.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODE_INFO_KHR, .swapchainCount = 1, .pPresentModes = &immediate};
+    if (unlocked) pi.pNext = &mode_now;
     VkResult r_ = vkQueuePresentKHR(queue_b, &pi);
     if (r_ != VK_SUCCESS && r_ != VK_SUBOPTIMAL_KHR) { fprintf(stderr, "present -> %d\n", r_); exit(1); }
+    if (timing) __atomic_store_n(&timing_sent, id, __ATOMIC_RELEASE);
     presents++;
+}
+
+static void *timing_thread(void *unused)
+{
+    uint64_t next = 1;
+    while (!__atomic_load_n(&timing_quit, __ATOMIC_ACQUIRE)) {
+        if (__atomic_load_n(&timing_sent, __ATOMIC_ACQUIRE) < next) { usleep(300); continue; }
+        VkPresentWait2InfoKHR wait = {.sType = VK_STRUCTURE_TYPE_PRESENT_WAIT_2_INFO_KHR, .presentId = next, .timeout = 100000000};
+        VkResult r = wait_present2(dev_b, swapchain, &wait);
+        if (r == VK_TIMEOUT) continue;
+        next++;
+        VkPastPresentationTimingEXT t[16];
+        VkPresentStageTimeEXT times[16];
+        for (int i = 0; i < 16; i++)
+            t[i] = (VkPastPresentationTimingEXT){.sType = VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_EXT, .presentStageCount = 1, .pPresentStages = &times[i]};
+        VkPastPresentationTimingInfoEXT info = {.sType = VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_INFO_EXT, .swapchain = swapchain};
+        VkPastPresentationTimingPropertiesEXT props = {.sType = VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_PROPERTIES_EXT,
+            .presentationTimingCount = 16, .pPresentationTimings = t};
+        if (past_timing(dev_b, &info, &props) >= 0) timing_reports += props.presentationTimingCount;
+    }
+    return NULL;
+}
+
+static void *steal_thread(void *unused)
+{
+    while (!__atomic_load_n(&timing_quit, __ATOMIC_ACQUIRE)) {
+        usleep(steal_ms * 1000);
+        VkPastPresentationTimingEXT t[16];
+        VkPresentStageTimeEXT times[16];
+        for (int i = 0; i < 16; i++)
+            t[i] = (VkPastPresentationTimingEXT){.sType = VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_EXT, .presentStageCount = 1, .pPresentStages = &times[i]};
+        VkPastPresentationTimingInfoEXT info = {.sType = VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_INFO_EXT, .swapchain = swapchain};
+        VkPastPresentationTimingPropertiesEXT props = {.sType = VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_PROPERTIES_EXT,
+            .presentationTimingCount = 16, .pPresentationTimings = t};
+        if (past_timing(dev_b, &info, &props) >= 0) steal_taken += props.presentationTimingCount;
+    }
+    return NULL;
 }
 
 static void *simulation(void *unused)
@@ -374,6 +437,9 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--dup") && i + 1 < argc) dup = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--early")) early = 1;
         else if (!strcmp(argv[i], "--fifo")) fifo = 1;
+        else if (!strcmp(argv[i], "--timing")) timing = fifo = 1;
+        else if (!strcmp(argv[i], "--unlocked")) unlocked = fifo = 1;
+        else if (!strcmp(argv[i], "--steal") && i + 1 < argc) steal_ms = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--gpu-load") && i + 1 < argc) gpu_load = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--unprotected")) unprotected = 1;
         else if (!strcmp(argv[i], "--engine") && i + 1 < argc) engine = argv[++i];
@@ -432,9 +498,9 @@ int main(int argc, char **argv)
     wl_surface_commit(surface);
     wl_display_roundtrip(display);
 
-    const char *iexts[] = {"VK_KHR_surface", "VK_KHR_wayland_surface"};
+    const char *iexts[] = {"VK_KHR_surface", "VK_KHR_wayland_surface", "VK_KHR_get_surface_capabilities2"};
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pEngineName = engine, .apiVersion = VK_API_VERSION_1_2};
-    VkInstanceCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app, .enabledExtensionCount = 2, .ppEnabledExtensionNames = iexts};
+    VkInstanceCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app, .enabledExtensionCount = timing || unlocked ? 3 : 2, .ppEnabledExtensionNames = iexts};
     VkInstance inst;
     CHECK(vkCreateInstance(&ici, NULL, &inst));
     VkPhysicalDevice pds[8];
@@ -454,12 +520,18 @@ int main(int argc, char **argv)
     float prio = 1;
     VkDeviceQueueCreateInfo qci = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueCount = 1, .pQueuePriorities = &prio};
     const char *exts_a[] = {"VK_KHR_external_memory_fd", "VK_KHR_external_semaphore_fd"};
-    const char *exts_b[] = {"VK_KHR_external_memory_fd", "VK_KHR_external_semaphore_fd", "VK_KHR_swapchain"};
+    const char *exts_b[] = {"VK_KHR_external_memory_fd", "VK_KHR_external_semaphore_fd", "VK_KHR_swapchain",
+        "VK_KHR_present_id2", "VK_KHR_present_wait2", "VK_EXT_present_timing", "VK_KHR_calibrated_timestamps", "VK_NV_low_latency2", "VK_KHR_swapchain_maintenance1"};
     VkPhysicalDeviceTimelineSemaphoreFeatures tsf = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES, .timelineSemaphore = VK_TRUE};
     VkDeviceCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &tsf, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
         .enabledExtensionCount = 2, .ppEnabledExtensionNames = exts_a};
     CHECK(vkCreateDevice(pd, &dci, NULL, &dev_a));
-    dci.enabledExtensionCount = 3;
+    VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR maintenance_features = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR, .swapchainMaintenance1 = VK_TRUE};
+    VkPhysicalDevicePresentTimingFeaturesEXT timing_features = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_TIMING_FEATURES_EXT, .pNext = &maintenance_features, .presentTiming = VK_TRUE};
+    VkPhysicalDevicePresentWait2FeaturesKHR wait2_features = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_2_FEATURES_KHR, .pNext = &timing_features, .presentWait2 = VK_TRUE};
+    VkPhysicalDevicePresentId2FeaturesKHR id2_features = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_2_FEATURES_KHR, .pNext = &wait2_features, .presentId2 = VK_TRUE};
+    if (timing || unlocked) tsf.pNext = &id2_features;
+    dci.enabledExtensionCount = timing || unlocked ? 9 : 3;
     dci.ppEnabledExtensionNames = exts_b;
     CHECK(vkCreateDevice(pd, &dci, NULL, &dev_b));
     VkQueue queue_a;
@@ -484,7 +556,41 @@ int main(int argc, char **argv)
         .minImageCount = caps.minImageCount < 3 ? 3 : caps.minImageCount, .imageFormat = format.format, .imageColorSpace = format.colorSpace,
         .imageExtent = {W, H}, .imageArrayLayers = 1, .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
         .preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR, .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR, .presentMode = mode, .clipped = VK_TRUE};
+    const VkPresentModeKHR both_modes[2] = {VK_PRESENT_MODE_FIFO_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR};
+    VkSwapchainPresentModesCreateInfoKHR modes_create = {.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODES_CREATE_INFO_KHR, .presentModeCount = 2, .pPresentModes = both_modes};
+    VkSwapchainLatencyCreateInfoNV latency_create = {.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_LATENCY_CREATE_INFO_NV, .pNext = unlocked ? &modes_create : NULL, .latencyModeEnable = VK_TRUE};
+    if (timing || unlocked) {
+        PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR caps2_of = (PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR)vkGetInstanceProcAddr(inst, "vkGetPhysicalDeviceSurfaceCapabilities2KHR");
+        VkPresentTimingSurfaceCapabilitiesEXT tc = {.sType = VK_STRUCTURE_TYPE_PRESENT_TIMING_SURFACE_CAPABILITIES_EXT};
+        VkSurfaceCapabilities2KHR c2 = {.sType = VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR, .pNext = &tc};
+        VkPhysicalDeviceSurfaceInfo2KHR si2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR, .surface = vsurface};
+        CHECK(caps2_of(pd, &si2, &c2));
+        /* the stage nearest the display that this surface can report */
+        for (VkPresentStageFlagsEXT bit = 8; bit; bit >>= 1)
+            if (tc.presentStageQueries & bit) { timing_stage = bit; break; }
+        printf("present timing: supported %d, stages 0x%x, asking for 0x%x\n", tc.presentTimingSupported, tc.presentStageQueries, timing_stage);
+        if (!tc.presentTimingSupported || !timing_stage) { fprintf(stderr, "no present timing on this surface\n"); return 1; }
+        sci.flags |= VK_SWAPCHAIN_CREATE_PRESENT_ID_2_BIT_KHR | VK_SWAPCHAIN_CREATE_PRESENT_WAIT_2_BIT_KHR | VK_SWAPCHAIN_CREATE_PRESENT_TIMING_BIT_EXT;
+        sci.pNext = &latency_create;
+    }
     CHECK(vkCreateSwapchainKHR(dev_b, &sci, NULL, &swapchain));
+    pthread_t timing_waiter, steal_reader;
+    if (timing || unlocked) {
+        wait_present2 = (PFN_vkWaitForPresent2KHR)vkGetDeviceProcAddr(dev_b, "vkWaitForPresent2KHR");
+        past_timing = (PFN_vkGetPastPresentationTimingEXT)vkGetDeviceProcAddr(dev_b, "vkGetPastPresentationTimingEXT");
+        PFN_vkSetSwapchainPresentTimingQueueSizeEXT queue_size = (PFN_vkSetSwapchainPresentTimingQueueSizeEXT)vkGetDeviceProcAddr(dev_b, "vkSetSwapchainPresentTimingQueueSizeEXT");
+        PFN_vkGetSwapchainTimeDomainPropertiesEXT domains_of = (PFN_vkGetSwapchainTimeDomainPropertiesEXT)vkGetDeviceProcAddr(dev_b, "vkGetSwapchainTimeDomainPropertiesEXT");
+        CHECK(queue_size(dev_b, swapchain, 16));
+        VkTimeDomainKHR domains[8];
+        uint64_t ids[8], counter = 0;
+        VkSwapchainTimeDomainPropertiesEXT dp = {.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_TIME_DOMAIN_PROPERTIES_EXT, .timeDomainCount = 8, .pTimeDomains = domains, .pTimeDomainIds = ids};
+        CHECK(domains_of(dev_b, swapchain, &dp, &counter));
+        for (uint32_t i = 0; i < dp.timeDomainCount; i++)
+            if (domains[i] == VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL_EXT) { timing_domain_id = ids[i]; break; }
+        printf("present timing: %u time domains, using id %llu\n", dp.timeDomainCount, (unsigned long long)timing_domain_id);
+        if (timing) pthread_create(&timing_waiter, NULL, timing_thread, NULL);
+        if (steal_ms) pthread_create(&steal_reader, NULL, steal_thread, NULL);
+    }
     swap_count = 16;
     vkGetSwapchainImagesKHR(dev_b, swapchain, &swap_count, swap_images);
     printf("swapchain: format %d, mode %d, %u images\n", format.format, mode, swap_count);
@@ -894,6 +1000,16 @@ int main(int argc, char **argv)
     pthread_mutex_unlock(&lock);
     pthread_join(thread, NULL);
     if (sim_ms > 0) pthread_join(sim_thread, NULL);
+    if (timing) {
+        __atomic_store_n(&timing_quit, 1, __ATOMIC_RELEASE);
+        pthread_join(timing_waiter, NULL);
+        printf("present timing: %u reports\n", timing_reports);
+    }
+    if (steal_ms) {
+        __atomic_store_n(&timing_quit, 1, __ATOMIC_RELEASE);
+        pthread_join(steal_reader, NULL);
+        printf("reports the other thread took: %u\n", steal_taken);
+    }
     vkDeviceWaitIdle(dev_a);
     vkDeviceWaitIdle(dev_b);
     if (stale_hud) printf("stale-hud: %u passes left without their frame copy, their layers destroyed\n", stale_count);

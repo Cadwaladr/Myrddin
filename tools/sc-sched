@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# The kernel's CPU scheduler, switched from outside the game: the stock one (EEVDF) or a sched_ext
+# scheduler of scx-scheds (scx_lavd, scx_bpfland, ...), started and stopped through scx_loader with
+# scxctl. Nothing in the game is touched. A sched_ext scheduler that misbehaves is thrown out by the
+# kernel, which goes back to the stock one by itself.
+#
+#   tools/sc-sched state                 what runs now
+#   tools/sc-sched set stock             the stock scheduler (a sched_ext one stopped)
+#   tools/sc-sched set SCHED [MODE]      a sched_ext scheduler in one of scx_loader's modes (default:
+#                                        gaming; "scxctl modes -s SCHED --show-args" lists them)
+#   tools/sc-sched follow SCHED [MODE]   SCHED now, and the stock scheduler again once the game has come and
+#                                        gone (30 minutes for it to start; what sc-turbo's "sched=" does).
+#                                        If something else changed the scheduler meanwhile, it is left alone.
+#   tools/sc-sched allowed               whether switching works here without a password (exit 0: yes)
+#   tools/sc-sched rule                  prints a polkit rule that lets you (in your own active local
+#                                        session) switch without a password, which scx_loader asks for
+#                                        otherwise; install it with
+#                                          tools/sc-sched rule > /tmp/sc-sched.rules
+#                                          sudo install -m 644 /tmp/sc-sched.rules /etc/polkit-1/rules.d/49-sc-sched.rules
+#                                        and remove that file to undo it.
+#
+# "set" waits until the kernel says the scheduler is in place (10 s at most) and fails otherwise.
+set -u
+st=/sys/kernel/sched_ext/state
+ops=/sys/kernel/sched_ext/root/ops
+now() { local s; s=$(cat "$st" 2>/dev/null || echo "no sched_ext"); [ "$s" = enabled ] && echo "sched_ext: $(cat "$ops" 2>/dev/null)" || echo "stock ($s)"; }
+wait_for() { # STATE: enabled | disabled
+    local i
+    for i in $(seq 100); do [ "$(cat "$st" 2>/dev/null)" = "$1" ] && return 0; sleep 0.1; done
+    echo "the kernel's sched_ext state is $(cat "$st" 2>/dev/null), not $1, after 10 s" >&2; return 1
+}
+case "${1:-state}" in
+state) now ;;
+set)
+    want="${2:?set stock | set SCHED [MODE]}"; mode="${3:-gaming}"
+    if [ "$want" = stock ]; then
+        [ "$(cat "$st" 2>/dev/null)" = disabled ] || scxctl stop >/dev/null || exit 1
+        wait_for disabled || exit 1
+    else
+        if [ "$(cat "$st" 2>/dev/null)" = enabled ]; then scxctl switch -s "$want" -m "$mode" >/dev/null || exit 1
+        else scxctl start -s "$want" -m "$mode" >/dev/null || exit 1; fi
+        wait_for enabled || exit 1
+        # (a switch from one sched_ext scheduler to another goes through "disabled": wait for the new one's name)
+        for i in $(seq 100); do grep -q "$want" "$ops" 2>/dev/null && break; sleep 0.1; done
+        grep -q "$want" "$ops" 2>/dev/null || { echo "running: $(now), not $want" >&2; exit 1; }
+    fi
+    now ;;
+follow)
+    want="${2:?follow SCHED [MODE]}"; mode="${3:-gaming}"; comm="${SC_COMM:-StarCitizen.exe}"
+    "$0" set "$want" "$mode" || exit 1
+    mine="$(cat "$ops" 2>/dev/null)"
+    echo "$(date '+%F %T') $(now) until $comm has come and gone"
+    for i in $(seq 900); do pgrep -x "${comm:0:15}" >/dev/null && break; sleep 2; done
+    pgrep -x "${comm:0:15}" >/dev/null && echo "$(date '+%F %T') $comm runs"
+    while pgrep -x "${comm:0:15}" >/dev/null; do sleep 2; done
+    if [ "$(cat "$st" 2>/dev/null)" = enabled ] && [ "$(cat "$ops" 2>/dev/null)" = "$mine" ]; then
+        "$0" set stock | sed "s/^/$(date '+%F %T') /"
+    else echo "$(date '+%F %T') changed meanwhile, left as it is: $(now)"; fi ;;
+allowed)
+    command -v scxctl >/dev/null && [ -e "$st" ] &&
+        pkcheck --action-id org.scx.loader.manage-schedulers --process $$ >/dev/null 2>&1 ;;
+rule)
+    cat <<EOF
+// Lets $(id -un) start, stop and switch sched_ext schedulers through scx_loader without a password,
+// from their own active local session (tools/sc-sched). Remove this file to undo it.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.scx.loader.manage-schedulers" && subject.user == "$(id -un)" && subject.local && subject.active)
+        return polkit.Result.YES;
+});
+EOF
+    ;;
+*) sed -n '2,/^set -u/p' "$0" | sed '$d'; exit 1 ;;
+esac

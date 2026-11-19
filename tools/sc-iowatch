@@ -48,7 +48,7 @@ FIELDS = (
     "rchar_mb read_mb syscr minflt majflt cpu_user cpu_sys rss_mb anon_mb file_mb swap_mb threads running blocked "
     "mem_free_mb mem_cached_mb mem_avail_mb allocstall scan_direct steal_direct swap_in swap_out compact_stall "
     "psi_io_some psi_io_full psi_mem_some psi_cpu_some p4k_cached_mb p4k_evicted_mb "
-    "gpu_fb_mb gpu_bar1_mb gpu_busy gpu_mem_busy pcie_rx pcie_tx"
+    "gpu_fb_mb gpu_bar1_mb gpu_busy gpu_mem_busy pcie_rx pcie_tx gpu_mhz gpu_mem_mhz"
 ).split()
 
 
@@ -133,7 +133,7 @@ class GpuWatch(threading.Thread):
 
     def run(self):
         try:
-            self.process = subprocess.Popen(["nvidia-smi", "dmon", "-s", "mut", "-d", "2"], stdout=subprocess.PIPE,
+            self.process = subprocess.Popen(["nvidia-smi", "dmon", "-s", "mutc", "-d", "2"], stdout=subprocess.PIPE,
                                             stderr=subprocess.DEVNULL, text=True)
         except OSError:
             return
@@ -321,6 +321,7 @@ def record_one(pid, args):
                 p4k_cached_mb=round(cache_values[0]), p4k_evicted_mb=round(cache_values[1]),
                 gpu_fb_mb=g.get("fb", ""), gpu_bar1_mb=g.get("bar1", ""), gpu_busy=g.get("sm", ""),
                 gpu_mem_busy=g.get("mem", ""), pcie_rx=g.get("rxpci", ""), pcie_tx=g.get("txpci", ""),
+                gpu_mhz=g.get("pclk", ""), gpu_mem_mhz=g.get("mclk", ""),
             )
             out.writerow([round(row[k], 2) if isinstance(row[k], float) else row[k] for k in FIELDS])
             f.flush()
@@ -481,7 +482,11 @@ def report(args):
     print(f"  something waited for the disk {total('psi_io_some') / 10 / seconds:.2f} % of the time, for memory {total('psi_mem_some') / 10 / seconds:.3f} %")
     print(f"memory: the game's largest {peak('rss_mb') / 1000:.1f} GB in RAM; least available to the machine {min(s['mem_avail_mb'] for s in samples) / 1000:.1f} GB; "
           f"{total('allocstall'):.0f} allocation stalls, {total('swap_out') * 4 / 1000:.0f} MB swapped out")
-    print(f"GPU memory: {peak('gpu_fb_mb') / 1000:.1f} GB at the most; the GPU busy {median([s['gpu_busy'] for s in samples]):.0f} % (median)\n")
+    print(f"GPU memory: {peak('gpu_fb_mb') / 1000:.1f} GB at the most; the GPU busy {median([s['gpu_busy'] for s in samples]):.0f} % (median)")
+    mhz = [s["gpu_mhz"] for s in samples if s.get("gpu_mhz", float("nan")) == s.get("gpu_mhz", float("nan"))]  # (recordings from before this have none)
+    if mhz:
+        print(f"the GPU's clock: {median(mhz):.0f} MHz (median), {min(mhz):.0f} to {max(mhz):.0f}")
+    print()
 
     layer = parse_layer_log(pid)
     log = game_log_for(start)

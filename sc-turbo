@@ -6,7 +6,7 @@
 #   sc-turbo capture   like probe, and also saves a few frames of DLSS's inputs (colour, motion
 #                      vectors, depth) to logs/capture, but only after "sc-turbo go"
 #   sc-turbo go        start a capture series now: 4 consecutive frames every 10 s for 2 minutes
-#   sc-turbo fg [2|3|4] [hud] [panel] [nomarkers] [watch] [trace|old|older|next]  launch with frame generation (DLSS must be the
+#   sc-turbo fg [2|3|4] [hud] [panel] [nomarkers] [watch] [sched=NAME] [trace|old|older|next]  launch with frame generation (DLSS must be the
 #                      upscaler in game); the number is the multiplier, default 2. Log and dumps: logs/fg
 #                      ("hud": with MangoHud, which sits below the layer and so counts every frame that
 #                      is shown, the generated ones too; SC_MANGOHUD=1 in sc-turbo.conf: always.
@@ -17,13 +17,21 @@
 #                      is put where it is on its way in every generated frame (SC_FG_MARKERS=0 in
 #                      sc-turbo.conf: never); fg-params markers=0|1 switches it in the running game.
 #                      "watch": record what the game does with the disk and with memory (see iowatch).
+#                      "sched=NAME[:MODE]": the kernel's CPU scheduler for as long as the game runs, a
+#                      sched_ext one of scx-scheds (lavd, bpfland, ...; MODE one of scx_loader's, default
+#                      gaming), the stock one again after it; SC_SCHED=NAME in sc-turbo.conf: always,
+#                      sched=stock: not this time. Needs scx-scheds, scx-tools and switching without a
+#                      password (tools/sc-sched rule); otherwise the game runs with the stock one.
 #                      "old": the build before the last one, kept in build/fg-prev; "older": the one
 #                      before that, build/fg-prev2; "next": the newest build, which ./build.sh
 #                      leaves in build/fg-next before it is validated and installed: for a diagnosis)
 #   sc-turbo gui [install|remove]   the launcher window: the game's icon (a click launches it) and - Nx +
 #                      below it for the multiplier, also while the game runs (gui/games.ini lists the
 #                      games). install / remove: its entry in the desktop's application menu.
-#   sc-turbo run       launch the game as it is, with none of this project's layers
+#   sc-turbo run       launch the game as it is, with none of this project's layers (SC_SCHED applies)
+#   sc-turbo latency [PID]   where the time goes between a frame of the game and the display, per
+#                      multiplier (default: the newest session; the display's part needs a runner whose
+#                      vkd3d-proton asks the driver for it, which the LUG experimental ones do).
 #   sc-turbo iowatch [report [PID]]   record the game's disk, memory and GPU memory use, second by second,
 #                      from outside (it reads /proc and asks nvidia-smi; started by itself with "fg N watch");
 #                      report: the recording put together with the frame rates and the game's log, place by place
@@ -66,6 +74,12 @@
 #                      interpolated; gapfill=0: such frames are not generated from, and when several come
 #                      close together the HUD is interpolated with the picture for a few seconds.
 #                      cross=1 (default): a frame copy recorded apart from the HUD pass still makes a capture.
+#                      boost=1: the GPU is asked to keep its speed up while the game leaves it half idle, so
+#                      that the generated frames are ready sooner (off by default; SC_FG_BOOST=1 at launch).
+#                      priority=N: the thread that presents runs at nice -N, as far as the limits of the
+#                      user allow (0, the default: left as it is; SC_FG_PRIORITY=N at launch).
+#                      timing=1: every frame sent out asks the display when it got there (off by default;
+#                      SC_FG_TIMING=1 at launch): for "sc-turbo latency", and which frames never reached it.
 #                      pictures=1 (default): pictures in the HUD that change where they stand (the map) stay
 #                      at the game's own rate; pictures=0: they are moved like the rest (their lines double)
 #   sc-turbo fg-watch [--last N]   the session's log at a glance: a short line per ten seconds (frame
@@ -81,7 +95,9 @@
 #   sc-turbo displays  the displays and which one the game takes as its main one (the desktop's primary
 #                      display; another one: SC_MONITOR=NAME ./sc-turbo fg 4). Its refresh rate is what
 #                      the layer fills (another rate: SC_FG_TARGET=RATE)
-#   sc-turbo fg-events   write the last ~4000 presents (which captures, timings) to logs/fg/events-*.txt
+#   sc-turbo fg-events   write the last ~4000 presents (which captures, timings) to logs/fg/events-*.txt;
+#                      with fg-params timing=1 also what became of each frame sent, logs/fg/presents-*.bin
+#                      (tools/display-timing.py FILE: when the display takes frames, which ones it drops)
 #   sc-turbo fg-scan  (trace launches) save the display-size passes before/after, to find the HUD pass
 #   sc-turbo fg-where [-a] [PID]   what every thread was doing inside the layer (which hook, since when,
 #                      which of its locks held and waited for): after a game that stood still, or while it runs
@@ -170,6 +186,19 @@ display_settings() {
     fi
     echo "Display: ${WAYLANDDRV_PRIMARY_MONITOR:-left to the runner}, ${SC_FG_TARGET:-120} Hz"
 }
+# A sched_ext scheduler while the game runs (tools/sc-sched follow): "sched=NAME[:MODE]" or SC_SCHED.
+start_sched() {
+    local s="${sc_sched:-${SC_SCHED:-}}" name mode
+    [ -n "$s" ] && [ "$s" != stock ] || return 0
+    name="${s%%:*}"; mode=gaming; [ "$s" != "$name" ] && mode="${s#*:}"
+    if ! "$here/tools/sc-sched" allowed; then
+        echo "CPU scheduler $name: not here (needs scx-scheds, scx-tools and switching without a password: tools/sc-sched rule); the stock one"
+        return 0
+    fi
+    mkdir -p "$here/logs"
+    nohup "$here/tools/sc-sched" follow "$name" "$mode" >> "$here/logs/sched.out" 2>&1 &
+    echo "CPU scheduler: scx_$name ($mode) while the game runs, the stock one after it (log: logs/sched.out)"
+}
 logs="$here/logs/probe"
 
 newest_log() { ls -t "$here"/logs/probe/probe-StarCitizen*.log "$here"/logs/capture/probe-StarCitizen*.log 2>/dev/null | head -1; }
@@ -210,6 +239,7 @@ fg)
         panel) export SC_FG_PANEL=1 ;;   # the layer's own panel (sc-turbo fg-panel); without the word there is none
         markers) export SC_FG_MARKERS=1 ;;   # (what the launch does anyway; the word is still taken)
         watch) io_watch=1 ;;   # the recording of "sc-turbo iowatch", from outside the game
+        sched=*) sc_sched="${word#sched=}" ;;   # the CPU scheduler while the game runs (start_sched)
         nomarkers) export SC_FG_MARKERS=0
             echo "Moving HUD content stays at the game's own rate (sc-turbo fg-params markers=1 switches it on in the running game)" ;;
         old|older)
@@ -220,7 +250,7 @@ fg)
             layer="$here/build/fg-next"
             [ -f "$layer/libsc_fg.so" ] || { echo "$layer/libsc_fg.so is missing (./build.sh)"; exit 1; }
             echo "Using the newest build, which is not validated yet ($layer)" ;;
-        *) echo "fg: \"$word\" is not known (hud, panel, nomarkers, watch, trace, old, older, next)"; exit 1 ;;
+        *) echo "fg: \"$word\" is not known (hud, panel, nomarkers, watch, sched=NAME, trace, old, older, next)"; exit 1 ;;
         esac
     done
     # (This layer's folder comes first among the implicit layers, which puts it nearest the game:
@@ -228,7 +258,9 @@ fg)
     export VK_ADD_IMPLICIT_LAYER_PATH="$layer${VK_ADD_IMPLICIT_LAYER_PATH:+:$VK_ADD_IMPLICIT_LAYER_PATH}"
     export DISABLE_LSFGVK=1 WINE_SCHED_LOG=0
     if [ "$SC_MANGOHUD" = 1 ]; then
-        if ls /usr/share/vulkan/implicit_layer.d/MangoHud*.json "$HOME"/.local/share/vulkan/implicit_layer.d/MangoHud*.json >/dev/null 2>&1; then
+        # (ls fails when any one of the places has none, so what it lists is what counts)
+        if [ -n "$(ls /usr/share/vulkan/implicit_layer.d/MangoHud*.json /etc/vulkan/implicit_layer.d/MangoHud*.json \
+                "$HOME"/.local/share/vulkan/implicit_layer.d/MangoHud*.json 2>/dev/null)" ]; then
             export MANGOHUD=1
             echo "MangoHud on: the frame rate it shows is the shown one, generated frames included"
             echo "  (its own frame limit must stay off: fps_limit in MangoHud's settings would hold the layer's presents)"
@@ -245,6 +277,7 @@ fg)
         nohup "$here/tools/sc-iowatch" > "$here/logs/io/watch.out" 2>&1 &
         echo "Recording the game's disk and memory use (afterwards: sc-turbo iowatch report)"
     fi
+    start_sched
     exec "$launch"
     ;;
 run)
@@ -253,6 +286,7 @@ run)
     desktop_notes
     display_settings
     export WINE_SCHED_LOG=0
+    start_sched
     exec "$launch"
     ;;
 gui)
@@ -329,6 +363,7 @@ fg-mult) echo "${2:?multiplier 2, 3 or 4}" > "$here/logs/fg/MULT" && echo "multi
 fg-stat) log="$(ls -t "$here"/logs/fg/fg-*.log 2>/dev/null | head -1)"; [ -n "$log" ] && { grep -v 'STAT' "$log" | tail -8; grep 'STAT' "$log" | tail -4; } ;;
 fg-watch) shift; exec "$here/tools/fg-watch.py" "$@" ;;
 fg-ab) shift; exec "$here/tools/fg-ab.sh" "$@" ;;
+latency) shift; exec "$here/tools/latency-report.py" "$@" ;;
 iowatch) shift; exec "$here/tools/sc-iowatch" "$@" ;;
 threads) exec "$here/tools/sc-threads" show ;;
 threads-ab) shift; exec "$here/tools/sc-ab-threads.sh" "$@" ;;

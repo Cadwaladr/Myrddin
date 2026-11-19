@@ -70,7 +70,7 @@ side end "$a" || failed=1 # (back on A whatever happened)
 [ -z "$failed" ] || { switch "$a"; exit 1; }
 python3 - "$marks" "$dir" "$started" "$a" "$b" <<'EOF'
 import sys, glob, os, statistics as st
-SKIP = 1.5 # seconds after a mark that are not counted: the switch itself comes ~0.4 s after it
+SKIP = float(os.environ.get("AB_SKIP", 1.5)) # seconds after a mark that are not counted: the switch itself comes ~0.4 s after it
 marks = [l.split() for l in open(sys.argv[1])]
 marks = [(m[0], float(m[1])) for m in marks]
 rows = {}
@@ -80,7 +80,7 @@ for f in glob.glob(os.path.join(sys.argv[2], "events-*.txt")):
         if line.startswith('#'): continue
         p = [x.strip() for x in line.split('|')]
         if len(p) < 5: continue
-        try: rows[float(p[0])] = p[4].split()
+        try: rows[float(p[0])] = (p[4].split(), [float(x) for x in p[3].split()])
         except ValueError: continue
 times = sorted(rows)
 sides = {"A": [], "B": []}
@@ -88,10 +88,19 @@ for (side, t0), (_, t1) in zip(marks, marks[1:]):
     ts = [t for t in times if t0 + SKIP <= t < t1]
     if len(ts) < 3: continue
     per = [(y - x) * 1000 for x, y in zip(ts, ts[1:])]
-    flags = "".join(rows[t][-1] for t in ts)
+    flags = "".join(rows[t][0][-1] for t in ts)
     sides[side].append(dict(fps=(len(ts) - 1) / (ts[-1] - ts[0]), per=per, lost=flags.count("X"), late=flags.count("O"),
-                            mult=st.mode(rows[t][0] for t in ts), n=len(ts)))
+                            mult=st.mode(rows[t][0][0] for t in ts), n=len(ts), ms=[rows[t][1] for t in ts]))
 def pct(v, q): return sorted(v)[min(int(len(v) * q), len(v) - 1)]
+# The event log's columns of times (ms) that say how long a frame takes to get out. (The last one: only
+# where the driver reports when frames reach the display.)
+TIMES = (("generated frames ready", 6), ("their GPU work waited for", 3), ("the game's GPU time", 2), ("present call", 4), ("present to display", 10))
+def times(s):
+    out = {}
+    for name, i in TIMES:
+        v = [m[i] for seg in s for m in seg["ms"] if len(m) > i and m[i] > 0]
+        if v: out[name] = st.median(v)
+    return out
 for side, label in (("A", sys.argv[4]), ("B", sys.argv[5])):
     s = sides[side]
     if not s: print(f"{side}: no frames"); continue
@@ -107,6 +116,8 @@ if a and b:
     # What the same side differs by from one stretch to the next is the noise: a difference
     # between the sides smaller than that says nothing.
     def spread(s): return max(abs(y["fps"] / x["fps"] - 1) for x, y in zip(s, s[1:])) if len(s) > 1 else 0.0
+    ta, tb = times(a), times(b)
+    print("ms, A / B / B-A:", "; ".join(f"{name} {ta[name]:.1f} / {tb[name]:.1f} / {tb[name] - ta[name]:+.1f}" for name, _ in TIMES if name in ta and name in tb))
     print(f"B against A: {100 * (fb / fa - 1):+.1f} % real frames (stretch by stretch: {' '.join(f'{100 * p:+.1f}' for p in pairs)} %); "
           f"the same side from stretch to stretch: up to {100 * max(spread(a), spread(b)):.1f} %")
 EOF

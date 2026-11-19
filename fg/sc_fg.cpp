@@ -78,6 +78,7 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -768,6 +769,15 @@ struct Instance {
     PFN_vkEnumerateDeviceExtensionProperties EnumerateDeviceExtensionProperties{};
 };
 
+// What a display says about when a frame reached it (only recent Vulkan headers have this).
+#ifdef VK_EXT_present_timing
+#define PRESENT_TIMING_FUNCTIONS(X)                                                                \
+    X(GetPastPresentationTimingEXT) X(GetCalibratedTimestampsKHR) X(WaitForPresent2KHR)            \
+    X(GetSwapchainTimeDomainPropertiesEXT) X(SetSwapchainPresentTimingQueueSizeEXT)
+#else
+#define PRESENT_TIMING_FUNCTIONS(X)
+#endif
+
 #define DEVICE_FUNCTIONS(X)                                                                        \
     X(DestroyDevice) X(GetDeviceQueue) X(GetDeviceQueue2) X(AllocateCommandBuffers)                \
     X(FreeCommandBuffers) X(CreateImage) X(DestroyImage) X(CreateImageView) X(DestroyImageView)    \
@@ -785,8 +795,10 @@ struct Instance {
     X(CreateComputePipelines) X(DestroyPipeline) X(CreateDescriptorPool) X(DestroyDescriptorPool)  \
     X(AllocateDescriptorSets) X(UpdateDescriptorSets) X(CreateSampler) X(DestroySampler)           \
     X(CmdBindPipeline) X(CmdBindDescriptorSets) X(CmdDispatch) X(CmdPushConstants) X(CmdFillBuffer)  \
-    X(CmdCopyBuffer)                                                                               \
-    X(SetLatencySleepModeNV) X(LatencySleepNV) X(SetLatencyMarkerNV)
+    X(CmdCopyBuffer) X(CreateQueryPool) X(DestroyQueryPool) X(CmdResetQueryPool) X(CmdWriteTimestamp) \
+    X(GetQueryPoolResults)                                                                         \
+    X(SetLatencySleepModeNV) X(LatencySleepNV) X(SetLatencyMarkerNV) X(WaitForPresentKHR)          \
+    PRESENT_TIMING_FUNCTIONS(X)
 
 /// Only looked at by the trace (SC_FG_TRACE=1): the structure of the game's frame.
 #define TRACE_FUNCTIONS(X)                                                                         \
@@ -1522,6 +1534,19 @@ std::atomic<float> g_live_fill{EnvFloat("SC_FG_FILL", 1.0f)};
 /// ... and whether a held game is probed for what it could do (PARAMS: probe; 0: taken from the
 /// time its handing-over thread and the GPU need, which is more than the game can do).
 std::atomic<float> g_live_probe{EnvFloat("SC_FG_PROBE", 1.0f)};
+/// ... and the GPU is asked to keep its speed up (the boost of VK_NV_low_latency2; PARAMS: boost).
+/// The game leaves it well short of full load, and a GPU that has let its clocks drop takes longer
+/// over the generated frames, which every frame waits for.
+std::atomic<float> g_live_boost{EnvFloat("SC_FG_BOOST", 0.0f)};
+/// ... and the thread that presents runs at a higher priority: N makes its nice value -N, as far
+/// as the user's limits allow (PARAMS: priority; 0: left as it is). In the busy places of the game
+/// more threads want to run than there are CPUs, and this one sleeps and wakes for every frame.
+std::atomic<float> g_live_priority{EnvFloat("SC_FG_PRIORITY", 0.0f)};
+/// ... and every frame sent out asks the display when it got there (PARAMS: timing). vkd3d-proton
+/// asks that only for frames presented with vsync, and the game presents without.
+std::atomic<float> g_live_timing{EnvFloat("SC_FG_TIMING", 0.0f)};
+/// A present with such a request has failed: no more of them in this process.
+std::atomic<bool> g_own_timing_failed{};
 
 float Level(const float* ring, uint32_t count);
 
@@ -2871,6 +2896,107 @@ constexpr uint32_t MARKER_SET_COUNT = 11; ///< pieces and field run twice
 constexpr uint32_t UNMIX_SET = MARKER_SETS + MARKER_SET_COUNT; ///< RecordUnmix's descriptor set, the last
 constexpr uint32_t HUD_SET_COUNT = UNMIX_SET + 1;
 
+/// When the GPU is done with each hand-over's copy, seen from a thread of its own, while the display
+/// is asked about its frames (timing=1): an empty submit with a fence behind the copy's, and the
+/// thread waits for it. (Never destroyed: the thread must not be joinable when the process ends.)
+struct DoneWatch {
+    Device* device{};
+    std::mutex mutex;
+    std::condition_variable wake;
+    std::vector<std::pair<VkFence, uint64_t>> waiting; ///< in the order submitted
+    std::vector<VkFence> spare;
+    std::thread thread;
+    std::atomic<bool> stop{};
+    std::atomic<uint64_t> frame[64]{};
+    std::atomic<double> time[64]{};
+};
+DoneWatch* const g_done_watch = new DoneWatch;
+
+void WatchDone(Device& d, VkQueue queue, uint64_t frame) {
+    DoneWatch& w = *g_done_watch;
+    VkFence fence{};
+    {
+        std::lock_guard lock{w.mutex};
+        if (w.stop || (w.device && w.device != &d) || w.waiting.size() > 16) {
+            return;
+        }
+        if (!w.spare.empty()) {
+            fence = w.spare.back();
+            w.spare.pop_back();
+        }
+    }
+    if (!fence) {
+        VkFenceCreateInfo info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        if (d.CreateFence(d.handle, &info, nullptr, &fence) != VK_SUCCESS) {
+            return;
+        }
+    }
+    VkSubmitInfo empty{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    const bool sent = d.QueueSubmit(queue, 1, &empty, fence) == VK_SUCCESS;
+    {
+        std::lock_guard lock{w.mutex};
+        if (!sent) {
+            w.spare.push_back(fence);
+            return;
+        }
+        w.waiting.emplace_back(fence, frame);
+        if (!w.device) {
+            w.device = &d;
+            w.thread = std::thread([&w] {
+                prctl(PR_SET_NAME, "sc_fg-done", 0, 0, 0);
+                std::unique_lock lock{w.mutex};
+                while (true) {
+                    w.wake.wait(lock, [&] { return w.stop || !w.waiting.empty(); });
+                    if (w.waiting.empty()) {
+                        return; // (stop)
+                    }
+                    const auto [fence, frame] = w.waiting.front();
+                    w.waiting.erase(w.waiting.begin());
+                    Device& dev = *w.device;
+                    lock.unlock();
+                    VkResult result;
+                    do {
+                        result = dev.WaitForFences(dev.handle, 1, &fence, VK_TRUE, 20'000'000ull);
+                    } while (result == VK_TIMEOUT && !w.stop);
+                    if (result == VK_SUCCESS) {
+                        w.time[frame % 64].store(Now());
+                        w.frame[frame % 64].store(frame);
+                        dev.ResetFences(dev.handle, 1, &fence);
+                    }
+                    lock.lock();
+                    w.spare.push_back(fence);
+                }
+            });
+        }
+    }
+    w.wake.notify_one();
+}
+
+/// Its device goes: the thread ends, the fences go (the device is idle by then).
+void StopDoneWatch(Device& d) {
+    DoneWatch& w = *g_done_watch;
+    {
+        std::lock_guard lock{w.mutex};
+        if (w.device != &d) {
+            return;
+        }
+        w.stop = true;
+    }
+    w.wake.notify_all();
+    if (w.thread.joinable()) {
+        w.thread.join();
+    }
+    std::lock_guard lock{w.mutex};
+    for (const auto& [fence, frame] : w.waiting) {
+        d.DestroyFence(d.handle, fence, nullptr);
+    }
+    for (VkFence fence : w.spare) {
+        d.DestroyFence(d.handle, fence, nullptr);
+    }
+    w.waiting.clear();
+    w.spare.clear();
+}
+
 /// One present, kept for a while: what was linked to what, and what it took (EVENTS control file).
 struct Event {
     enum : uint32_t {
@@ -2885,6 +3011,7 @@ struct Event {
     float wait_ms{}, hook_ms{};    ///< the wait for this layer's GPU work, the whole hook
     float record_ms{}, ready_ms{}, paced_ms{}; ///< hook entry to its submit / to the generated frames going out; waits between frames
     float own_ms{}, guard_ms{};    ///< the game's own time for the frame; how long its submit was kept back (GuardHandover)
+    float shown_ms{};              ///< from the real frame's present call to its reaching the display; 0: not known
     uint32_t multiplier{}, flags{};
     int shift{};
 };
@@ -2980,6 +3107,22 @@ struct Fg {
         bool pending{};
     } sets[COMMAND_SETS];
     int set_index{};
+    /// This layer's GPU time per frame, by step, while the display is asked about its frames (timing=1):
+    /// timestamps around the steps of the interpolation, read when the set's work is done.
+    struct GpuClock {
+        static constexpr uint32_t MARKS = 7; ///< begin, prepare, flow, interpolation, HUD, end (and one before prepare)
+        VkQueryPool pool{};
+        bool failed{};
+        bool written[COMMAND_SETS]{};
+        double period_ms{};               ///< a tick in ms
+        std::vector<float> parts[MARKS - 1];
+    } clock;
+    /// When the game's frame was done on the GPU (the hand-over's copy), against its hand-over and its
+    /// present hook: what is left of the time between the two once the GPU is done (timing=1).
+    uint64_t done_frame{};
+    double done_handover{}, done_hook{};
+    std::vector<float> done_after_handover_ms, done_before_hook_ms;
+    double real_sent{};           ///< when the game's frame last went out
     /// The performance panel (hud_panel.h): frame rates and pacing, put over every frame that goes
     /// out while it is asked for (control file PANEL; sc-turbo fg-panel).
     struct Panel {
@@ -3122,6 +3265,89 @@ struct Fg {
     double stats_since{};
     uint32_t real_frames{}, generated_frames{}, passed_frames{};
     double hook_seconds{};
+    /// When the game's frames reached the display, as the driver tells vkd3d-proton: what comes
+    /// through VK_EXT_present_timing and the waits for presents, which this layer only looks at.
+    /// Those calls come on vkd3d's waiting thread and the presents on its queue thread: one
+    /// writes and the other reads, without a lock.
+    struct Shown {
+        static constexpr uint32_t SENT = 64, RING = 512;
+        struct Sent { ///< a frame given to the display, under its present id
+            std::atomic<uint64_t> id{};
+            std::atomic<double> time{};
+            std::atomic<uint64_t> event{}; ///< its line in the event log, plus one; 0: none
+            std::atomic<uint32_t> multiplier{};
+        } sent[SENT];
+        struct Entry {
+            uint64_t event;
+            float delay_ms; ///< from the present call to the frame reaching the display
+            float gap_ms;   ///< from the frame before it to this one, on the display; 0: not known
+            uint32_t multiplier;
+        } ring[RING]{};
+        float waited_ms[RING]{}; ///< from the present call to the end of a wait for that present
+        std::atomic<uint32_t> count{}, waited_count{}, unmatched{};
+        // The waiting thread's own.
+        uint64_t last_id{};
+        double last_shown{};
+        double offset{};         ///< added to a time on the display's clock (in seconds): Now()'s
+        double calibrated{-1e9}; ///< when that was found
+        uint64_t domain_id{};
+        int domain{-1};
+        uint32_t stage{};
+        bool clock_ok{}, said{};
+        // The presenting thread's own.
+        uint32_t read{}, waited_read{};
+        std::vector<float> delays, waits;
+        uint32_t planned{}, closer{}, later{}, much_later{}; ///< frames by their distance on the display
+        // This layer's own requests (PARAMS: timing), one for every frame it sends out, on the
+        // presenting thread. Reports come in the order of the presents, but not all of them come
+        // here: a report goes to whoever asks first, and something else in the game's process asks
+        // now and then. So the game's frames carry an id after the first few, which says where a
+        // report belongs. (Such an id stays below what vkd3d-proton would take for its own, should
+        // the game go over to vsync: it counts the game's presents.)
+        struct Mine {
+            double time;
+            uint64_t event, id, serial;
+            uint32_t multiplier;
+            bool real;
+            float call_ms;    ///< how long its present call took
+            uint8_t position; ///< its place among the frames sent for one game frame
+        };
+        static constexpr uint32_t MINE = 128, MINE_MOST = 48, IDS_AFTER = 16;
+        Mine mine[MINE]{};
+        /// What became of each frame sent while the requests are on (written by "sc-turbo fg-events",
+        /// read by tools/display-timing.py: keep the two in step).
+        struct Fate {
+            double sent, shown; ///< this layer's clock, seconds; shown is 0 without a time
+            float call_ms;
+            uint8_t flags; ///< 1 the game's own frame, 2 replaced before it reached the display, 4 no report came here, 8 its report did not fit
+            uint8_t position, multiplier, unused;
+        };
+        static constexpr uint32_t FATES = 16384;
+        std::vector<Fate> fates;
+        uint64_t fate_count{};
+        uint64_t mine_sent{}, mine_read{}, own_real{};
+        uint64_t own_reports{}, others_counted{}; ///< reports read here; those of others already in a statistics line
+        std::atomic<uint64_t> others_read{}, own_last_id{}; ///< (whoever else reads reports looks at these)
+        std::atomic<bool> own_active{}, others_said{};
+        uint64_t own_domain{}, last_serial{};
+        uint32_t own_stage{};
+        int own_state{}; ///< 0: not tried yet, 1: ready, -1: not possible
+        double last_any{};
+        std::vector<float> generated_delays;
+        uint32_t lost_real{}, lost_generated{}; ///< frames the display says it never showed: a later one replaced them
+        uint32_t silent_real{}, silent_generated{}; ///< frames no report came here for
+        uint32_t refreshes[4]{}; ///< frames on the display by the refreshes since the one before: 0, 1, 2, more
+    } shown;
+    VkSurfaceKHR surface{};
+    VkSwapchainCreateFlagsKHR create_flags{};
+    VkLatencySleepModeInfoNV sleep_mode{VK_STRUCTURE_TYPE_LATENCY_SLEEP_MODE_INFO_NV}; ///< as last asked for by vkd3d-proton
+    bool latency_swapchain{}; ///< created for VK_NV_low_latency2
+    bool boost_on{};          ///< the GPU has been asked to keep its speed up
+    // What the present hook itself spends, since the last statistics line.
+    double acquire_seconds{}, present_seconds{}; ///< in the driver: getting images, presenting
+    uint32_t acquires{}, present_calls{};
+    std::vector<float> real_out_ms; ///< from the present hook's start until the game's frame goes out
+    std::vector<float> sleep_late_ms; ///< how much later than asked for its sleeps between frames ended
     std::vector<float> game_ms, output_ms, age_ms; ///< samples since the last statistics line
     double last_output{};
     uint64_t evaluations{};
@@ -3222,7 +3448,7 @@ void WriteEvents(Fg& fg) {
     std::fprintf(file, "# time | chain hud input newest_hud newest_input | since the last linked frame: hand-overs "
                        "hud_captures evaluations hud_passes frame_copies | ms: hand-over_to_present limiter_sleep "
                        "game_gpu fg_gpu_wait hook hook_to_submit hook_to_first_frame_out paced_waits game_own "
-                       "submit_kept_back | multiplier shift flags (C chained, D duplicate, L layer, R reset, U reused "
+                       "submit_kept_back present_to_display | multiplier shift flags (C chained, D duplicate, L layer, R reset, U reused "
                        "inputs, N no HUD capture, H its scene worked out from the frame, P passed untouched, M measured, "
                        "V vectors checked, G let on by the "
                        "gate, O copied out only after the game's next frame was submitted, X ... and finished: the wrong "
@@ -3241,16 +3467,36 @@ void WriteEvents(Fg& fg) {
                 flags[n++] = letter;
             }
         }
-        std::fprintf(file, "%.4f | %llu %llu %llu %llu %llu | %u %u %u %u %u | %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f | x%u %d %s\n", e.time,
+        std::fprintf(file, "%.4f | %llu %llu %llu %llu %llu | %u %u %u %u %u | %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f %.2f | x%u %d %s\n", e.time,
                      static_cast<unsigned long long>(e.chain), static_cast<unsigned long long>(e.hud),
                      static_cast<unsigned long long>(e.input), static_cast<unsigned long long>(e.newest_hud),
                      static_cast<unsigned long long>(e.newest_input), e.handovers, e.hud_captures, e.evaluations, e.passes,
                      e.frame_copies, e.handover_ms, e.slept_ms, e.gpu_ms, e.wait_ms, e.hook_ms, e.record_ms, e.ready_ms, e.paced_ms,
-                     e.own_ms, e.guard_ms, e.multiplier, e.shift,
+                     e.own_ms, e.guard_ms, e.shown_ms, e.multiplier, e.shift,
                      n ? flags : "-");
     }
     std::fclose(file);
     Log("fg: the last %llu presents written to %s", static_cast<unsigned long long>(count), path);
+    const Fg::Shown& shown = fg.shown;
+    if (!shown.fate_count) {
+        return;
+    }
+    std::snprintf(path, sizeof path, "%s/presents-%d-%u.bin", Dir(), getpid(), fg.event_files - 1);
+    if (FILE* out = std::fopen(path, "wb")) {
+        const uint64_t fates = std::min<uint64_t>(shown.fate_count, Fg::Shown::FATES);
+        const uint32_t size = sizeof(Fg::Shown::Fate);
+        const double target = EnvFloat("SC_FG_TARGET", 120.0f);
+        std::fwrite("SCFGPRS1", 1, 8, out);
+        std::fwrite(&size, sizeof size, 1, out);
+        std::fwrite(&size, sizeof size, 1, out); // (room for later use)
+        std::fwrite(&fates, sizeof fates, 1, out);
+        std::fwrite(&target, sizeof target, 1, out);
+        for (uint64_t i = shown.fate_count - fates; i < shown.fate_count; ++i) {
+            std::fwrite(&shown.fates[i % Fg::Shown::FATES], size, 1, out);
+        }
+        std::fclose(out);
+        Log("fg: what became of the last %llu frames sent written to %s", static_cast<unsigned long long>(fates), path);
+    }
 }
 
 bool CheckFfx(FfxErrorCode error, const char* what) {
@@ -3350,7 +3596,8 @@ void ReadParameters() {
         {"chain", &g_live_chain},     {"nohud", &g_live_nohud}, {"wait", &g_live_wait}, {"shift", &g_live_shift},
         {"vectors", &g_live_vectors}, {"gate", &g_live_gate},   {"guard", &g_live_guard}, {"first", &g_live_first},
         {"fill", &g_live_fill},       {"probe", &g_live_probe}, {"gpuwait", &g_live_lag}, {"markers", &g_live_markers},
-        {"gapfill", &g_live_gapfill}, {"cross", &g_live_cross}, {"pictures", &g_live_pictures}};
+        {"gapfill", &g_live_gapfill}, {"cross", &g_live_cross}, {"pictures", &g_live_pictures},
+        {"boost", &g_live_boost}, {"priority", &g_live_priority}, {"timing", &g_live_timing}};
     char name[64];
     float value = 0.0f;
     while (std::fscanf(file, " %63[^= \n]=%f", name, &value) == 2) {
@@ -3707,6 +3954,48 @@ bool RecordVectorCheck(Device& d, Fg& fg, Fg::Set& set, VkCommandBuffer cmd, Ima
     vectors = &fg.fixed_vectors;
     ++fg.checked_frames;
     return true;
+}
+
+/// The timestamps of GpuClock, made when they are first asked for. False: none can be had.
+bool PrepareGpuClock(Device& d, Fg& fg) {
+    Fg::GpuClock& clock = fg.clock;
+    if (clock.pool || clock.failed) {
+        return clock.pool != VK_NULL_HANDLE;
+    }
+    clock.failed = true;
+    VkPhysicalDeviceProperties properties{};
+    if (!d.instance || !d.instance->GetPhysicalDeviceProperties || !d.CreateQueryPool || !d.CmdWriteTimestamp) {
+        return false;
+    }
+    d.instance->GetPhysicalDeviceProperties(d.physical, &properties);
+    if (!properties.limits.timestampComputeAndGraphics || properties.limits.timestampPeriod <= 0.0f) {
+        return false;
+    }
+    VkQueryPoolCreateInfo info{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    info.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    info.queryCount = COMMAND_SETS * Fg::GpuClock::MARKS;
+    if (d.CreateQueryPool(d.handle, &info, nullptr, &clock.pool) != VK_SUCCESS) {
+        clock.pool = VK_NULL_HANDLE;
+        return false;
+    }
+    clock.period_ms = properties.limits.timestampPeriod * 1e-6;
+    clock.failed = false;
+    return true;
+}
+
+/// What a set's timestamps say, its work being done.
+void TakeGpuClock(Device& d, Fg& fg, int set_number) {
+    Fg::GpuClock& clock = fg.clock;
+    clock.written[set_number] = false;
+    uint64_t ticks[Fg::GpuClock::MARKS]{};
+    if (d.GetQueryPoolResults(d.handle, clock.pool, set_number * Fg::GpuClock::MARKS, Fg::GpuClock::MARKS, sizeof ticks,
+                              ticks, sizeof ticks[0], VK_QUERY_RESULT_64_BIT) != VK_SUCCESS) {
+        return;
+    }
+    for (uint32_t i = 0; i + 1 < Fg::GpuClock::MARKS; ++i) {
+        clock.parts[i].push_back(ticks[i + 1] >= ticks[i] ? static_cast<float>((ticks[i + 1] - ticks[i]) * clock.period_ms)
+                                                           : 0.0f);
+    }
 }
 
 /// After interpolation: the real frame's HUD over every generated frame.
@@ -4343,6 +4632,38 @@ double MedianPeriod(const Fg& fg, double span) {
     return sorted[n / 2];
 }
 
+/// What has come in about frames that reached the display, taken over on the presenting thread:
+/// into the event log, and for the statistics line.
+void TakeShown(Fg& fg) {
+    Fg::Shown& s = fg.shown;
+    constexpr uint32_t RING = Fg::Shown::RING;
+    const uint32_t count = s.count.load(std::memory_order_acquire);
+    if (count - s.read > RING) {
+        s.read = count - RING;
+    }
+    static const float refresh_ms = 1000.0f / EnvFloat("SC_FG_TARGET", 120.0f);
+    for (; s.read != count; ++s.read) {
+        const Fg::Shown::Entry& e = s.ring[s.read % RING];
+        if (e.event && !fg.events.empty() && e.event - 1 + EVENT_COUNT > fg.event_count) {
+            fg.events[(e.event - 1) % EVENT_COUNT].shown_ms = e.delay_ms;
+        }
+        s.delays.push_back(e.delay_ms);
+        if (e.gap_ms > 0.0f) {
+            // Real frames are meant to reach the display one multiplier's worth of refreshes apart.
+            const int refreshes = static_cast<int>(std::lround(e.gap_ms / refresh_ms));
+            const int meant = static_cast<int>(e.multiplier);
+            ++(refreshes == meant ? s.planned : refreshes < meant ? s.closer : refreshes == meant + 1 ? s.later : s.much_later);
+        }
+    }
+    const uint32_t waited = s.waited_count.load(std::memory_order_acquire);
+    if (waited - s.waited_read > RING) {
+        s.waited_read = waited - RING;
+    }
+    for (; s.waited_read != waited; ++s.waited_read) {
+        s.waits.push_back(s.waited_ms[s.waited_read % RING]);
+    }
+}
+
 void Statistics(Device& d, Fg& fg, double now) {
     if (fg.stats_since == 0.0) {
         fg.stats_since = now;
@@ -4354,6 +4675,18 @@ void Statistics(Device& d, Fg& fg, double now) {
     const uint32_t real = fg.real_frames + fg.passed_frames;
     const Spread game = Summarize(fg.game_ms), output = Summarize(fg.output_ms), age = Summarize(fg.age_ms);
     const Spread wait = Summarize(fg.wait_ms);
+    Fg::Shown& screen = fg.shown;
+    const uint32_t reports = static_cast<uint32_t>(screen.delays.size());
+    const Spread on_screen = Summarize(screen.delays), present_wait = Summarize(screen.waits);
+    const Spread sleep_late = Summarize(fg.sleep_late_ms);
+    const Spread generated_on_screen = Summarize(screen.generated_delays);
+    const uint64_t others_read = screen.others_read.load(std::memory_order_relaxed) - screen.others_counted;
+    const Spread real_out = Summarize(fg.real_out_ms);
+    const Spread after_handover = Summarize(fg.done_after_handover_ms), before_hook = Summarize(fg.done_before_hook_ms);
+    Spread parts[Fg::GpuClock::MARKS - 1];
+    for (uint32_t i = 0; i + 1 < Fg::GpuClock::MARKS; ++i) {
+        parts[i] = Summarize(fg.clock.parts[i]);
+    }
     double advance = 0.0, least = 0.0;
     {
         std::lock_guard lock{g_limiter.gate_mutex};
@@ -4374,7 +4707,15 @@ void Statistics(Device& d, Fg& fg, double now) {
         "failed=%u first=%u ms=%.1f ahead=%u late copies=%u lost=%u | "
         "latency calls sleep=%u marker=%u | kept back for the GPU %u ms=%.1f paced=%u | "
         "moving hud frames=%u tiles=%u found=%u pieces=%u over=%u pictures=%u | hud gaps filled=%u cross=%u | "
-        "gpu memory used=%.0f of %.0f MB",
+        "gpu memory used=%.0f of %.0f MB | "
+        "present to display ms p50=%.1f p95=%.1f max=%.1f reports=%u unmatched=%u | "
+        "real frames on the display as planned=%u closer=%u later=%u much later=%u | present wait ms p50=%.1f | boost=%d | "
+        "per call ms: acquire=%.2f present=%.2f | sleeps ended late ms p50=%.2f p99=%.2f max=%.2f | priority=%d | "
+        "generated frames to display ms p50=%.1f p95=%.1f | never on the display real=%u generated=%u | "
+        "frames on the display after 0 refreshes=%u 1=%u 2=%u more=%u | no report here real=%u generated=%u | "
+        "reports read by others=%llu | real frame goes out ms p50=%.1f p95=%.1f | "
+        "game frame done on the GPU: after its hand-over ms p50=%.1f p95=%.1f, before the present hook ms p50=%.1f p95=%.1f | "
+        "fg GPU ms by step: before=%.2f prepare=%.2f flow=%.2f interpolation=%.2f hud=%.2f after=%.2f",
         fg.too_fast ? 1 : fg.generated + 1, real / span, fg.generated_frames / span, (real + fg.generated_frames) / span,
         fg.passed_frames, game.mean, game.p50, game.p95, game.p99, game.max, output.mean, output.p50, output.p95,
         output.p99, output.max, real ? fg.hook_seconds / real * 1000.0 : 0.0, fg.hud_frames, fg.layer_frames, fg.game_inputs, fg.blank_inputs,
@@ -4396,7 +4737,21 @@ fg.tail_seconds * 1000.0,
         g_latency_sleeps.exchange(0), g_latency_markers.exchange(0), lag_waits,
         lag_waits ? g_lag_us.exchange(0) / 1000.0 / lag_waits : 0.0, g_limiter.gpu_paced.load(), fg.markers.frames,
         fg.markers.seen, fg.markers.found, fg.markers.pieces, fg.markers.over, fg.markers.pictures, fg.unmixed_frames,
-        g_cross_captures.exchange(0), memory_used, memory_budget);
+        g_cross_captures.exchange(0), memory_used, memory_budget, on_screen.p50, on_screen.p95, on_screen.max, reports,
+        screen.unmatched.exchange(0), screen.planned, screen.closer, screen.later, screen.much_later, present_wait.p50,
+        fg.boost_on ? 1 : 0, fg.acquires ? fg.acquire_seconds / fg.acquires * 1000.0 : 0.0,
+        fg.present_calls ? fg.present_seconds / fg.present_calls * 1000.0 : 0.0, sleep_late.p50, sleep_late.p99, sleep_late.max,
+        static_cast<int>(g_live_priority.load()), generated_on_screen.p50, generated_on_screen.p95, screen.lost_real,
+        screen.lost_generated, screen.refreshes[0], screen.refreshes[1], screen.refreshes[2], screen.refreshes[3],
+        screen.silent_real, screen.silent_generated, static_cast<unsigned long long>(others_read), real_out.p50,
+        real_out.p95, after_handover.p50, after_handover.p95, before_hook.p50, before_hook.p95,
+        parts[0].p50, parts[1].p50, parts[2].p50, parts[3].p50, parts[4].p50, parts[5].p50);
+    screen.lost_real = screen.lost_generated = screen.silent_real = screen.silent_generated = 0;
+    screen.others_counted += others_read;
+    screen.refreshes[0] = screen.refreshes[1] = screen.refreshes[2] = screen.refreshes[3] = 0;
+    screen.planned = screen.closer = screen.later = screen.much_later = 0;
+    fg.acquire_seconds = fg.present_seconds = 0.0;
+    fg.acquires = fg.present_calls = 0;
     fg.unmixed_frames = 0;
     fg.markers.frames = fg.markers.seen = fg.markers.found = fg.markers.pieces = fg.markers.over = fg.markers.pictures = 0;
     fg.limit_gated = fg.limit_own_frames = fg.guard_waits = fg.guard_timeouts = fg.first_waits = fg.first_ahead = 0;
@@ -4664,6 +5019,245 @@ void WritePanelDump(Fg& fg, const char* what, int half) {
              static_cast<uint32_t>(panel.dump_height), false);
 }
 
+uint64_t PresentIdOf(const VkPresentInfoKHR& info);
+
+#ifdef VK_EXT_present_timing
+bool CalibrateShown(Device& d, Fg& fg, const VkPastPresentationTimingEXT& timing, uint32_t stage, double now);
+
+/// A frame's request to be told when it reaches the display: goes into its present's chain.
+struct OwnTiming {
+    VkPresentTimingInfoEXT one{VK_STRUCTURE_TYPE_PRESENT_TIMING_INFO_EXT};
+    VkPresentTimingsInfoEXT all{VK_STRUCTURE_TYPE_PRESENT_TIMINGS_INFO_EXT};
+    VkPresentId2KHR ids{VK_STRUCTURE_TYPE_PRESENT_ID_2_KHR};
+    uint64_t id{};
+};
+
+/// Whether this layer can ask (the swapchain was made for it, which vkd3d-proton does): the first
+/// time, the stage nearest the display that this surface can report and the clock to report it in.
+bool PrepareOwnTiming(Device& d, Fg& fg) {
+    Fg::Shown& s = fg.shown;
+    if (s.own_state) {
+        return s.own_state > 0;
+    }
+    s.own_state = -1;
+    PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR capabilities_of = nullptr;
+    if (d.instance) {
+        capabilities_of = reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceCapabilities2KHR>(
+            d.instance->gipa(d.instance->handle, "vkGetPhysicalDeviceSurfaceCapabilities2KHR"));
+    }
+    if (!(fg.create_flags & VK_SWAPCHAIN_CREATE_PRESENT_TIMING_BIT_EXT) ||
+        !(fg.create_flags & VK_SWAPCHAIN_CREATE_PRESENT_ID_2_BIT_KHR) || !capabilities_of || !fg.surface ||
+        !d.GetPastPresentationTimingEXT || !d.GetSwapchainTimeDomainPropertiesEXT || !d.SetSwapchainPresentTimingQueueSizeEXT) {
+        Log("fg: this swapchain cannot report when frames reach the display (flags 0x%x)", fg.create_flags);
+        return false;
+    }
+    VkPresentTimingSurfaceCapabilitiesEXT timing{VK_STRUCTURE_TYPE_PRESENT_TIMING_SURFACE_CAPABILITIES_EXT};
+    VkSurfaceCapabilities2KHR capabilities{VK_STRUCTURE_TYPE_SURFACE_CAPABILITIES_2_KHR, &timing};
+    VkPhysicalDeviceSurfaceInfo2KHR surface{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SURFACE_INFO_2_KHR};
+    surface.surface = fg.surface;
+    if (capabilities_of(d.physical, &surface, &capabilities) != VK_SUCCESS || !timing.presentTimingSupported) {
+        Log("fg: this display cannot report when frames reach it");
+        return false;
+    }
+    for (uint32_t bit = VK_PRESENT_STAGE_IMAGE_FIRST_PIXEL_VISIBLE_BIT_EXT; bit && !s.own_stage; bit >>= 1) {
+        s.own_stage = timing.presentStageQueries & bit;
+    }
+    VkTimeDomainKHR domains[8];
+    uint64_t ids[8], counter = 0;
+    VkSwapchainTimeDomainPropertiesEXT properties{VK_STRUCTURE_TYPE_SWAPCHAIN_TIME_DOMAIN_PROPERTIES_EXT};
+    properties.timeDomainCount = 8;
+    properties.pTimeDomains = domains;
+    properties.pTimeDomainIds = ids;
+    bool found = false;
+    if (s.own_stage && d.GetSwapchainTimeDomainPropertiesEXT(d.handle, fg.swapchain, &properties, &counter) >= 0) {
+        for (uint32_t i = 0; i < properties.timeDomainCount && !found; ++i) {
+            if (domains[i] == VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL_EXT) {
+                s.own_domain = ids[i];
+                found = true;
+            }
+        }
+    }
+    if (!found || d.SetSwapchainPresentTimingQueueSizeEXT(d.handle, fg.swapchain, 2 * Fg::Shown::MINE_MOST) != VK_SUCCESS) {
+        Log("fg: no clock to have the display's reports in (stage 0x%x)", s.own_stage);
+        return false;
+    }
+    s.own_state = 1;
+    s.fates.resize(Fg::Shown::FATES);
+    s.own_active.store(true, std::memory_order_relaxed);
+    Log("fg: every frame sent out asks when it reaches the display (stage 0x%x)", s.own_stage);
+    return true;
+}
+
+/// Into the chain of a present, in front of `next`. False: not this one (too many unanswered).
+bool RequestTiming(Fg& fg, OwnTiming& own, const void* next, bool real) {
+    Fg::Shown& s = fg.shown;
+    // A request holds a place in the driver's queue until someone has read its report.
+    const uint64_t answered = s.own_reports + s.others_read.load(std::memory_order_relaxed);
+    if (g_own_timing_failed.load() || s.mine_sent - s.mine_read >= Fg::Shown::MINE - 1 ||
+        (s.mine_sent > answered && s.mine_sent - answered >= Fg::Shown::MINE_MOST)) {
+        return false;
+    }
+    own.one.timeDomainId = s.own_domain;
+    own.one.presentStageQueries = s.own_stage;
+    own.all.swapchainCount = 1;
+    own.all.pTimingInfos = &own.one;
+    own.all.pNext = next;
+    own.id = real && s.own_real >= Fg::Shown::IDS_AFTER ? s.own_real - Fg::Shown::IDS_AFTER + 1 : 0;
+    if (own.id) {
+        s.own_last_id.store(own.id, std::memory_order_relaxed);
+        own.ids.pNext = next;
+        own.ids.swapchainCount = 1;
+        own.ids.pPresentIds = &own.id;
+        own.all.pNext = &own.ids;
+    }
+    return true;
+}
+
+/// It has gone out, at `time`.
+void NoteRequested(Fg& fg, const OwnTiming& own, VkResult result, double time, uint32_t multiplier, bool real, double call,
+                   uint32_t position) {
+    Fg::Shown& s = fg.shown;
+    if (result < 0) {
+        // (A window that changes size says "out of date": nothing to do with the request.)
+        if (result != VK_ERROR_OUT_OF_DATE_KHR && result != VK_ERROR_SURFACE_LOST_KHR && !g_own_timing_failed.exchange(true)) {
+            Log("fg: a present that asked for its time failed (%d): no more such requests", result);
+        }
+        return;
+    }
+    s.own_real += real;
+    s.mine[s.mine_sent++ % Fg::Shown::MINE] = {time, fg.events.empty() ? 0 : fg.event_count + 1, own.id, s.own_real, multiplier, real,
+                                             static_cast<float>(call * 1000.0), static_cast<uint8_t>(position)};
+}
+
+void NoteFate(Fg::Shown& s, const Fg::Shown::Mine& frame, double shown, uint8_t flags) {
+    if (!s.fates.empty()) {
+        s.fates[s.fate_count++ % Fg::Shown::FATES] = {frame.time, shown, frame.call_ms, static_cast<uint8_t>(flags | (frame.real ? 1 : 0)),
+                                                      frame.position, static_cast<uint8_t>(frame.multiplier), 0};
+    }
+}
+
+/// What the display has reported about the frames sent out.
+void TakeOwnTimings(Device& d, Fg& fg) {
+    Fg::Shown& s = fg.shown;
+    if (s.own_state <= 0 || s.mine_read == s.mine_sent) {
+        return;
+    }
+    const double now = Now();
+    const auto silent = [&](const Fg::Shown::Mine& frame) {
+        ++(frame.real ? s.silent_real : s.silent_generated);
+        NoteFate(s, frame, 0.0, 4);
+    };
+    // No report will come for these any more: someone else has had it.
+    while (s.mine_read != s.mine_sent && now - s.mine[s.mine_read % Fg::Shown::MINE].time > 2.0) {
+        silent(s.mine[s.mine_read++ % Fg::Shown::MINE]);
+    }
+    constexpr uint32_t MOST = 32;
+    VkPastPresentationTimingEXT timings[MOST];
+    VkPresentStageTimeEXT stages[MOST];
+    for (uint32_t i = 0; i < MOST; ++i) {
+        timings[i] = {VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_EXT};
+        timings[i].presentStageCount = 1;
+        timings[i].pPresentStages = &stages[i];
+    }
+    VkPastPresentationTimingInfoEXT info{VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_INFO_EXT};
+    info.swapchain = fg.swapchain;
+    VkPastPresentationTimingPropertiesEXT properties{VK_STRUCTURE_TYPE_PAST_PRESENTATION_TIMING_PROPERTIES_EXT};
+    properties.presentationTimingCount = MOST;
+    properties.pPresentationTimings = timings;
+    if (d.GetPastPresentationTimingEXT(d.handle, &info, &properties) < 0) {
+        return;
+    }
+    static const double refresh = 1.0 / EnvFloat("SC_FG_TARGET", 120.0f);
+    const auto lost = [&](const Fg::Shown::Mine& frame) {
+        ++(frame.real ? s.lost_real : s.lost_generated);
+        NoteFate(s, frame, 0.0, 2);
+    };
+    for (uint32_t i = 0; i < properties.presentationTimingCount; ++i) {
+        const VkPastPresentationTimingEXT& timing = timings[i];
+        if (!timing.reportComplete) {
+            continue;
+        }
+        ++s.own_reports;
+        // Whether it reached the display, and how long after the frame before: whichever frame it is.
+        const bool on_display = timing.presentStageCount && stages[i].time;
+        double shown = 0.0;
+        if (on_display) {
+            const bool clock = CalibrateShown(d, fg, timing, stages[i].stage, now);
+            if (!s.said) {
+                s.said = true;
+                Log("fg: the display reports when frames reach it (stage 0x%x, time domain %d, its clock %s)", stages[i].stage,
+                    static_cast<int>(timing.timeDomain), clock ? "compared with this layer's" : "not comparable: taken as the report's arrival");
+            }
+            shown = clock ? static_cast<double>(stages[i].time) * 1e-9 + s.offset : now;
+            if (s.last_any > 0.0) {
+                ++s.refreshes[std::clamp<long>(std::lround((shown - s.last_any) / refresh), 0, 3)];
+            }
+            s.last_any = shown;
+        }
+        // The frame it is about: the next one with its id. A report that fits none changes nothing;
+        // frames passed over on the way to the right one had their reports go elsewhere.
+        uint64_t at = s.mine_read;
+        while (at != s.mine_sent && s.mine[at % Fg::Shown::MINE].id != timing.presentId) {
+            ++at;
+        }
+        if (at == s.mine_sent) {
+            s.unmatched.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+        for (; s.mine_read != at; ++s.mine_read) {
+            silent(s.mine[s.mine_read % Fg::Shown::MINE]);
+        }
+        const Fg::Shown::Mine* frame = &s.mine[s.mine_read++ % Fg::Shown::MINE];
+        if (!on_display) {
+            lost(*frame);
+            continue;
+        }
+        if (shown < frame->time - 0.001 || shown > frame->time + 1.0) {
+            s.unmatched.fetch_add(1, std::memory_order_relaxed);
+            NoteFate(s, *frame, shown, 8);
+            continue;
+        }
+        NoteFate(s, *frame, shown, 0);
+        const auto delay = static_cast<float>((shown - frame->time) * 1000.0);
+        if (!frame->real) {
+            s.generated_delays.push_back(delay);
+            continue;
+        }
+        const uint32_t count = s.count.load(std::memory_order_relaxed);
+        Fg::Shown::Entry& entry = s.ring[count % Fg::Shown::RING];
+        entry.event = frame->event;
+        entry.delay_ms = delay;
+        entry.gap_ms = s.last_serial + 1 == frame->serial ? static_cast<float>((shown - s.last_shown) * 1000.0) : 0.0f;
+        entry.multiplier = frame->multiplier;
+        s.count.store(count + 1, std::memory_order_release);
+        s.last_serial = frame->serial;
+        s.last_shown = shown;
+    }
+}
+
+/// Whether this layer asks for the times of this present's frames: where it is switched on and the
+/// game's own present neither has an id nor asks (then vkd3d-proton is reading them itself).
+bool WantOwnTiming(Device& d, Fg& fg, const VkPresentInfoKHR& info) {
+    if (g_live_timing.load() == 0.0f || g_own_timing_failed.load() || PresentIdOf(info)) {
+        return false;
+    }
+    for (auto* next = static_cast<const VkBaseInStructure*>(info.pNext); next; next = next->pNext) {
+        if (next->sType == VK_STRUCTURE_TYPE_PRESENT_TIMINGS_INFO_EXT) {
+            return false;
+        }
+    }
+    return PrepareOwnTiming(d, fg);
+}
+#else
+struct OwnTiming {
+    VkBaseInStructure all{};
+};
+inline bool RequestTiming(Fg&, OwnTiming&, const void*, bool) { return false; }
+inline void NoteRequested(Fg&, const OwnTiming&, VkResult, double, uint32_t, bool, double, uint32_t) {}
+inline void TakeOwnTimings(Device&, Fg&) {}
+inline bool WantOwnTiming(Device&, Fg&, const VkPresentInfoKHR&) { return false; }
+#endif
+
 /// The game presents image `index`. Returns false when the frame must simply pass through.
 bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresentInfoKHR& info,
               VkResult& result) {
@@ -4930,8 +5524,8 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
             // for them is accepted, 15 % of a frame; not to hold the game back, 7 %.)
             const double needed = fg.ready_seconds + fg.tail_seconds + (current - 1) * refresh + 0.0005;
             const double room = probed ? std::max(1.0 / rate, current * refresh) : current * refresh;
-            const bool no_room = !fg.too_fast && current > 2 && high >= current && fg.ready_seconds > 0.0 && fg.binding &&
-                                 needed > room * (fill ? 1.15 : 1.0 / 0.93);
+            const bool no_room = !fg.too_fast && current > 2 && high >= current &&
+                                 fg.ready_seconds > 0.0 && fg.binding && needed > room * (fill ? 1.15 : 1.0 / 0.93);
             if (no_room) {
                 high = std::min(high, current - 1);
             } else if (now < fg.room_until) {
@@ -5154,6 +5748,15 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
             fg.multi_frames += event.hud_captures > 1 || event.evaluations > 1;
         }
         event.handover_ms = static_cast<float>((now - link.frame.time) * 1000.0);
+        // The frame before this one: when the GPU was done with its hand-over's copy (by now it is).
+        if (fg.done_frame && g_done_watch->frame[fg.done_frame % 64].load() == fg.done_frame) {
+            const double done = g_done_watch->time[fg.done_frame % 64].load();
+            fg.done_after_handover_ms.push_back(static_cast<float>((done - fg.done_handover) * 1000.0));
+            fg.done_before_hook_ms.push_back(static_cast<float>((fg.done_hook - done) * 1000.0));
+        }
+        fg.done_frame = g_live_timing.load() != 0.0f && !link.duplicate ? link.frame.number : 0;
+        fg.done_handover = link.frame.time;
+        fg.done_hook = now;
         const double waited_for_hook = now - link.frame.time;
         // (From a small beginning: the very first frames wait for much that has nothing to do with it,
         // and a hook that takes that for the usual way does not hurry when frames are waiting.)
@@ -5210,6 +5813,9 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
         set.pending = false;
     }
     Stage(3);
+    if (fg.clock.written[set_number]) {
+        TakeGpuClock(d, fg, set_number);
+    }
     if (fg.markers.counted[set_number]) { // what this set's passes for moving HUD content counted
         const auto* counts = static_cast<const uint32_t*>(fg.markers.counts[set_number].data);
         ++fg.markers.frames;
@@ -5347,6 +5953,18 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
     VkCommandBuffer cmd = set.main;
     d.ResetCommandBuffer(cmd, 0);
     d.BeginCommandBuffer(cmd, &begin);
+    // This layer's GPU time by step (timing=1; frames interpolated in one command buffer only).
+    const bool clocked = g_live_timing.load() != 0.0f && !reset && PrepareGpuClock(d, fg);
+    const auto mark = [&](uint32_t which) {
+        if (clocked) {
+            d.CmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, fg.clock.pool,
+                                set_number * Fg::GpuClock::MARKS + which);
+        }
+    };
+    if (clocked) {
+        d.CmdResetQueryPool(cmd, fg.clock.pool, set_number * Fg::GpuClock::MARKS, Fg::GpuClock::MARKS);
+    }
+    mark(0);
     ToGeneral(d, cmd, fg.backbuffer);
     for (uint32_t i = 0; i < MAX_GENERATED; ++i) {
         ToGeneral(d, cmd, fg.outputs[i]);
@@ -5393,6 +6011,13 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
         d.CmdClearColorImage(cmd, fg.test_layer.image, VK_IMAGE_LAYOUT_GENERAL, &half, 1, &range);
     }
 
+    // The frame time the frames are spread over: the game's, as measured. But a frame the limiter
+    // held back came when this hook's predecessor let it (the gate): there the measured frame
+    // time is the hooks' own doing, and spreading the frames over it would keep it as long as it
+    // happens to be. Such a frame gets what the display has room for.
+    const bool held = link.chained && link.frame.slept_ms > 1.0f && g_live_gate.load() != 0.0f && cap && !fg.no_cap;
+    const double period = held ? (fg.generated + 1) * refresh : fg.period < 0.1 ? fg.period : 0.1;
+    const double step = fg.period > 0.0 ? period / (fg.generated + 1) : 0.0;
     bool hud_ran = false;
     Image* const game_vectors = vectors;
     bool checked = false;
@@ -5498,10 +6123,14 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
     dispatch.dilatedMotionVectors = prepare.dilatedMotionVectors;
     dispatch.reconstructedPrevDepth = prepare.reconstructedPrevDepth;
 
-    const bool ffx_ok =
-        CheckFfx(ffxFrameInterpolationPrepare(&fg.interpolation, &prepare), "prepare") &&
-        CheckFfx(ffxOpticalflowContextDispatch(&fg.optical_flow, &flow), "optical flow") &&
-        CheckFfx(ffxFrameInterpolationDispatch(&fg.interpolation, &dispatch), "interpolation");
+    bool ffx_ok = true;
+    mark(1);
+    ffx_ok = CheckFfx(ffxFrameInterpolationPrepare(&fg.interpolation, &prepare), "prepare");
+    mark(2);
+    ffx_ok = ffx_ok && CheckFfx(ffxOpticalflowContextDispatch(&fg.optical_flow, &flow), "optical flow");
+    mark(3);
+    ffx_ok = ffx_ok && CheckFfx(ffxFrameInterpolationDispatch(&fg.interpolation, &dispatch), "interpolation");
+    mark(4);
     if (hud_ran && fg.hud.ok && ffx_ok) {
         RecordHudComposite(d, fg, set, cmd);
     }
@@ -5510,6 +6139,7 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
         markers_ran = moving && RecordMarkers(d, fg, set, set_number, cmd, *hud_layer, *layer_before);
         RecordLayerComposite(d, fg, set, cmd, *hud_scene, *hud_layer, markers_ran ? layer_before : nullptr, scene_before);
     }
+    mark(5);
     if (measure) {
         VkBufferImageCopy full{};
         full.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
@@ -5596,6 +6226,8 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
             RecordPanelDump(d, fg, cmd, fg.backbuffer.image, 1);
         }
     }
+    mark(6);
+    fg.clock.written[set_number] = clocked;
     d.EndCommandBuffer(cmd);
 
     // Submitted in the place of the game's present: it waits for what the present waited for.
@@ -5657,29 +6289,22 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
     // the game's frame time divided by the multiplier. The wait happens here, in the game's
     // present call.
     static const bool pace = EnvFloat("SC_FG_PACE", 1.0f) != 0.0f;
-    // The frame time the frames are spread over: the game's, as measured. But a frame the limiter
-    // held back came when this hook's predecessor let it (the gate): there the measured frame
-    // time is the hooks' own doing, and spreading the frames over it would keep it as long as it
-    // happens to be. Such a frame gets what the display has room for.
-    const bool held = link.chained && link.frame.slept_ms > 1.0f && g_live_gate.load() != 0.0f && cap && !fg.no_cap;
-    const double period = held ? (fg.generated + 1) * refresh : fg.period < 0.1 ? fg.period : 0.1;
-    const double step = fg.period > 0.0 ? period / (fg.generated + 1) : 0.0;
     // The generated frames go out from now on, the real one last, at `end`: one step apart when
     // there is time for that. The real frame has to be out before the next one comes, or frames
     // queue up behind this hook and the presents hold the game again: so not later than a frame
     // time after this hook began (less what follows the last present), and, once the next frame
     // has been handed over, not later than it gets here.
-    double out = Now();
-    double end = out + step * fg.generated;
-    if (waited) {
-        end = std::min(end, now + period - fg.tail_seconds - 0.0005);
-    }
     // No more frames than the display shows (SC_FG_TARGET a second): what goes out faster is dropped
     // by the compositor at uneven moments, which is seen as judder in every pan. Where the frames
     // are handed over between devices the limiter sees to that on the game's side, and this is
     // only a net under it for frames that arrive bunched. Without a hand-over (one device) this
     // is the limit itself; holding frames here then also holds the game.
     const double min_gap = !cap ? 0.0 : link.chained ? 0.97 / (target * 0.999) : 0.985 / target;
+    double out = Now();
+    double end = out + step * fg.generated;
+    if (waited) {
+        end = std::min(end, now + period - fg.tail_seconds - 0.0005);
+    }
     if (link.chained) {
         // For the limiter's gate: when this hook returns, and what a hook like it takes when it
         // hurries. The frames are not sent closer together than `min_gap`, whatever `end` says.
@@ -5710,7 +6335,9 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
         if (out > before) {
             Stage(5);
             std::this_thread::sleep_for(std::chrono::duration<double>(out - before));
-            fg.paced += Now() - before;
+            const double woke = Now();
+            fg.paced += woke - before;
+            fg.sleep_late_ms.push_back(static_cast<float>((woke - out) * 1000.0));
         }
     };
     const auto hold = [&] {
@@ -5720,70 +6347,112 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
             std::this_thread::sleep_for(std::chrono::duration<double>(due - t));
             ++fg.held;
             ++fg.window_held;
-            fg.paced += Now() - t;
+            const double woke = Now();
+            fg.paced += woke - t;
+            fg.sleep_late_ms.push_back(static_cast<float>((woke - due) * 1000.0));
         }
         ++fg.window_out;
         fg.last_out = Now();
     };
+    const bool own_timing = WantOwnTiming(d, fg, info);
+    const uint32_t shown_multiplier = fg.too_fast ? 1 : fg.generated + 1;
+    // The game's frame, now waiting for this layer's work in place of the game's semaphores.
+    const auto send_real = [&] {
+        VkPresentInfoKHR real = info;
+        real.waitSemaphoreCount = 1;
+        real.pWaitSemaphores = &fg.real_ready;
+        OwnTiming own_real;
+        const bool real_asks = own_timing && RequestTiming(fg, own_real, info.pNext, true);
+        if (real_asks) {
+            real.pNext = &own_real.all;
+        }
+        hold();
+        NoteOutput(fg);
+        Stage(7);
+        fg.real_sent = fg.last_out;
+        fg.real_out_ms.push_back(static_cast<float>((fg.last_out - now) * 1000.0));
+        const double before_present = Now();
+        result = d.QueuePresentKHR(queue, &real);
+        const double present_call = Now() - before_present;
+        fg.present_seconds += present_call;
+        ++fg.present_calls;
+        if (real_asks) {
+            NoteRequested(fg, own_real, result, fg.last_out, shown_multiplier, true, present_call, presented);
+        }
+    };
+    // A generated frame goes out. False: there is no swapchain image for it.
+    const VkImageCopy copy = WholeCopy(w, h);
+    const auto send_generated = [&](uint32_t i) {
+        uint32_t extra = 0;
+        Stage(4);
+        const double before_acquire = Now();
+        const VkResult acquire = d.AcquireNextImageKHR(d.handle, fg.swapchain, 100'000'000ull,
+                                                       fg.acquired[i], VK_NULL_HANDLE, &extra);
+        fg.acquire_seconds += Now() - before_acquire;
+        ++fg.acquires;
+        if (acquire != VK_SUCCESS && acquire != VK_SUBOPTIMAL_KHR) {
+            if (fg.frame_id % 600 == 0) {
+                Log("fg: no swapchain image for a generated frame (%d)", acquire);
+            }
+            return false;
+        }
+        VkCommandBuffer blit = set.blit[i];
+        d.ResetCommandBuffer(blit, 0);
+        d.BeginCommandBuffer(blit, &begin);
+        ImageBarrier(d, blit, fg.images[extra], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        d.CmdCopyImage(blit, fg.outputs[i].image, VK_IMAGE_LAYOUT_GENERAL, fg.images[extra],
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
+        ImageBarrier(d, blit, fg.images[extra], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+        d.EndCommandBuffer(blit);
+        const VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+        VkSubmitInfo blit_submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        blit_submit.waitSemaphoreCount = 1;
+        blit_submit.pWaitSemaphores = &fg.acquired[i];
+        blit_submit.pWaitDstStageMask = &stage;
+        blit_submit.commandBufferCount = 1;
+        blit_submit.pCommandBuffers = &blit;
+        blit_submit.signalSemaphoreCount = 1;
+        blit_submit.pSignalSemaphores = &fg.blitted[i];
+        d.QueueSubmit(queue, 1, &blit_submit, VK_NULL_HANDLE);
+        VkPresentInfoKHR extra_present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
+        extra_present.waitSemaphoreCount = 1;
+        extra_present.pWaitSemaphores = &fg.blitted[i];
+        extra_present.swapchainCount = 1;
+        extra_present.pSwapchains = &fg.swapchain;
+        extra_present.pImageIndices = &extra;
+        OwnTiming own;
+        const bool asks = own_timing && RequestTiming(fg, own, nullptr, false);
+        if (asks) {
+            extra_present.pNext = &own.all;
+        }
+        hold();
+        NoteOutput(fg);
+        Stage(6);
+        const double before_present = Now();
+        const VkResult sent = d.QueuePresentKHR(queue, &extra_present);
+        const double present_call = Now() - before_present;
+        fg.present_seconds += present_call;
+        ++fg.present_calls;
+        if (asks) {
+            NoteRequested(fg, own, sent, fg.last_out, shown_multiplier, false, present_call, i);
+        }
+        ++presented;
+        return true;
+    };
     if (ffx_ok && !reset) {
-        const VkImageCopy copy = WholeCopy(w, h);
         for (uint32_t i = 0; i < fg.generated; ++i) {
             if (i) {
                 wait_for(fg.generated - i + 1);
             }
-            uint32_t extra = 0;
-            Stage(4);
-            const VkResult acquire = d.AcquireNextImageKHR(d.handle, fg.swapchain, 100'000'000ull,
-                                                           fg.acquired[i], VK_NULL_HANDLE, &extra);
-            if (acquire != VK_SUCCESS && acquire != VK_SUBOPTIMAL_KHR) {
-                if (fg.frame_id % 600 == 0) {
-                    Log("fg: no swapchain image for a generated frame (%d)", acquire);
-                }
+            if (!send_generated(i)) {
                 break;
             }
-            VkCommandBuffer blit = set.blit[i];
-            d.ResetCommandBuffer(blit, 0);
-            d.BeginCommandBuffer(blit, &begin);
-            ImageBarrier(d, blit, fg.images[extra], VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-            d.CmdCopyImage(blit, fg.outputs[i].image, VK_IMAGE_LAYOUT_GENERAL, fg.images[extra],
-                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
-            ImageBarrier(d, blit, fg.images[extra], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
-            d.EndCommandBuffer(blit);
-            const VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
-            VkSubmitInfo blit_submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-            blit_submit.waitSemaphoreCount = 1;
-            blit_submit.pWaitSemaphores = &fg.acquired[i];
-            blit_submit.pWaitDstStageMask = &stage;
-            blit_submit.commandBufferCount = 1;
-            blit_submit.pCommandBuffers = &blit;
-            blit_submit.signalSemaphoreCount = 1;
-            blit_submit.pSignalSemaphores = &fg.blitted[i];
-            d.QueueSubmit(queue, 1, &blit_submit, VK_NULL_HANDLE);
-            VkPresentInfoKHR extra_present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
-            extra_present.waitSemaphoreCount = 1;
-            extra_present.pWaitSemaphores = &fg.blitted[i];
-            extra_present.swapchainCount = 1;
-            extra_present.pSwapchains = &fg.swapchain;
-            extra_present.pImageIndices = &extra;
-            hold();
-            NoteOutput(fg);
-            Stage(6);
-            d.QueuePresentKHR(queue, &extra_present);
-            ++presented;
         }
     }
-
-    // The game's frame, now waiting for this layer's work in place of the game's semaphores.
     if (presented || keep_cadence) {
         wait_for(1);
     }
-    VkPresentInfoKHR real = info;
-    real.waitSemaphoreCount = 1;
-    real.pWaitSemaphores = &fg.real_ready;
-    hold();
-    NoteOutput(fg);
-    Stage(7);
-    result = d.QueuePresentKHR(queue, &real);
+    send_real();
 
     if (measure) {
         fg.measure_set = set_number;
@@ -6098,10 +6767,27 @@ VKAPI_ATTR void VKAPI_CALL HookCmdCuLaunchKernelNVX(VkCommandBuffer cmd, const V
 // VK_NV_low_latency2 (Reflex): passed on untouched and counted. Whether and where the game asks for
 // its latency sleep says where a limiter could hold it without a frame of delay: before it reads
 // its input, not after the frame is drawn.
+Fg* FindFg(Device& d, VkSwapchainKHR swapchain) {
+    std::lock_guard lock{d.fg_mutex};
+    const auto it = d.swapchains.find(U64(swapchain));
+    return it == d.swapchains.end() ? nullptr : it->second;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL HookSetLatencySleepModeNV(VkDevice device, VkSwapchainKHR swapchain,
                                                          const VkLatencySleepModeInfoNV* info) {
     IN_HOOK("LatencySleepMode");
     Device* d = GetDevice(Key(device));
+    // (What is asked for stays as it is, with the GPU's boost added where that is switched on.)
+    VkLatencySleepModeInfoNV changed{VK_STRUCTURE_TYPE_LATENCY_SLEEP_MODE_INFO_NV};
+    if (info) {
+        changed = *info;
+        if (Fg* fg = FindFg(*d, swapchain)) {
+            fg->sleep_mode = *info;
+            fg->sleep_mode.pNext = nullptr;
+            fg->latency_swapchain = true;
+            changed.lowLatencyBoost |= fg->boost_on ? VK_TRUE : VK_FALSE;
+        }
+    }
     static std::atomic<uint32_t> logged{};
     if (logged.fetch_add(1) < 16) {
         if (info) {
@@ -6112,7 +6798,266 @@ VKAPI_ATTR VkResult VKAPI_CALL HookSetLatencySleepModeNV(VkDevice device, VkSwap
             Log("low latency: sleep mode reset on device %u", d->index);
         }
     }
-    return d->SetLatencySleepModeNV(device, swapchain, info);
+    return d->SetLatencySleepModeNV(device, swapchain, info ? &changed : nullptr);
+}
+
+/// The boost switched on or off (PARAMS: boost): the GPU keeps its speed up, whatever the game's
+/// load. It needs nothing of the game: without low-latency mode the boost is still a hint to the
+/// GPU, and that mode stays as vkd3d-proton has it.
+void ApplyBoost(Device& d, Fg& fg) {
+    const bool boost = g_live_boost.load() != 0.0f;
+    if (boost == fg.boost_on || !fg.latency_swapchain || !d.SetLatencySleepModeNV) {
+        return;
+    }
+    fg.boost_on = boost;
+    VkLatencySleepModeInfoNV mode = fg.sleep_mode;
+    mode.lowLatencyBoost = boost || fg.sleep_mode.lowLatencyBoost ? VK_TRUE : VK_FALSE;
+    const VkResult result = d.SetLatencySleepModeNV(d.handle, fg.swapchain, &mode);
+    Log("fg: the GPU's boost is %s (result %d)", boost ? "on" : "off", result);
+}
+
+/// The priority of the thread that presents (PARAMS: priority), set on that thread as it comes by.
+void ApplyPriority() {
+    static thread_local int applied = 0, before = 0;
+    const int wanted = std::clamp(static_cast<int>(g_live_priority.load()), 0, 20);
+    if (wanted == applied) {
+        return;
+    }
+    const auto thread = static_cast<id_t>(syscall(SYS_gettid));
+    if (!applied) {
+        errno = 0;
+        const int now = getpriority(PRIO_PROCESS, thread);
+        before = errno ? 0 : now;
+    }
+    applied = wanted;
+    const int nice_value = wanted ? -wanted : before;
+    const int result = setpriority(PRIO_PROCESS, thread, nice_value);
+    Log("fg: the presenting thread's nice value is now %d%s%s", result ? getpriority(PRIO_PROCESS, thread) : nice_value,
+        result ? ": not allowed, " : "", result ? std::strerror(errno) : "");
+}
+
+/// The present id of a present (vkd3d-proton gives every frame of the game one); 0: none.
+uint64_t PresentIdOf(const VkPresentInfoKHR& info) {
+    for (auto* next = static_cast<const VkBaseInStructure*>(info.pNext); next; next = next->pNext) {
+#ifdef VK_KHR_present_id2
+        if (next->sType == VK_STRUCTURE_TYPE_PRESENT_ID_2_KHR) {
+            const auto* ids = reinterpret_cast<const VkPresentId2KHR*>(next);
+            return ids->swapchainCount && ids->pPresentIds ? ids->pPresentIds[0] : 0;
+        }
+#endif
+        if (next->sType == VK_STRUCTURE_TYPE_PRESENT_ID_KHR) {
+            const auto* ids = reinterpret_cast<const VkPresentIdKHR*>(next);
+            return ids->swapchainCount && ids->pPresentIds ? ids->pPresentIds[0] : 0;
+        }
+    }
+    return 0;
+}
+
+/// The game's frame has gone to the display at `time`: for when word of it comes back.
+void NoteSent(Fg& fg, const VkPresentInfoKHR& info, double time, uint32_t multiplier) {
+    const uint64_t id = PresentIdOf(info);
+    if (!id) {
+        return;
+    }
+    Fg::Shown::Sent& sent = fg.shown.sent[id % Fg::Shown::SENT];
+    sent.id.store(0, std::memory_order_relaxed);
+    sent.time.store(time, std::memory_order_relaxed);
+    sent.multiplier.store(multiplier, std::memory_order_relaxed);
+    sent.event.store(fg.events.empty() ? 0 : fg.event_count, std::memory_order_relaxed);
+    sent.id.store(id, std::memory_order_release);
+}
+
+bool FindSent(Fg& fg, uint64_t id, double& time, uint64_t& event, uint32_t& multiplier) {
+    const Fg::Shown::Sent& sent = fg.shown.sent[id % Fg::Shown::SENT];
+    if (!id || sent.id.load(std::memory_order_acquire) != id) {
+        return false;
+    }
+    time = sent.time.load(std::memory_order_relaxed);
+    event = sent.event.load(std::memory_order_relaxed);
+    multiplier = sent.multiplier.load(std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_acquire);
+    return sent.id.load(std::memory_order_relaxed) == id;
+}
+
+/// A wait for a present has ended: the frame has been shown, or nearly. The report of the moment
+/// itself (below) is the better figure; this one is there when the driver gives none.
+void NoteWaited(Device& d, VkSwapchainKHR swapchain, uint64_t id) {
+    Fg* fg = FindFg(d, swapchain);
+    double time = 0.0;
+    uint64_t event = 0;
+    uint32_t multiplier = 0;
+    if (!fg || !FindSent(*fg, id, time, event, multiplier)) {
+        return;
+    }
+    Fg::Shown& s = fg->shown;
+    const uint32_t count = s.waited_count.load(std::memory_order_relaxed);
+    s.waited_ms[count % Fg::Shown::RING] = static_cast<float>((Now() - time) * 1000.0);
+    s.waited_count.store(count + 1, std::memory_order_release);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL HookWaitForPresentKHR(VkDevice device, VkSwapchainKHR swapchain, uint64_t id,
+                                                     uint64_t timeout) {
+    IN_HOOK("WaitForPresent");
+    Device* d = GetDevice(Key(device));
+    const VkResult result = d->WaitForPresentKHR(device, swapchain, id, timeout);
+    if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) {
+        NoteWaited(*d, swapchain, id);
+    }
+    return result;
+}
+
+#ifdef VK_EXT_present_timing
+VKAPI_ATTR VkResult VKAPI_CALL HookWaitForPresent2KHR(VkDevice device, VkSwapchainKHR swapchain,
+                                                      const VkPresentWait2InfoKHR* info) {
+    IN_HOOK("WaitForPresent2");
+    Device* d = GetDevice(Key(device));
+    const VkResult result = d->WaitForPresent2KHR(device, swapchain, info);
+    if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR) {
+        NoteWaited(*d, swapchain, info->presentId);
+    }
+    return result;
+}
+
+/// The display's clock against Now(), asked for now and then. A single reading of its clock
+/// between two of ours does: the two readings are a few microseconds apart, or it is tried again.
+bool CalibrateShown(Device& d, Fg& fg, const VkPastPresentationTimingEXT& timing, uint32_t stage, double now) {
+    Fg::Shown& s = fg.shown;
+    const int domain = static_cast<int>(timing.timeDomain);
+    if (s.domain == domain && s.domain_id == timing.timeDomainId && s.stage == stage && now - s.calibrated < 5.0) {
+        return s.clock_ok;
+    }
+    s.domain = domain;
+    s.domain_id = timing.timeDomainId;
+    s.stage = stage;
+    s.calibrated = now;
+    s.clock_ok = false;
+    if (!d.GetCalibratedTimestampsKHR) {
+        return false;
+    }
+    VkSwapchainCalibratedTimestampInfoEXT local{VK_STRUCTURE_TYPE_SWAPCHAIN_CALIBRATED_TIMESTAMP_INFO_EXT};
+    local.swapchain = fg.swapchain;
+    local.presentStage = stage;
+    local.timeDomainId = timing.timeDomainId;
+    VkCalibratedTimestampInfoKHR info{VK_STRUCTURE_TYPE_CALIBRATED_TIMESTAMP_INFO_KHR};
+    info.timeDomain = timing.timeDomain;
+    if (timing.timeDomain == VK_TIME_DOMAIN_PRESENT_STAGE_LOCAL_EXT || timing.timeDomain == VK_TIME_DOMAIN_SWAPCHAIN_LOCAL_EXT) {
+        info.pNext = &local;
+    }
+    double best = 1.0;
+    for (int attempt = 0; attempt < 8 && best > 0.0001; ++attempt) {
+        uint64_t stamp = 0, deviation = 0;
+        const double before = Now();
+        if (d.GetCalibratedTimestampsKHR(d.handle, 1, &info, &stamp, &deviation) != VK_SUCCESS) {
+            break;
+        }
+        const double after = Now();
+        if (after - before < best) {
+            best = after - before;
+            s.offset = 0.5 * (before + after) - static_cast<double>(stamp) * 1e-9;
+            s.clock_ok = true;
+        }
+    }
+    return s.clock_ok;
+}
+
+/// What vkd3d-proton has just been told about frames that went out: looked at as it passes.
+void NoteTimings(Device& d, Fg& fg, const VkPastPresentationTimingPropertiesEXT& properties) {
+    Fg::Shown& s = fg.shown;
+    const double now = Now();
+    for (uint32_t i = 0; i < properties.presentationTimingCount; ++i) {
+        const VkPastPresentationTimingEXT& timing = properties.pPresentationTimings[i];
+        if (!timing.reportComplete) {
+            continue;
+        }
+        // About a frame this layer asked after: the caller has it now, TakeOwnTimings will not get it.
+        if (s.own_active.load(std::memory_order_relaxed) && timing.presentId <= s.own_last_id.load(std::memory_order_relaxed)) {
+            s.others_read.fetch_add(1, std::memory_order_relaxed);
+            if (!s.others_said.exchange(true, std::memory_order_relaxed)) {
+                Log("fg: thread %s reads the display's reports as well: the frames it gets them for have no time here", ThreadName());
+            }
+            continue;
+        }
+        if (!timing.pPresentStages) {
+            continue;
+        }
+        // The last stage reported is the one nearest the display (the bits go in that order).
+        uint64_t stamp = 0;
+        uint32_t stage = 0;
+        for (uint32_t j = 0; j < timing.presentStageCount; ++j) {
+            if (timing.pPresentStages[j].time && timing.pPresentStages[j].stage > stage) {
+                stage = timing.pPresentStages[j].stage;
+                stamp = timing.pPresentStages[j].time;
+            }
+        }
+        if (!stamp) {
+            continue;
+        }
+        const bool clock = CalibrateShown(d, fg, timing, stage, now);
+        if (!s.said) {
+            s.said = true;
+            Log("fg: the display reports when frames reach it (stage 0x%x, time domain %d, its clock %s)", stage,
+                static_cast<int>(timing.timeDomain), clock ? "compared with this layer's" : "not comparable: taken as the report's arrival");
+        }
+        const double shown = clock ? static_cast<double>(stamp) * 1e-9 + s.offset : now;
+        double sent = 0.0;
+        uint64_t event = 0;
+        uint32_t multiplier = 0;
+        if (!FindSent(fg, timing.presentId, sent, event, multiplier) || shown < sent - 0.001 || shown > sent + 1.0) {
+            s.unmatched.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
+        const uint32_t count = s.count.load(std::memory_order_relaxed);
+        Fg::Shown::Entry& entry = s.ring[count % Fg::Shown::RING];
+        entry.event = event;
+        entry.delay_ms = static_cast<float>((shown - sent) * 1000.0);
+        entry.gap_ms = s.last_id + 1 == timing.presentId ? static_cast<float>((shown - s.last_shown) * 1000.0) : 0.0f;
+        entry.multiplier = multiplier;
+        s.count.store(count + 1, std::memory_order_release);
+        s.last_id = timing.presentId;
+        s.last_shown = shown;
+    }
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL HookGetPastPresentationTimingEXT(VkDevice device, const VkPastPresentationTimingInfoEXT* info,
+                                                                VkPastPresentationTimingPropertiesEXT* properties) {
+    IN_HOOK("PastPresentTime");
+    Device* d = GetDevice(Key(device));
+    const VkResult result = d->GetPastPresentationTimingEXT(device, info, properties);
+    if (result >= 0 && properties->pPresentationTimings) {
+        if (Fg* fg = FindFg(*d, info->swapchain)) {
+            NoteTimings(*d, *fg, *properties);
+        }
+    }
+    return result;
+}
+#endif
+
+/// For the log, once per swapchain: what the game's present brings along.
+void LogPresentChain(const VkPresentInfoKHR& info) {
+    std::string names;
+    for (auto* next = static_cast<const VkBaseInStructure*>(info.pNext); next; next = next->pNext) {
+        char name[64];
+        std::snprintf(name, sizeof name, "%d ", static_cast<int>(next->sType));
+        names += name;
+        if (next->sType == VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODE_INFO_KHR) {
+            const auto* modes = reinterpret_cast<const VkSwapchainPresentModeInfoKHR*>(next);
+            if (modes->swapchainCount && modes->pPresentModes) {
+                std::snprintf(name, sizeof name, "(present mode %d) ", static_cast<int>(modes->pPresentModes[0]));
+                names += name;
+            }
+        }
+#ifdef VK_EXT_present_timing
+        if (next->sType == VK_STRUCTURE_TYPE_PRESENT_TIMINGS_INFO_EXT) {
+            const auto* timings = reinterpret_cast<const VkPresentTimingsInfoEXT*>(next);
+            if (timings->swapchainCount && timings->pTimingInfos) {
+                std::snprintf(name, sizeof name, "(timing: stages 0x%x, flags 0x%x) ",
+                              timings->pTimingInfos[0].presentStageQueries, timings->pTimingInfos[0].flags);
+                names += name;
+            }
+        }
+#endif
+    }
+    Log("swapchain: the first present brings along: %s", names.empty() ? "nothing" : names.c_str());
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL HookLatencySleepNV(VkDevice device, VkSwapchainKHR swapchain,
@@ -6187,6 +7132,14 @@ VKAPI_ATTR VkResult VKAPI_CALL HookCreateSwapchainKHR(VkDevice device, const VkS
         fg->format = info->imageFormat;
         fg->extent = info->imageExtent;
         fg->modified = modified;
+        fg->surface = info->surface;
+        fg->create_flags = info->flags;
+        for (auto* next = static_cast<const VkBaseInStructure*>(info->pNext); next; next = next->pNext) {
+            if (next->sType == VK_STRUCTURE_TYPE_SWAPCHAIN_LATENCY_CREATE_INFO_NV) {
+                fg->latency_swapchain = reinterpret_cast<const VkSwapchainLatencyCreateInfoNV*>(next)->latencyModeEnable;
+            }
+        }
+        Log("swapchain: flags 0x%x, made for low latency: %s", info->flags, fg->latency_swapchain ? "yes" : "no");
         std::lock_guard lock{d->fg_mutex};
         d->swapchains[U64(*swapchain)] = fg;
         Log("swapchain: %ux%u format %d present mode %d min images %u -> %u%s (device %u, thread %s%s)",
@@ -6272,6 +7225,9 @@ void DestroyFg(Device& d, Fg* fg) {
         d.DestroyDescriptorSetLayout(d.handle, hud.set_layout, nullptr);
     }
     DestroyOwnImage(d, fg->previous);
+    if (fg->clock.pool) {
+        d.DestroyQueryPool(d.handle, fg->clock.pool, nullptr);
+    }
     DestroyOwnImage(d, fg->unmixed[0]);
     DestroyOwnImage(d, fg->unmixed[1]);
     DestroyOwnImage(d, fg->curve_image);
@@ -6397,7 +7353,10 @@ VKAPI_ATTR VkResult VKAPI_CALL HookQueuePresentKHR(VkQueue queue, const VkPresen
         fg->presented = true;
         Log("swapchain: first present of %ux%u (device %u, thread %s)", fg->extent.width, fg->extent.height, d->index,
             ThreadName());
+        LogPresentChain(*info);
     }
+    ApplyBoost(*d, *fg);
+    ApplyPriority();
     const double start = Now();
     VkResult result = VK_SUCCESS;
     Stage(1);
@@ -6434,6 +7393,9 @@ VKAPI_ATTR VkResult VKAPI_CALL HookQueuePresentKHR(VkQueue queue, const VkPresen
         event.paced_ms = static_cast<float>(fg->paced * 1000.0);
         event.flags |= passed ? Event::PASSED : 0u;
     }
+    NoteSent(*fg, *info, passed ? end : fg->real_sent, passed || fg->too_fast ? 1 : fg->generated + 1);
+    TakeOwnTimings(*d, *fg);
+    TakeShown(*fg);
     Statistics(*d, *fg, end);
     return result;
 }
@@ -6628,6 +7590,7 @@ VKAPI_ATTR void VKAPI_CALL HookDestroyDevice(VkDevice device, const VkAllocation
     if (!d) {
         return;
     }
+    StopDoneWatch(*d);
     Log("device destroyed: device %u (thread %s)", d->index, ThreadName());
     {
         std::lock_guard global{g_input_mutex};
@@ -7430,7 +8393,9 @@ Device* DeviceOfQueue(VkQueue queue) {
 VkResult Submitted(VkQueue queue, const std::vector<VkCommandBuffer>& buffers, const auto& forward) {
     Device& d = *DeviceOfQueue(queue);
     const bool frame = NoteSubmitted(d, buffers.data(), buffers.size());
+    const uint64_t chain_before = d.chain.number;
     NoteChainSubmitted(d, buffers.data(), buffers.size());
+    const uint64_t chain_after = d.chain.number;
     if (frame) {
         g_submit_thread = static_cast<int>(syscall(SYS_gettid));
         if (!WaitForGenerated(d)) {
@@ -7444,6 +8409,9 @@ VkResult Submitted(VkQueue queue, const std::vector<VkCommandBuffer>& buffers, c
         TraceSubmit(queue, buffers);
     }
     const VkResult result = forward(d);
+    if (result == VK_SUCCESS && chain_after > chain_before && g_live_timing.load() != 0.0f) {
+        WatchDone(d, queue, chain_after); // (a hand-over's copy is in this submit)
+    }
     if (frame && result == VK_SUCCESS) {
         const uint64_t after = g_chain_handed.load();
         g_chain_drawn_after = after;
@@ -7542,6 +8510,10 @@ const Hook DEVICE_HOOKS[] = {
     HOOK(CreateSwapchainKHR, true),     HOOK(DestroySwapchainKHR, true),
     HOOK(QueuePresentKHR, true),        HOOK(SetLatencySleepModeNV, true),
     HOOK(LatencySleepNV, true),         HOOK(SetLatencyMarkerNV, true),
+    HOOK(WaitForPresentKHR, true),
+#ifdef VK_EXT_present_timing
+    HOOK(WaitForPresent2KHR, true),     HOOK(GetPastPresentationTimingEXT, true),
+#endif
 };
 
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL HookGetDeviceProcAddr(VkDevice device, const char* name) {
