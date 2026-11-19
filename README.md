@@ -60,6 +60,9 @@ is the middle of the ten-second averages, "busy" the slowest tenth of them
 | Lorville | 9 min | 29 (25) | 111 (99) |
 | Levski | 5 min | 26 (22) | 102 (88) |
 
+The table comes from three sessions in a row, and rates differ from session to session: in two
+sessions earlier the same day Orison typically ran at 39 frames a second and showed 118.
+
 Generated frames are interpolated: they add smoothness, not responsiveness, and each real frame
 is shown a little later than it would be without them.
 
