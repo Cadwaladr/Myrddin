@@ -13,12 +13,11 @@ ApplicationWindow {
     title: "Myrddin"
     color: Theme.bg
 
-    property string page: ["play", "setup", "options", "session", "about"].indexOf(startPage) >= 0 ? startPage : "play"
+    property string page: ["play", "setup", "options", "about"].indexOf(startPage) >= 0 ? startPage : "play"
     readonly property var pages: [
         { key: "play", label: "Play", icon: Theme.iconPlay },
         { key: "setup", label: "Setup", icon: Theme.iconSetup },
         { key: "options", label: "Options", icon: Theme.iconOptions },
-        { key: "session", label: "Session", icon: Theme.iconSession },
         { key: "about", label: "About", icon: Theme.iconAbout }
     ]
     function indexOf(key) { for (var i = 0; i < pages.length; i++) if (pages[i].key === key) return i; return 0 }
@@ -26,8 +25,7 @@ ApplicationWindow {
     Shortcut { sequence: "Ctrl+1"; onActivated: window.page = "play" }
     Shortcut { sequence: "Ctrl+2"; onActivated: window.page = "setup" }
     Shortcut { sequence: "Ctrl+3"; onActivated: window.page = "options" }
-    Shortcut { sequence: "Ctrl+4"; onActivated: window.page = "session" }
-    Shortcut { sequence: "Ctrl+5"; onActivated: window.page = "about" }
+    Shortcut { sequence: "Ctrl+4"; onActivated: window.page = "about" }
     Shortcut { sequences: [StandardKey.Quit]; onActivated: Qt.quit() }
 
     // a little light behind everything: still, so the window costs nothing while it is not touched
@@ -165,15 +163,14 @@ ApplicationWindow {
         PlayPage { active: window.page === "play"; onGo: (name) => window.page = name }
         SetupPage { active: window.page === "setup"; onGo: (name) => window.page = name }
         OptionsPage { active: window.page === "options"; onGo: (name) => window.page = name }
-        SessionPage { active: window.page === "session"; onGo: (name) => window.page = name }
         AboutPage { active: window.page === "about"; onGo: (name) => window.page = name }
     }
 
     // the log of a session that ran with logs, once the game has closed: read, copy, delete or keep
     Rectangle {
         id: logOffer
-        // (out of the way while the log is being read on the Session page, which has the same choices)
-        readonly property bool up: backend.sessionLog !== "" && !(window.page === "session" && backend.toolTitle.startsWith("Session log"))
+        // (out of the way while the log is being read, where the same choices are)
+        readonly property bool up: backend.sessionLog !== "" && !backend.toolTitle.startsWith("Session log")
         anchors.left: rail.right
         anchors.right: parent.right
         anchors.leftMargin: 36
@@ -200,11 +197,19 @@ ApplicationWindow {
                 Text { text: "The log of your last session is ready"; color: Theme.text; font.pixelSize: 14; font.weight: Font.DemiBold }
                 Text { text: backend.sessionLogNote; color: Theme.dim; font.pixelSize: 12; elide: Text.ElideMiddle; Layout.fillWidth: true }
             }
-            ActionButton { text: "Read"; onClicked: { backend.readSessionLog(); window.page = "session" } }
+            ActionButton { text: "Read"; onClicked: backend.readSessionLog() }
             ActionButton { text: "Copy"; icon: Theme.iconCopy; onClicked: backend.copySessionLog() }
             ActionButton { text: "Delete"; icon: Theme.iconTrash; onClicked: backend.deleteSessionLog() }
             ActionButton { kind: "quiet"; text: "Keep"; onClicked: backend.keepSessionLog() }
         }
+    }
+
+    // a report, the last launch or a session's log, over the page that asked for it
+    Reader {
+        anchors.left: rail.right
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
     }
 
     // a line that comes up and goes

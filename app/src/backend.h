@@ -29,6 +29,8 @@ class Backend : public QObject {
     Q_PROPERTY(QString state READ state NOTIFY stateChanged)   // idle | starting | launcher | running
     Q_PROPERTY(bool layerSession READ layerSession NOTIFY stateChanged)
     Q_PROPERTY(bool generating READ generating NOTIFY stateChanged)
+    Q_PROPERTY(bool stopping READ stopping NOTIFY stateChanged)   // "Stop" was pressed and the session is not gone yet
+    Q_PROPERTY(bool canKill READ canKill NOTIFY stateChanged)     // ... and two seconds later it still is not
     Q_PROPERTY(int liveMultiplier READ liveMultiplier NOTIFY statsChanged)
     Q_PROPERTY(double baseRate READ baseRate NOTIFY statsChanged)
     Q_PROPERTY(double shownRate READ shownRate NOTIFY statsChanged)
@@ -80,6 +82,8 @@ public:
     QString state() const { return m_state; }
     bool layerSession() const { return m_layerSession; }
     bool generating() const { return m_generating; }
+    bool stopping() const { return m_stopping; }
+    bool canKill() const { return m_canKill; }
     int liveMultiplier() const { return m_liveMult; }
     double baseRate() const { return m_base; }
     double shownRate() const { return m_shown; }
@@ -109,13 +113,20 @@ public:
     QString toolOutput() const { return m_toolOutput; }
 
     Q_INVOKABLE void launch();
-    Q_INVOKABLE void setMultiplier(int n);            // also while the game runs
-    Q_INVOKABLE void setGeneration(bool on);          // while the game runs
-    Q_INVOKABLE void sendParam(const QString& name, const QString& value);
-    Q_INVOKABLE void liveSwitch(const QString& command, bool on);   // fg-hud, fg-cap, fg-scd, fg-layer
+    // Each of these is kept for the next launch and, where a game runs with the layer, sent to it at once.
+    Q_INVOKABLE void setMode(const QString& mode);    // off | 2 | 3 | 4 (the multiplier, held there) | auto (the layer picks, up to the limit)
+    Q_INVOKABLE void setLimit(int n);                 // the highest multiplier Auto may pick (2 to 4)
+    Q_INVOKABLE void setOption(const QString& name, bool on);   // markers | keepHud | gapfill | pictures | boost | performance
+    Q_INVOKABLE void setOverlay(const QString& which);          // off | mangohud | panel: what is drawn over the game (at the next launch)
     Q_INVOKABLE void panel(const QString& word);      // next | off | 1 | 2 | 3 | tl | tr | bl | br
+    Q_INVOKABLE QString keyName(int nativeScanCode, int modifiers) const;   // "Shift+7" for a key press; "" for one the panel cannot use
+    Q_INVOKABLE void setPanelKey(const QString& keys);                      // the key that steps the panel on, in the game
+    Q_INVOKABLE void stop();               // the session is asked to end ("sc-turbo stop")
+    Q_INVOKABLE void kill();               // ... and ended without asking, once that is offered ("sc-turbo kill")
     Q_INVOKABLE void runTool(const QString& title, const QStringList& words);
-    Q_INVOKABLE void readSessionLog();     // the offered log, or the newest kept one, shown where the reports are
+    Q_INVOKABLE void showLaunchLog();      // what sc-turbo said at the last launch, shown like a report
+    Q_INVOKABLE void closeTool();          // the report that is shown is put away
+    Q_INVOKABLE void readSessionLog();     // the offered log, or the newest kept one, shown like a report
     Q_INVOKABLE void copySessionLog();     // onto the clipboard, as text and as a file
     Q_INVOKABLE void deleteSessionLog();   // the log and the recording it was made from
     Q_INVOKABLE void keepSessionLog();     // it stays in the log folder; the offer goes
@@ -153,6 +164,7 @@ private:
     QString pickSessionLog() const;
     QString tidyText(QString text) const;
     QStringList launchWords() const;
+    bool steering() const;         // a game that runs with the layer, started from here: what is chosen is sent to it
     bool scTurbo(const QStringList& words, QString* output = nullptr, int timeoutMs = 4000) const;
     void startAsync(const QString& program, const QStringList& words, std::function<void(int, const QString&)> done);
     void finishChecks();
@@ -170,6 +182,8 @@ private:
     qint64 m_startedAt = 0;        // when this window launched something (ms since the epoch), 0: nothing pending
     bool m_layerSession = false;
     bool m_generating = false;
+    bool m_stopping = false;
+    bool m_canKill = false;
     int m_liveMult = 0;
     double m_base = 0, m_shown = 0, m_p50 = 0, m_p99 = 0;
     bool m_statsFresh = false;

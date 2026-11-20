@@ -36,6 +36,24 @@
 # It sits below the layer, so its frame rate counts the generated frames too.
 #SC_MANGOHUD=1
 
+# How the HUD is treated in generated frames, and the GPU's speed (the launcher window's Options
+# write these). The layer reads the last three from the environment itself, hence "export".
+#SC_FG_MARKERS=0          # HUD elements that move over the screen stay at the game's own rate
+#SC_FG_KEEP_HUD=0         # the HUD is generated along with the picture (it smears when the view moves)
+#export SC_FG_GAPFILL=0   # nothing is generated from a frame that comes without the HUD
+#export SC_FG_PICTURES=0  # the map is moved like the markers (its lines double)
+#export SC_FG_BOOST=1     # the GPU is asked to keep its speed up while the game leaves it half idle
+
+# A multiplier that follows the game's rate ("fg N" without "fixed", the window's Auto) never limits
+# the game's own frames. With this line it does, to an even part of the display's rate, so that every
+# refresh gets a frame: a smoother picture, with more latency (the window's "Performance" off).
+#SC_FG_FILL=1
+
+# The key that steps the layer's own panel in the game ("sc-turbo fg N panel"), in place of
+# Shift+7: Ctrl, Shift and Alt with one key, by its place on a US keyboard. The layer reads it
+# inside the game, on any desktop; the game gets the key as well, so pick one it does not use.
+#SC_FG_PANEL_KEY=Ctrl+F9
+
 # A sched_ext CPU scheduler while the game runs ("sc-turbo fg N sched=lavd" does it for one launch;
 # needs scx-scheds, scx-tools and the polkit rule of "tools/sc-sched rule", see docs/optional.md).
 #SC_SCHED=lavd

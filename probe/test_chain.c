@@ -69,6 +69,8 @@
  */
 #define _GNU_SOURCE
 #include <glob.h>
+#include <signal.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -267,6 +269,18 @@ static int sim_ready; /* frames prepared and not taken yet: 0 or 1 */
 static pthread_cond_t sim_cond = PTHREAD_COND_INITIALIZER;
 static VkSemaphore copied_b; /* timeline: the count of frames copied out of the shared image */
 static int unprotected;
+/* --unwind SECONDS: after that long the presenting thread is ended while it is inside
+ * vkQueuePresentKHR, the way Wine ends a game's threads when the game closes: a signal, whose
+ * handler calls pthread_exit wherever the thread is. The stack is then unwound through the layer's
+ * frames; a layer that brings an unwinder of its own along (libgcc linked in statically) aborts the
+ * process there. */
+static double unwind_s;
+static volatile sig_atomic_t in_present;
+static void end_thread_here(int signal)
+{
+    (void)signal;
+    if (in_present) pthread_exit(PTHREAD_CANCELED);   /* (elsewhere: not yet, the signal comes again) */
+}
 
 static void present_once(int bb)
 {
@@ -298,7 +312,9 @@ static void present_once(int bb)
     const VkPresentModeKHR immediate = VK_PRESENT_MODE_IMMEDIATE_KHR;
     VkSwapchainPresentModeInfoKHR mode_now = {.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_MODE_INFO_KHR, .swapchainCount = 1, .pPresentModes = &immediate};
     if (unlocked) pi.pNext = &mode_now;
+    in_present = 1;
     VkResult r_ = vkQueuePresentKHR(queue_b, &pi);
+    in_present = 0;
     if (r_ != VK_SUCCESS && r_ != VK_SUBOPTIMAL_KHR) { fprintf(stderr, "present -> %d\n", r_); exit(1); }
     if (timing) __atomic_store_n(&timing_sent, id, __ATOMIC_RELEASE);
     presents++;
@@ -411,7 +427,43 @@ static void copy_rects(VkCommandBuffer cb, VkImage from, VkImage to, const int r
     vkCmdCopyImage(cb, from, VK_IMAGE_LAYOUT_GENERAL, to, VK_IMAGE_LAYOUT_GENERAL, (uint32_t)count, r);
 }
 
+static int run(int argc, char **argv);
+struct arguments { int argc; char **argv; };
+static void *run_in_thread(void *given)
+{
+    struct arguments *a = given;
+    run(a->argc, a->argv);
+    return NULL;
+}
+
 int main(int argc, char **argv)
+{
+    for (int i = 1; i + 1 < argc; i++)
+        if (!strcmp(argv[i], "--unwind")) unwind_s = atof(argv[i + 1]);
+    if (unwind_s <= 0) return run(argc, argv);
+    struct arguments a = {argc, argv};
+    pthread_t presenting;
+    void *ended = NULL;
+    struct sigaction action = {.sa_handler = end_thread_here};
+    sigaction(SIGUSR2, &action, NULL);
+    pthread_create(&presenting, NULL, run_in_thread, &a);
+    usleep((useconds_t)(unwind_s * 1e6));
+    int joined = -1;
+    for (int tries = 0; tries < 20000 && joined != 0; tries++) {   /* (until it lands inside a present call) */
+        pthread_kill(presenting, SIGUSR2);
+        struct timespec until;
+        clock_gettime(CLOCK_REALTIME, &until);
+        until.tv_nsec += 500000;
+        if (until.tv_nsec >= 1000000000) { until.tv_sec++; until.tv_nsec -= 1000000000; }
+        joined = pthread_timedjoin_np(presenting, &ended, &until);
+    }
+    printf("unwind: the presenting thread %s\n", joined != 0 ? "did not end"
+           : ended == PTHREAD_CANCELED ? "was ended inside the present call and its stack unwound: ok" : "ended by itself first");
+    fflush(stdout);
+    _exit(joined == 0 && ended == PTHREAD_CANCELED ? 0 : 1);   /* (no tidying up: the driver was left in the middle of a call) */
+}
+
+static int run(int argc, char **argv)
 {
     double seconds = 12, game_ms = 4, jitter_ms = 0, spike_ms = 0;
     unsigned spike = 0, random_state = 12345;
@@ -448,6 +500,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--marker") && i + 2 < argc) { marker = 1; marker_vx = atoi(argv[++i]); marker_vy = atoi(argv[++i]); }
         else if (!strcmp(argv[i], "--hud-files") && i + 3 < argc) { hud_files = argv[++i]; hud_first = atoi(argv[++i]); hud_count = atoi(argv[++i]); }
         else if (!strcmp(argv[i], "--stall") && i + 2 < argc) { stall_frame = (unsigned)atoi(argv[++i]); stall_ms = atof(argv[++i]); }
+        else if (!strcmp(argv[i], "--unwind") && i + 1 < argc) i++;   /* (read in main) */
         else seconds = atof(argv[i]);
     }
 
@@ -983,6 +1036,13 @@ int main(int argc, char **argv)
         while (in_flight >= LATENCY) pthread_cond_wait(&job_done, &lock);
         pthread_mutex_unlock(&lock);
         frame++;
+        /* What the compositor sent is read here, without waiting: Wine reads its connection all
+         * the time (in a thread of its own), and what the layer listens to on this connection
+         * (the panel's key) only arrives when the program reads. */
+        while (wl_display_prepare_read(display) != 0) wl_display_dispatch_pending(display);
+        wl_display_flush(display);
+        struct pollfd arrived = {.fd = wl_display_get_fd(display), .events = POLLIN};
+        if (poll(&arrived, 1, 0) > 0) wl_display_read_events(display); else wl_display_cancel_read(display);
         wl_display_dispatch_pending(display);
         wl_display_flush(display);
         const double t = now_s();

@@ -95,7 +95,7 @@ somewhere else, name its folder on the AppImage's Setup page or set `SC_PREFIX` 
 - `gui/`: the small launcher window (`myrddin-gui`, GTK 4 and libadwaita) and its list of games
 - `probe/`: the passive probe layer and the test programs, among them the two-device test chain
 - `tools/`: tests and validation, in-session comparisons, log readers, thread and display tools,
-  the panel's key, and the `base-*` tools the measurements under
+  and the `base-*` tools the measurements under
   [The game's own frame rate](measurements.md#the-games-own-frame-rate) were made with
 - `proto/hud-motion/`: the reference the layer's passes for moving HUD elements are checked
   against, and its test scenes

@@ -12,7 +12,11 @@
 #           against the native one's (tools/ppmdiff.py), once both dumps caught the same real picture
 #           (up to 6 tries, as fg-validate.sh does)
 #
-#   appimage/test-layer-headless.sh [plain|hose|all]     (default all; about 3 to 5 minutes)
+#   unwind  the presenting thread ended inside the present call the way Wine ends a game's threads
+#           (test_chain --unwind): the process must not abort. The portable build did, as long as it
+#           carried an unwinder of its own (build-layer.sh says why); the native build is the control.
+#
+#   appimage/test-layer-headless.sh [plain|hose|unwind|all]     (default all; about 3 to 5 minutes)
 #
 # Like tools/test-chain.sh, from which the run itself is taken, except: results go to
 # appimage/work/test-headless/NAME (not logs/test), the weston it stops is its own (test-chain.sh
@@ -70,6 +74,19 @@ if [ "$what" = plain ] || [ "$what" = all ]; then
     for i in 1 2; do
         one "plain-native$i" "$native" 12 ""; line "plain-native$i"
         one "plain-portable$i" "$portable" 12 ""; line "plain-portable$i"
+    done
+fi
+if [ "$what" = unwind ] || [ "$what" = all ]; then
+    echo "## unwind: the presenting thread ended inside the present call, as Wine does when the game closes"
+    for build in native portable; do
+        lib=$native; [ $build = portable ] && lib=$portable
+        ( ulimit -c 0; one "unwind-$build" "$lib" 12 "SC_FG_TARGET=120 SC_FG_MULT=2" --unwind 5 ) 2> /dev/null
+        rc=$(sed -n 's/^exit //p' "$root/unwind-$build/out.txt")
+        if [ "$rc" = 0 ] && grep -q 'its stack unwound: ok' "$root/unwind-$build/out.txt"; then
+            echo "unwind-$build  PASS (the thread ended, the process went on)"
+        else
+            echo "unwind-$build  FAIL (exit $rc: 134 is an abort inside the unwinder)"
+        fi
     done
 fi
 if [ "$what" = hose ] || [ "$what" = all ]; then

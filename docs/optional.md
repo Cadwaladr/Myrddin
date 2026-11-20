@@ -25,17 +25,18 @@ Fedora's package names; other distributions have the same things under other nam
 With `./sc-turbo fg 3 hud`, MangoHud sits below the layer and counts every frame that goes out.
 Keep MangoHud's own `fps_limit` off, or it holds the layer's frames back. The layer also has a
 small panel of its own (shown rate, the game's own rate, a pacing graph) when you ask for it
-at launch.
+at launch; Shift+7 in the game steps through it.
 
 `SC_MANGOHUD=1` in `sc-turbo.conf` does the same at every launch with frame generation.
 
 ## Graphics memory limit
 
-On a card with 12 GB or less, a launch tells the game about less graphics memory than the card
+On a card with 4 to 12 GB, a launch tells the game about less graphics memory than the card
 has, the LUG wiki's remedy for frame drops when the card's memory runs out. It works through
-Mesa's layer named in the table. Without that layer the launch says so and goes on with no limit.
-An AppImage carries the layer. [Your launch script](usage.md#your-launch-script) has the sizes,
-and `SC_VRAM_LIMIT=off` leaves it out.
+Mesa's layer named in the table. Without that layer, or where `nvidia-smi` cannot name the card,
+the launch says so and goes on with no limit. An AppImage carries the layer.
+[Your launch script](usage.md#your-launch-script) has the sizes, and `SC_VRAM_LIMIT=off` leaves
+it out.
 
 ## CPU scheduler (optional)
 

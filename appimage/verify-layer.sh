@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Checks the portable layers in appimage/out/layer (made by build-layer.sh):
-#   a) no glibc symbol version above 2.35, no GLIBCXX/CXXABI/GCC imports, NEEDED only libc, libm,
-#      libpthread, libdl and the dynamic loader
+#   a) no glibc symbol version above 2.35, no GLIBCXX/CXXABI imports, NEEDED only libc, libm,
+#      libpthread, libdl and the dynamic loader; the C++ layer also libgcc_s.so.1, whose unwinder
+#      it has to import (_Unwind_Resume, with symbol versions GCC_3.x/4.x only) and must not carry
+#      itself: build-layer.sh says why
 #   b) the exported symbols: the native build's Vulkan entry points (build/fg/libsc_fg.so,
 #      build/libsc_probe.so, read only; the native build's libstdc++ template instances are left
 #      out of the comparison, the portable build keeps them inside on purpose)
@@ -26,13 +28,25 @@ for lib in $libs; do
     f="$out/$lib"
     [ -f "$f" ] || { result FAIL "$lib missing (appimage/build-layer.sh)"; continue; }
     max="$(objdump -T "$f" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
-    cxx="$(objdump -T "$f" | grep -c 'GLIBCXX\|CXXABI\|(GCC_')"
     needed="$(readelf -d "$f" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | tr '\n' ' ')"
-    other="$(printf '%s\n' $needed | grep -vxE 'libc\.so\.6|libm\.so\.6|libpthread\.so\.0|libdl\.so\.2|ld-linux-x86-64\.so\.2')"
-    if [ "$(printf '%s\n' "$max" GLIBC_2.35 | sort -V | tail -1)" = GLIBC_2.35 ] && [ "$cxx" = 0 ] && [ -z "$other" ]; then
-        result PASS "a $lib: newest $max, $cxx C++ runtime imports, NEEDED $needed"
+    case "$lib" in
+    fg/*)   # C++: the unwinder is the system's
+        cxx="$(objdump -T "$f" | grep -c 'GLIBCXX\|CXXABI\|(GCC_[^34]')"
+        allowed='libc\.so\.6|libm\.so\.6|libpthread\.so\.0|libdl\.so\.2|ld-linux-x86-64\.so\.2|libgcc_s\.so\.1'
+        unwinder="$(objdump -T "$f" | grep -c '\*UND\*.*(GCC_3\.0) *_Unwind_Resume$')"
+        inside="$(nm "$f" 2>/dev/null | grep -c ' [tT] _Unwind_')"
+        note="unwinder imported: $unwinder, linked in: $inside" ;;
+    *)
+        cxx="$(objdump -T "$f" | grep -c 'GLIBCXX\|CXXABI\|(GCC_')"
+        allowed='libc\.so\.6|libm\.so\.6|libpthread\.so\.0|libdl\.so\.2|ld-linux-x86-64\.so\.2'
+        unwinder=1; inside=0; note="C: no unwinder" ;;
+    esac
+    other="$(printf '%s\n' $needed | grep -vxE "$allowed")"
+    if [ "$(printf '%s\n' "$max" GLIBC_2.35 | sort -V | tail -1)" = GLIBC_2.35 ] && [ "$cxx" = 0 ] && [ -z "$other" ] &&
+       [ "$unwinder" = 1 ] && [ "$inside" = 0 ]; then
+        result PASS "a $lib: newest $max, $cxx C++ runtime imports, NEEDED $needed($note)"
     else
-        result FAIL "a $lib: newest $max, $cxx C++ runtime imports, NEEDED $needed"
+        result FAIL "a $lib: newest $max, $cxx C++ runtime imports, NEEDED $needed($note)"
     fi
     case "$lib" in fg/*) native="$project/build/fg/libsc_fg.so" ;; *) native="$project/build/libsc_probe.so" ;; esac
     mine="$(nm -D --defined-only "$f" | awk '{print $3}' | sort | tr '\n' ' ')"

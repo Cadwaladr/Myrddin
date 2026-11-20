@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Builds the project's two Vulkan layers (fg/sc_fg.cpp -> libsc_fg.so with AMD's FidelityFX
 # library, probe/sc_probe.c -> libsc_probe.so) so that they load on any x86-64 Linux with glibc
-# 2.35 or newer and need no libstdc++/libgcc_s of the host: in a podman container with Ubuntu
-# 22.04 (glibc 2.35), libstdc++ and libgcc linked in statically, only the Vulkan entry point
-# exported. The same compiler commands and optimisation flags as ../build.sh and
+# 2.35 or newer and need no libstdc++ of the host: in a podman container with Ubuntu 22.04
+# (glibc 2.35), libstdc++ linked in statically, only the Vulkan entry point exported. The
+# unwinder is NOT linked in (no -static-libgcc for the C++ layer): it is the system's
+# libgcc_s.so.1, which glibc itself loads whenever a thread ends (see below). The same compiler commands and optimisation flags as ../build.sh and
 # ../third_party/ffx_src/build.sh, but nothing is written into the source tree: it is mounted
 # read-only at /src, and everything is built under appimage/work.
 #
@@ -156,8 +157,8 @@ $nice cmake -S /src/third_party/ffx_src -B $b/ffx -G Ninja -DCMAKE_BUILD_TYPE=Re
 $nice cmake --build $b/ffx --target ffx_fg --parallel "$JOBS" > $b/ffx-build.log
 echo "ffx: $b/ffx/ffx_fg/libffx_fg.a"
 
-# --- the layers. Only the Vulkan entry point is exported (see exports.map); libstdc++ and libgcc
-# are linked in and their symbols kept inside (--exclude-libs). ---
+# --- the layers. Only the Vulkan entry point is exported (see exports.map); libstdc++ is linked
+# in and its symbols kept inside (--exclude-libs). ---
 cat > $b/exports.map <<'MAP'
 /* The Vulkan loader finds a layer through this one function (and its manifest); everything else,
    the C++ library's template instances among it, stays inside the library. */
@@ -170,12 +171,23 @@ MAP
 $nice cc -O2 -Wall -fPIC -fvisibility=hidden -shared -isystem $VKINC -o $b/probe/libsc_probe.so /src/probe/sc_probe.c \
     -lpthread -static-libgcc -Wl,--version-script=$b/exports.map
 echo "probe: $b/probe/libsc_probe.so"
-# The frame-generation layer, build.sh's command (+ the Vulkan headers' path, static libstdc++ and
-# libgcc, the export list). The shader headers fg/*.spv.h are used as they are in the source tree.
+# The frame-generation layer, build.sh's command (+ the Vulkan headers' path, static libstdc++,
+# the export list). The shader headers fg/*.spv.h are used as they are in the source tree.
+#
+# Why libgcc is not linked in statically here: Wine ends a game's threads with pthread_exit
+# wherever they are, and glibc then unwinds their stacks with the SYSTEM's libgcc_s. For each of
+# the layer's frames that has something to tidy up, that unwinder calls the C++ library's
+# personality routine, which is inside this library; with a libgcc of its own linked in, the
+# routine would answer through its own copy of the unwinder (Ubuntu 22.04's), which reads the
+# system unwinder's records wrongly on a newer system and aborts the game as it closes
+# (StarCitizen.exe, SIGABRT in _Unwind_SetGR, a core dump of 25 GB: 2026-11-20). Linked this way,
+# the personality routine calls the one unwinder that is at work. libgcc_s.so.1 is on every
+# system that runs Wine: glibc cannot end a thread without it. The case is in
+# test-layer-headless.sh ("unwind").
 $nice $CXX -std=c++20 -O2 -Wall -Wextra -Wno-unused-parameter -Wno-missing-field-initializers -fPIC \
     -fvisibility=hidden -shared -I/src/fg -include /src/third_party/lichii/ffx_linux_compat.h \
     -isystem /src/third_party/ffx/include -isystem $VKINC -o $b/layer/libsc_fg.so /src/fg/sc_fg.cpp \
-    $b/ffx/ffx_fg/libffx_fg.a -static-libstdc++ -static-libgcc -Wl,--exclude-libs,ALL -Wl,-z,defs \
+    $b/ffx/ffx_fg/libffx_fg.a -static-libstdc++ -Wl,--exclude-libs,ALL -Wl,-z,defs \
     -Wl,--version-script=$b/exports.map -lpthread
 echo "layer: $b/layer/libsc_fg.so"
 
@@ -188,7 +200,7 @@ echo "layer: $b/layer/libsc_fg.so"
     echo "vulkan headers: $VH"
     echo "cmake: $(cmake --version | head -1); ninja $(ninja --version)"
 } > $b/BUILDINFO
-# libstdc++ and libgcc are linked in: their licence is GPLv3 with this exception (for THIRD-PARTY.md).
+# libstdc++ and helper routines of libgcc are linked in: their licence is GPLv3 with this exception (for THIRD-PARTY.md).
 sed -n '/^GCC RUNTIME LIBRARY EXCEPTION$/,/requirements of the license of GCC\.$/p' /usr/share/doc/gcc-12-base/copyright \
     > $b/GCC-RUNTIME-LIBRARY-EXCEPTION-3.1.txt
 INSIDE

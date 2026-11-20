@@ -6,9 +6,13 @@
 #   sc-turbo capture   like probe, and also saves a few frames of DLSS's inputs (colour, motion
 #                      vectors, depth) to logs/capture, but only after "sc-turbo go"
 #   sc-turbo go        start a capture series now: 4 consecutive frames every 10 s for 2 minutes
-#   sc-turbo fg [2|3|4] [hud] [panel] [nomarkers] [watch] [sched=NAME] [trace|old|older|next]  launch with frame generation (DLSS must be the
-#                      upscaler in game); the number is the multiplier, default 2. Log and dumps: logs/fg
-#                      ("hud": with MangoHud, which sits below the layer and so counts every frame that
+#   sc-turbo fg [2|3|4] [fixed] [hud] [panel] [nomarkers] [watch] [sched=NAME] [trace|old|older|next]  launch with frame generation (DLSS must be the
+#                      upscaler in game); the number is the highest multiplier, default 2: up to it the
+#                      layer picks the multiplier as the game's own rate changes (the launcher window's
+#                      "Auto"). Log and dumps: logs/fg
+#                      ("fixed": the multiplier is held at the number, whatever the game's rate (the
+#                      window's x2, x3, x4); fg-mult changes either in the running game.
+#                      "hud": with MangoHud, which sits below the layer and so counts every frame that
 #                      is shown, the generated ones too; SC_MANGOHUD=1 in sc-turbo.conf: always.
 #                      "panel": the layer's own performance panel can be shown, see fg-panel; without
 #                      the word there is none.
@@ -38,20 +42,29 @@
 #                      from outside (it reads /proc and asks nvidia-smi; started by itself with "fg N watch");
 #                      report: the recording put together with the frame rates and the game's log, place by place
 #   sc-turbo fg-off / fg-on   switch generation off / on while the game runs
-#   sc-turbo fg-mult N change the multiplier (2, 3 or 4) while the game runs
+#   sc-turbo fg-mult N [fixed|auto]   change the multiplier (2, 3 or 4) while the game runs. "fixed": it is
+#                      held at N; "auto": it follows the game's rate, up to N; without a word it stays
+#                      held or following as it was (following: N is the new limit)
 #   sc-turbo fg-hud on|off   switch the HUD handling (keeps the HUD in place) while the game runs
 #   sc-turbo fg-layer on|off|mode M [GAIN] [FLOOR]   exact HUD separation (the game's own HUD layer)
 #   sc-turbo fg-scd on|off   FSR's scene-change detector (off by default: it stops interpolation in fast turns)
 #   sc-turbo fg-cap on|off   limit shown frames to the display's rate (on by default; holds the game at rate/multiplier)
-#   sc-turbo fg-panel [next|off|1|2|3] [tl|tr|bl|br]   the performance panel over the picture (only in a game
-#                      launched with the word "panel": sc-turbo fg 4 panel). Without a word
-#                      (or "next") it goes one step on, so that one key can be bound to it (a desktop
-#                      shortcut that runs "sc-turbo fg-panel"): off -> 1 the frame rate that is shown ("FG")
-#                      -> 2 that and the game's own ("BASE"), with the multiplier -> 3 both and a graph of
-#                      the time between shown frames (even pacing is a flat line) -> off. tl tr bl br: the
-#                      corner it sits in. It stays as it was left, also for the next launch.
-#   sc-turbo fg-panel-key [install [KEYS] | remove]   the desktop shortcut for that (default Shift+7;
-#                      KEYS like Ctrl+Shift+F10). Set up on KDE Plasma and COSMIC; elsewhere it says what to bind by hand.
+#   sc-turbo fg-panel [next|off|1|2|3] [tl|tr|bl|br] [key=KEYS]   the performance panel over the picture (only in
+#                      a game launched with the word "panel": sc-turbo fg 4 panel; such a launch shows it
+#                      from the start). In the game a key steps it on, Shift+7 unless another is named:
+#                      off -> 1 the frame rate that is shown ("FG") -> 2 that and the game's own ("BASE"),
+#                      with the multiplier -> 3 both and a graph of the time between shown frames (even
+#                      pacing is a flat line) -> off. The layer reads the key inside the game, while the
+#                      game has the keyboard: no desktop shortcut, the same on every desktop. The game gets
+#                      the key as well, so pick one it does not use. Without a word (or "next") this command
+#                      does the same step from outside. tl tr bl br: the corner it sits in. key=KEYS: another
+#                      key for the running game, like key=Ctrl+F9 (Ctrl, Shift, Alt with a letter, a digit,
+#                      F1 to F12 ...; keys by their place on a US keyboard); SC_FG_PANEL_KEY=KEYS in
+#                      sc-turbo.conf keeps it for every launch.
+#   sc-turbo stop      end the session: the game, the RSI Launcher and what else of Wine runs in the prefix
+#                      are asked to end (SIGTERM: at once, nothing of the game is written out), then Wine's
+#                      server, which saves the prefix's registry. Says what is still there after two seconds.
+#   sc-turbo kill      the same without asking (SIGKILL), for a session that "stop" did not end
 #   sc-turbo fg-params name=value ...   tune the HUD detection while the game runs
 #                      (bias ratio motion up down level grow), or switch parts of the frame
 #                      matching to compare in place: chain=0|1 (frames matched to their captures by
@@ -66,11 +79,14 @@
 #                      GPU is done with the one before: no frames queued on a GPU that is the slower
 #                      one, so the picture is a frame's time newer, but a hitch of the game then costs
 #                      a frame). "gate=0 guard=0 first=0 gpuwait=0" is how it was before these four.
-#                      How the multiplier follows the game: fill=1 (default) the fewest generated frames
-#                      that fill the display (a game that could do 50 a second gets x3, is held at 40 and
-#                      shows 120, evenly), fill=0 the most that do not hold the game back (the same game
-#                      gets x2 and shows 100); probe=0|1 (a held game is asked what it could do by letting
-#                      one frame on early now and then, instead of guessing).
+#                      How the multiplier follows the game: fill=0 the most generated frames that do not
+#                      hold the game back (a game that could do 50 a second gets x2 and shows 100: what a
+#                      launch sets, the window's "Performance"), fill=1 the fewest that fill the display
+#                      (the same game gets x3, is held at 40 and shows 120, evenly: SC_FG_FILL=1 in
+#                      sc-turbo.conf, a smoother picture with more delay); probe=0|1 (a held game is asked what it could do by letting
+#                      one frame on early now and then, instead of guessing); adapt=0 the multiplier is
+#                      held where it was asked for, adapt=1 (default) it follows the game's rate (what
+#                      "fg N fixed" and "fg-mult N fixed|auto" set).
 #                      A frame that comes without a HUD capture of its own: gapfill=1 (default) its scene is
 #                      worked out from the frame and the last capture, and the HUD stays apart from what is
 #                      interpolated; gapfill=0: such frames are not generated from, and when several come
@@ -134,7 +150,9 @@ here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 #                      the graphics card has, through Mesa's layer VK_LAYER_MESA_vram_report_limit.
 #                      auto takes the wiki's table (12 GB: 9216, 10: 8192, 8: 6144, 6: 4096, 4: 2048)
 #                      and leaves larger cards alone. The layer is looked for on the system and in
-#                      build/vram-limit; without it nothing is placed.
+#                      build/vram-limit; without it, or where nvidia-smi cannot name the card, nothing is
+#                      placed and the launch says so. Of several different NVIDIA cards the limit is for
+#                      the first one nvidia-smi names, which the launch says as well.
 #   SC_LAUNCH_SET      "NAME=value NAME=value": environment settings that win over the script's own
 #   SC_RUNNER          the folder of another Wine runner (the one that holds bin/wine), for this launch
 #   SC_LAUNCH_COPY=0   starts the launch script itself, with nothing placed
@@ -149,6 +167,44 @@ SC_VRAM_LIMIT="${env_vram:-${SC_VRAM_LIMIT:-auto}}"
 SC_MANGOHUD="${env_hud:-${SC_MANGOHUD:-0}}"
 SC_PREFIX="${env_prefix:-${SC_PREFIX:-$HOME/Games/star-citizen}}"
 launch="${env_launch:-${SC_LAUNCH:-$SC_PREFIX/sc-launch.sh}}"
+# The launch itself. What it starts leaves no core dump: when the game ends abnormally, the system's
+# crash handler would otherwise write out all of its memory first, with the game's process (and its
+# window) staying until that is done: 25 GB took 110 seconds on 2026-11-20. Nothing reads such a dump.
+launch_now() {
+    ulimit -c 0 2>/dev/null
+    exec "$launch"
+}
+# The Wine processes of the prefix, "KIND PID" a line (KIND: game, server or other), for "stop" and
+# "kill": this user's processes whose program is one of Wine's (wine, wine64-preloader, wineserver ...)
+# and whose environment names this prefix. Only what a process was started with is looked at.
+prefix_processes() {
+    local want dir pid exe value name
+    want="$(realpath -m "$SC_PREFIX" 2>/dev/null)" || return 0
+    for dir in /proc/[0-9]*; do
+        [ -O "$dir" ] || continue
+        exe="$(readlink "$dir/exe" 2>/dev/null)" || continue
+        exe="${exe% (deleted)}"
+        case "${exe##*/}" in wine*) ;; *) continue ;; esac
+        value="$(tr '\0' '\n' < "$dir/environ" 2>/dev/null | sed -n 's/^WINEPREFIX=//p' | head -1)"
+        [ -n "$value" ] && [ "$(realpath -m "$value" 2>/dev/null)" = "$want" ] || continue
+        pid="${dir#/proc/}"; name="$(cat "$dir/comm" 2>/dev/null)"
+        case "${exe##*/}" in wineserver*) echo "server $pid"; continue ;; esac
+        case "$name" in StarCitizen.exe) echo "game $pid" ;; *) echo "other $pid" ;; esac
+    done
+}
+# The keys the layer knows for the panel (fg/panel_key.h): Ctrl, Shift, Alt and one key.
+panel_key_known() {
+    local key="${1,,}" part
+    while [[ "$key" == *+?* ]]; do
+        part="${key%%+*}"; key="${key#*+}"
+        case "$part" in ctrl|control|shift|alt) ;; *) return 1 ;; esac
+    done
+    case "$key" in
+    [0-9a-z]|f[1-9]|f1[0-2]|-|=|\[|\]|\;|\'|\`|\\|,|.|/) return 0 ;;
+    tab|minus|equal|grave|backslash|scrolllock|home|pageup|end|pagedown|insert|delete|pause) return 0 ;;
+    esac
+    return 1
+}
 need_launch() {
     if [ ! -x "$launch" ]; then
         echo "no launch script at $launch"
@@ -161,11 +217,23 @@ need_launch() {
 # game is told the card has less memory than it has, and so leaves room for everything else on the
 # card (the desktop, DLSS, this project's layer). Adds to args[] of own_launch. Says what it did.
 vram_limit() {
-    local total dev gb mib dir found="" data="${XDG_DATA_HOME:-$HOME/.local/share}"
+    local total dev name gb mib dir cards line other="" found="" data="${XDG_DATA_HOME:-$HOME/.local/share}"
     case "$SC_VRAM_LIMIT" in off|0) return 0 ;; esac
-    IFS=', ' read -r total dev < <(nvidia-smi --query-gpu=memory.total,pci.device_id --format=csv,noheader,nounits 2>/dev/null | head -1)
-    case "$total$dev" in ''|*[!0-9A-Fa-fx]*) return 0 ;; esac   # no NVIDIA card that can be asked
-    [ "${#dev}" = 10 ] || return 0                            # 0xDDDDVVVV: device, then vendor
+    # The card and its memory are asked of the driver's own tool. Where that cannot be done, no limit is
+    # set, and that is said: a launch that silently has none looks the same as one that has.
+    if ! command -v nvidia-smi > /dev/null 2>&1; then
+        echo "NOTE: the graphics memory limit is not set: nvidia-smi, which names the card and its memory, was"
+        echo "  not found (it comes with NVIDIA's driver; SC_VRAM_LIMIT=off ends this note)."
+        return 0
+    fi
+    cards="$(nvidia-smi --query-gpu=memory.total,pci.device_id,name --format=csv,noheader,nounits 2>/dev/null)"
+    IFS=', ' read -r total dev name <<< "${cards%%$'\n'*}"
+    case "$total$dev" in ''|*[!0-9A-Fa-fx]*) dev="" ;; esac
+    if [ "${#dev}" != 10 ]; then                              # 0xDDDDVVVV: device, then vendor
+        echo "NOTE: the graphics memory limit is not set: nvidia-smi named no card and its memory"
+        echo "  (SC_VRAM_LIMIT=off ends this note)."
+        return 0
+    fi
     case "$SC_VRAM_LIMIT" in
     auto)
         gb=$(( (total + 512) / 1024 ))
@@ -188,6 +256,16 @@ vram_limit() {
            --default "VK_VRAM_REPORT_LIMIT_HEAP_SIZE=$mib" --default "VK_VRAM_REPORT_LIMIT_DEVICE_ID=0x${dev:6:4}:0x${dev:2:4}")
     [ "$found" = "$here/build/vram-limit" ] && args+=(--append-path "VK_ADD_LAYER_PATH=$found")
     echo "Graphics memory: the game is told $mib MiB of $total (SC_VRAM_LIMIT=off leaves it alone)"
+    # Several NVIDIA cards of different kinds: the limit names one card, the first the driver's tool lists.
+    while IFS= read -r line; do
+        IFS=', ' read -r _ other _ <<< "$line"
+        [ -n "$other" ] && [ "$(printf '%s' "$other" | tr 'A-F' 'a-f')" != "$dev" ] && { other=differs; break; }
+        other=""
+    done <<< "$cards"
+    if [ "$other" = differs ]; then
+        echo "NOTE: there is more than one NVIDIA card here. The limit is for the first one nvidia-smi names${name:+, $name}."
+        echo "  A game that runs on another card gets no limit."
+    fi
 }
 # From here on "$launch" is this project's copy of the user's launch script (see the top of this part).
 # A script no copy can be made of (not a shell script, or one that looks for its files from its own
@@ -254,15 +332,28 @@ runner_note() {
 # (nvngx.dll and _nvngx.dll, which the LUG's runners link into the prefix from the driver's own "wine"
 # folder). No launch setting stands in for them: without them the game offers no DLSS, and frame
 # generation has nothing to read. Nothing is put into the prefix from here.
+#
+# And when the game itself is not set to DLSS: its own settings file says which upscaler is chosen
+# ("UpscalingTechnique", 2 for DLSS: what the file held on 2026-11-20 while the game's log said
+# "DLSS initialized successfully"). The file of the channel played last is read, and only read.
 dlss_note() {
-    local sys="$SC_PREFIX/drive_c/windows/system32" miss=""
+    local sys="$SC_PREFIX/drive_c/windows/system32" miss="" file newest=""
     [ -d "$sys" ] || return 0
     [ -e "$sys/nvapi64.dll" ] || miss="nvapi64.dll (dxvk-nvapi: the LUG Helper installs it)"
     [ -e "$sys/nvngx.dll" ] && [ -e "$sys/_nvngx.dll" ] ||
         miss="${miss:+$miss, }nvngx.dll and _nvngx.dll (the NVIDIA driver's NGX libraries: a LUG runner links them in)"
-    [ -n "$miss" ] || return 0
-    echo "NOTE: the prefix has no $miss."
-    echo "  DLSS needs them, and without DLSS selected in the game there are no generated frames."
+    if [ -n "$miss" ]; then
+        echo "NOTE: the prefix has no $miss."
+        echo "  DLSS needs them, and without DLSS selected in the game there are no generated frames."
+    fi
+    for file in "$SC_PREFIX/drive_c/Program Files/Roberts Space Industries/StarCitizen"/*/[uU][sS][eE][rR]/[cC]lient/0/Profiles/default/attributes.xml; do
+        [ -f "$file" ] || continue
+        if [ -z "$newest" ] || [ "$file" -nt "$newest" ]; then newest="$file"; fi
+    done
+    if [ -n "$newest" ] && ! grep -q '<Attr name="UpscalingTechnique" value="2"' "$newest"; then
+        echo "NOTE: the game's upscaler is not set to DLSS: no frames are generated until it is"
+        echo "  (in the game: Options > Graphics > Upscaling Technique)."
+    fi
 }
 # Said before a launch: desktop settings known to get in the game's way.
 # KDE's Plasma Keyboard (the on-screen keyboard service) offers accented letters when a physical
@@ -328,6 +419,15 @@ logs="$here/logs/probe"
 
 newest_log() { ls -t "$here"/logs/probe/probe-StarCitizen*.log "$here"/logs/capture/probe-StarCitizen*.log 2>/dev/null | head -1; }
 
+# Parameters for the layer in the running game (the control file PARAMS, which it reads once a
+# second and removes). What it has not read yet is kept and the new ones are added after it, so two
+# changes within a second both arrive; of the same name the later one counts.
+send_params() {
+    mkdir -p "$here/logs/fg"
+    { cat "$here/logs/fg/PARAMS" 2>/dev/null; printf '%s\n' "$@"; } > "$here/logs/fg/PARAMS.tmp" &&
+        mv "$here/logs/fg/PARAMS.tmp" "$here/logs/fg/PARAMS"
+}
+
 case "${1:-}" in
 probe|capture)
     if [ "$1" = capture ]; then
@@ -346,19 +446,30 @@ probe|capture)
     need_launch
     desktop_notes
     echo "Probe logs: $logs"
-    exec "$launch"
+    launch_now
     ;;
 fg)
     [ -f "$here/build/fg/libsc_fg.so" ] || { echo "build/fg/libsc_fg.so is missing (./build.sh install)"; exit 1; }
     need_launch
     mkdir -p "$here/logs/fg"; rm -f "$here/logs/fg/OFF" "$here/logs/fg/DUMP" "$here/logs/fg/MULT" "$here/logs/fg/HUDOFF" "$here/logs/fg/HUDLAYEROFF" "$here/logs/fg/HUDSCAN" "$here/logs/fg/TRACE" "$here/logs/fg/LAYER" "$here/logs/fg/SCDON" "$here/logs/fg/NOCAP" "$here/logs/fg/EVENTS" "$here/logs/fg/PARAMS"
-    export SC_FG=1 SC_FG_DIR="$here/logs/fg" SC_FG_MULT="${2:-2}"
+    # (the number is optional: "sc-turbo fg hud" is x2 with MangoHud)
+    case "${2:-}" in ''|*[!0-9]*) fg_mult=2; fg_words=("${@:2}") ;; *) fg_mult="$2"; fg_words=("${@:3}") ;; esac
+    export SC_FG=1 SC_FG_DIR="$here/logs/fg" SC_FG_MULT="$fg_mult"
     layer="$here/build/fg"
+    # The HUD kept apart from what is generated: on unless sc-turbo.conf says SC_FG_KEEP_HUD=0. Off is
+    # the control file that "sc-turbo fg-hud on" takes away again, so it can be switched in the game.
+    [ "${SC_FG_KEEP_HUD:-1}" = 0 ] && touch "$here/logs/fg/HUDOFF"
     # HUD content that moves over the screen (markers, the compass, a flight display) is put where it
     # is on its way in every generated frame, unless "nomarkers" or sc-turbo.conf says otherwise.
     export SC_FG_MARKERS="${SC_FG_MARKERS:-1}"
-    for word in "${@:3}"; do
+    # A multiplier that follows the game's rate takes the most generated frames that do not hold the
+    # game back (the quickest response), unless sc-turbo.conf says SC_FG_FILL=1: then the fewest that
+    # fill the display, with the game's own rate limited to an even part of the display's.
+    export SC_FG_FILL="${SC_FG_FILL:-0}"
+    for word in ${fg_words[@]+"${fg_words[@]}"}; do
         case "$word" in
+        fixed) export SC_FG_ADAPT=0 ;;   # the multiplier is held at the number
+        auto) export SC_FG_ADAPT=1 ;;    # it follows the game's rate, up to the number (what the layer does anyway)
         trace) export SC_FG_TRACE=1 ;;   # lets "sc-turbo fg-trace" record the frame structure
         hud) SC_MANGOHUD=1 ;;
         panel) export SC_FG_PANEL=1 ;;   # the layer's own panel (sc-turbo fg-panel); without the word there is none
@@ -375,7 +486,7 @@ fg)
             layer="$here/build/fg-next"
             [ -f "$layer/libsc_fg.so" ] || { echo "$layer/libsc_fg.so is missing (./build.sh)"; exit 1; }
             echo "Using the newest build, which is not validated yet ($layer)" ;;
-        *) echo "fg: \"$word\" is not known (hud, panel, nomarkers, watch, sched=NAME, trace, old, older, next)"; exit 1 ;;
+        *) echo "fg: \"$word\" is not known (fixed, hud, panel, nomarkers, watch, sched=NAME, trace, old, older, next)"; exit 1 ;;
         esac
     done
     # (This layer's folder comes first among the implicit layers, which puts it nearest the game:
@@ -393,18 +504,40 @@ fg)
             echo "MangoHud is not installed: launched without it"
         fi
     fi
+    if [ "${SC_FG_PANEL:-0}" = 1 ]; then
+        # The panel is there from the start: at the step it was left at, or the first one. The key
+        # is the one of sc-turbo.conf (the layer's own default is Shift+7).
+        panel_step=1; panel_corner=tl
+        [ -f "$here/logs/fg/PANEL" ] && read -r panel_step panel_corner _ < "$here/logs/fg/PANEL"
+        case "$panel_step" in [1-3]) ;; *) panel_step=1 ;; esac
+        case "$panel_corner" in tl|tr|bl|br) ;; *) panel_corner=tl ;; esac
+        if [ -n "${SC_FG_PANEL_KEY:-}" ] && ! panel_key_known "$SC_FG_PANEL_KEY"; then
+            echo "NOTE: SC_FG_PANEL_KEY=$SC_FG_PANEL_KEY is no key the panel knows (like Shift+7, Ctrl+F9): Shift+7 it is"
+            SC_FG_PANEL_KEY=
+        fi
+        export SC_FG_PANEL_KEY="${SC_FG_PANEL_KEY:-Shift+7}"
+        echo "$panel_step $panel_corner $SC_FG_PANEL_KEY" > "$here/logs/fg/PANEL.tmp" && mv "$here/logs/fg/PANEL.tmp" "$here/logs/fg/PANEL"
+    fi
     desktop_notes
     display_settings
     runner_note
     dlss_note
     echo "Frame generation x$SC_FG_MULT; log: $here/logs/fg"
+    [ "${SC_FG_PANEL:-0}" = 1 ] && echo "  The performance panel is shown; $SC_FG_PANEL_KEY in the game steps it on (more, then off)."
+    if [ "${SC_FG_ADAPT:-1}" = 0 ]; then
+        echo "  The multiplier is held at x$SC_FG_MULT (\"fixed\"); without that word it follows the game's rate, up to x$SC_FG_MULT."
+    fi
+    if [ "${SC_FG_ADAPT:-1}" != 0 ] && [ "$SC_FG_FILL" = 1 ]; then
+        echo "  The game's own rate is limited where that fills the display evenly (SC_FG_FILL=1); \"sc-turbo fg-params fill=0\" lets it run free."
+    fi
+    [ -e "$here/logs/fg/HUDOFF" ] && echo "  The HUD is not kept apart (SC_FG_KEEP_HUD=0); \"sc-turbo fg-hud on\" switches that on in the running game."
     if [ "${io_watch:-0}" = 1 ]; then
         mkdir -p "$here/logs/io"
         nohup "$here/tools/sc-iowatch" > "$here/logs/io/watch.out" 2>&1 &
         echo "Running with logs: the game's disk and memory use is noted from outside (afterwards: sc-turbo iowatch report)"
     fi
     start_sched
-    exec "$launch"
+    launch_now
     ;;
 run)
     # The game as it is, with none of this project's layers (the launcher window's 1x).
@@ -425,7 +558,7 @@ run)
         echo "Running with logs: the game's disk and memory use is noted from outside (afterwards: sc-turbo iowatch report)"
     fi
     start_sched
-    exec "$launch"
+    launch_now
     ;;
 gui)
     entry="${XDG_DATA_HOME:-$HOME/.local/share}/applications/net.local.myrddin.desktop"
@@ -461,32 +594,71 @@ fg-cap) case "${2:-}" in
 fg-params) shift
     # (read by the layer in the running game; a launch with frame generation clears them)
     if ! pgrep -x StarCitizen.exe > /dev/null; then
+        # (the RSI Launcher open after a launch with frame generation: the game it starts reads them.
+        # The kernel keeps 15 letters of a process's name.)
+        if pgrep -x 'RSI Launcher.ex' > /dev/null; then
+            send_params "$@" && echo "parameters kept for the game the RSI Launcher starts: $*"
+            exit 0
+        fi
         echo "the game is not running: nothing to send these to. Parameters are for a game that is running,"
         echo "launched with \"sc-turbo fg\", and are cleared at the next launch."
         exit 1
     fi
-    printf '%s\n' "$@" > "$here/logs/fg/PARAMS.tmp" && mv "$here/logs/fg/PARAMS.tmp" "$here/logs/fg/PARAMS" && echo "parameters sent: $*" ;;
+    send_params "$@" && echo "parameters sent: $*" ;;
 fg-trace) touch "$here/logs/fg/TRACE" && echo "trace requested" ;;
 fg-scan) touch "$here/logs/fg/HUDSCAN" && echo "pass scan requested (trace launches only)" ;;
 fg-dump) echo "${2:-1}" > "$here/logs/fg/DUMP.tmp" && mv "$here/logs/fg/DUMP.tmp" "$here/logs/fg/DUMP" && echo "dump requested (${2:-1} frame(s))" ;;
-fg-panel-key) shift; exec "$here/tools/sc-panel-key" "$@" ;;
+stop|kill)
+    # (see the head of this file; the processes are found by prefix_processes and nothing else is signalled)
+    list="$(prefix_processes)"
+    if [ -z "$list" ]; then echo "nothing of the prefix is running"; exit 0; fi
+    count="$(echo "$list" | wc -l)"
+    of() { echo "$list" | awk -v kind="$1" '$1 == kind { print $2 }'; }
+    left() { prefix_processes | awk -v skip="${1:-}" '$1 != skip' | wc -l; }
+    if [ "$1" = kill ]; then
+        # shellcheck disable=SC2046
+        kill -KILL $(of game) $(of other) $(of server) 2>/dev/null
+        for _ in 1 2 3 4 5 6 7 8 9 10; do [ "$(left)" = 0 ] && break; sleep 0.1; done
+    else
+        # shellcheck disable=SC2046
+        kill -TERM $(of game) 2>/dev/null
+        # shellcheck disable=SC2046
+        kill -TERM $(of other) 2>/dev/null
+        for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do [ "$(left server)" = 0 ] && break; sleep 0.1; done
+        # (Wine's server last: it saves the registry when it is asked to end)
+        # shellcheck disable=SC2046
+        [ -n "$(of server)" ] && kill -TERM $(of server) 2>/dev/null
+        for _ in 1 2 3 4 5; do [ "$(left)" = 0 ] && break; sleep 0.1; done
+    fi
+    still="$(left)"
+    if [ "$still" = 0 ]; then
+        echo "ended: $count processes of the prefix"
+    else
+        echo "$still of $count processes of the prefix are still there$([ "$1" = stop ] && echo ' ("sc-turbo kill" ends them at once)')"
+        exit 1
+    fi ;;
 fg-where) shift; exec "$here/tools/fg-where.py" "$@" ;;
 fg-panel)
-    file="$here/logs/fg/PANEL"; step=0; corner=tl
-    [ -f "$file" ] && read -r step corner < "$file"
+    file="$here/logs/fg/PANEL"; step=0; corner=tl; key=
+    [ -f "$file" ] && read -r step corner key _ < "$file"
     case "$step" in [0-3]) ;; *) step=0 ;; esac
     case "$corner" in tl|tr|bl|br) ;; *) corner=tl ;; esac
+    stepped=0
     for word in "${@:2}"; do
         case "$word" in
-        next) step=$(( (step + 1) % 4 )) ;;
-        off) step=0 ;;
-        [0-3]) step=$word ;;
-        tl|tr|bl|br) corner=$word ;;
-        *) echo "fg-panel [next|off|1|2|3] [tl|tr|bl|br]"; exit 1 ;;
+        next) step=$(( (step + 1) % 4 )); stepped=1 ;;
+        off) step=0; stepped=1 ;;
+        [0-3]) step=$word; stepped=1 ;;
+        tl|tr|bl|br) corner=$word; stepped=1 ;;
+        key=*)
+            panel_key_known "${word#key=}" || { echo "fg-panel: \"${word#key=}\" is no key the panel knows (like Shift+7, Ctrl+F9, Alt+Home)"; exit 1; }
+            key="${word#key=}"; echo "panel key: $key (for the running game; SC_FG_PANEL_KEY=$key in sc-turbo.conf keeps it)" ;;
+        *) echo "fg-panel [next|off|1|2|3] [tl|tr|bl|br] [key=KEYS]"; exit 1 ;;
         esac
     done
-    [ $# -lt 2 ] && step=$(( (step + 1) % 4 ))
-    mkdir -p "$here/logs/fg" && echo "$step $corner" > "$file.tmp" && mv "$file.tmp" "$file" || exit 1
+    [ $# -lt 2 ] && { step=$(( (step + 1) % 4 )); stepped=1; }
+    mkdir -p "$here/logs/fg" && echo "$step $corner${key:+ $key}" > "$file.tmp" && mv "$file.tmp" "$file" || exit 1
+    [ "$stepped" = 1 ] || exit 0
     case "$step" in 0) echo "panel off" ;; 1) echo "panel: shown rate ($corner)" ;; 2) echo "panel: shown rate and the game's ($corner)" ;;
         3) echo "panel: both rates and the pacing graph ($corner)" ;; esac
     # (the layer shows it only where the game was launched with the word "panel")
@@ -497,7 +669,18 @@ fg-panel)
         fi
     fi ;;
 fg-events) touch "$here/logs/fg/EVENTS" && echo "event log requested (logs/fg/events-*.txt)" ;;
-fg-mult) echo "${2:?multiplier 2, 3 or 4}" > "$here/logs/fg/MULT" && echo "multiplier x$2 requested" ;;
+fg-mult)
+    n="${2:?multiplier 2, 3 or 4}"
+    case "$n" in [2-4]) ;; *) echo "fg-mult: the multiplier is 2, 3 or 4"; exit 1 ;; esac
+    # (the word first: the layer reads the parameters before the multiplier, so that a held one goes
+    # to N at once and one that follows the rate takes N as its limit)
+    case "${3:-}" in
+    fixed) send_params adapt=0; said="multiplier x$n, held there" ;;
+    auto) send_params adapt=1; said="the multiplier follows the game's rate, up to x$n" ;;
+    '') said="multiplier x$n requested" ;;
+    *) echo "fg-mult N [fixed|auto]"; exit 1 ;;
+    esac
+    echo "$n" > "$here/logs/fg/MULT.tmp" && mv "$here/logs/fg/MULT.tmp" "$here/logs/fg/MULT" && echo "$said" ;;
 fg-stat) log="$(ls -t "$here"/logs/fg/fg-*.log 2>/dev/null | head -1)"; [ -n "$log" ] && { grep -v 'STAT' "$log" | tail -8; grep 'STAT' "$log" | tail -4; } ;;
 fg-watch) shift; exec "$here/tools/fg-watch.py" "$@" ;;
 fg-ab) shift; exec "$here/tools/fg-ab.sh" "$@" ;;

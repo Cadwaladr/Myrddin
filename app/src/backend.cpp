@@ -1,5 +1,7 @@
 #include "backend.h"
 
+#include "panel_key.h"   // (fg/: the keys the layer knows for its panel)
+
 #include <QClipboard>
 #include <QCoreApplication>
 #include <QDateTime>
@@ -191,6 +193,11 @@ Backend::Backend(const QString& runtimeOverride, QObject* parent) : QObject(pare
 
     loadConf();
     loadPrefs();
+    // One thing is drawn over the game, or none. Settings that have both: MangoHud, which counts the shown frames.
+    if (m_conf.value(QStringLiteral("mangohud")).toBool() && m_prefs.value(QStringLiteral("panel")).toBool()) {
+        m_prefs.insert(QStringLiteral("panel"), false);
+        QSettings(configFile(), QSettings::IniFormat).setValue(QStringLiteral("panel"), false);
+    }
     connect(&m_conf, &QQmlPropertyMap::valueChanged, this, [this](const QString&, const QVariant&) { m_saveLater.start(); });
     connect(&m_prefs, &QQmlPropertyMap::valueChanged, this, [this](const QString& key, const QVariant& value) {
         QSettings(configFile(), QSettings::IniFormat).setValue(key, value);
@@ -254,7 +261,8 @@ QString Backend::selfPath() const {
 
 void Backend::loadConf() {
     QString prefix, launch, monitor, target, sched;
-    bool mangohud = false, markers = true, fill = true;
+    bool mangohud = false, markers = true, keepHud = true, gapfill = true, pictures = true, boost = false, performance = true;
+    QString panelKey = QStringLiteral("Shift+7");
     m_confKept.clear();
     static const QRegularExpression assignment(QStringLiteral(R"(^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$)"));
     const QStringList lines = readAll(confPath()).split(QLatin1Char('\n'));
@@ -271,7 +279,15 @@ void Backend::loadConf() {
         else if (name == QStringLiteral("SC_MANGOHUD")) mangohud = confValue(value, prefix) == QStringLiteral("1");
         else if (name == QStringLiteral("SC_SCHED")) sched = confValue(value, prefix);
         else if (name == QStringLiteral("SC_FG_MARKERS")) markers = confValue(value, prefix) != QStringLiteral("0");
-        else if (name == QStringLiteral("SC_FG_FILL")) fill = confValue(value, prefix) != QStringLiteral("0");
+        else if (name == QStringLiteral("SC_FG_KEEP_HUD")) keepHud = confValue(value, prefix) != QStringLiteral("0");
+        else if (name == QStringLiteral("SC_FG_GAPFILL")) gapfill = confValue(value, prefix) != QStringLiteral("0");
+        else if (name == QStringLiteral("SC_FG_PICTURES")) pictures = confValue(value, prefix) != QStringLiteral("0");
+        else if (name == QStringLiteral("SC_FG_BOOST")) boost = confValue(value, prefix) == QStringLiteral("1");
+        else if (name == QStringLiteral("SC_FG_FILL")) performance = confValue(value, prefix) != QStringLiteral("1");
+        else if (name == QStringLiteral("SC_FG_PANEL_KEY")) {
+            panel_key::Combo combo;   // (one the panel does not know: the default stays)
+            if (panel_key::Parse(confValue(value, prefix).toUtf8().constData(), combo)) panelKey = QString::fromUtf8(combo.text);
+        }
         else m_confKept << line;
     }
     if (sched == QStringLiteral("stock")) sched.clear();
@@ -282,7 +298,12 @@ void Backend::loadConf() {
     m_conf.insert(QStringLiteral("mangohud"), mangohud);
     m_conf.insert(QStringLiteral("scheduler"), sched);
     m_conf.insert(QStringLiteral("markers"), markers);
-    m_conf.insert(QStringLiteral("fill"), fill);
+    m_conf.insert(QStringLiteral("keepHud"), keepHud);
+    m_conf.insert(QStringLiteral("gapfill"), gapfill);
+    m_conf.insert(QStringLiteral("pictures"), pictures);
+    m_conf.insert(QStringLiteral("boost"), boost);
+    m_conf.insert(QStringLiteral("performance"), performance);
+    m_conf.insert(QStringLiteral("panelKey"), panelKey);
 }
 
 void Backend::saveConf() {
@@ -299,8 +320,14 @@ void Backend::saveConf() {
     static const QRegularExpression word(QStringLiteral(R"(^[a-z0-9_]+(:[a-z0-9_]+)?$)"));
     if (word.match(text("scheduler")).hasMatch()) out << QStringLiteral("SC_SCHED=") + text("scheduler");
     if (!m_conf.value(QStringLiteral("markers")).toBool()) out << QStringLiteral("SC_FG_MARKERS=0");
-    // (the layer reads this one from the environment itself, so it is exported from the settings file)
-    if (!m_conf.value(QStringLiteral("fill")).toBool()) out << QStringLiteral("export SC_FG_FILL=0");
+    if (!m_conf.value(QStringLiteral("keepHud")).toBool()) out << QStringLiteral("SC_FG_KEEP_HUD=0");
+    // ("Performance" off: the game's frames are limited so that the display is filled evenly)
+    if (!m_conf.value(QStringLiteral("performance")).toBool()) out << QStringLiteral("SC_FG_FILL=1");
+    if (text("panelKey") != QStringLiteral("Shift+7") && !text("panelKey").isEmpty()) out << QStringLiteral("SC_FG_PANEL_KEY=") + shellQuoted(text("panelKey"));
+    // (the layer reads these from the environment itself, so they are exported from the settings file)
+    if (!m_conf.value(QStringLiteral("gapfill")).toBool()) out << QStringLiteral("export SC_FG_GAPFILL=0");
+    if (!m_conf.value(QStringLiteral("pictures")).toBool()) out << QStringLiteral("export SC_FG_PICTURES=0");
+    if (m_conf.value(QStringLiteral("boost")).toBool()) out << QStringLiteral("export SC_FG_BOOST=1");
     if (!m_confKept.isEmpty()) {
         out << QStringLiteral("# (lines the window does not know, kept as they were)");
         out << m_confKept;
@@ -317,17 +344,30 @@ void Backend::loadPrefs() {
     const auto take = [&](const char* key, const QVariant& fallback) {
         m_prefs.insert(QString::fromLatin1(key), stored.value(QString::fromLatin1(key), fallback));
     };
-    take("multiplier", 2);
-    take("panel", false);
+    // (An ini file gives everything back as text. A switch goes into the map as a truth value at
+    // once: put in as the text "false" first, the map keeps that text when the truth value false is
+    // put in after it, taking the two for equal, and to the pages the text "false" counts as on.)
+    const auto flag = [&](const char* key) { m_prefs.insert(QString::fromLatin1(key), stored.value(QString::fromLatin1(key), false).toBool()); };
+    take("mode", QString());
+    take("limit", 0);
+    flag("panel");
     take("panelCorner", QStringLiteral("tl"));
-    take("watch", false);
-    take("closeAfterLaunch", false);
-    take("welcomed", false);
-    take("lastLaunchLayer", false);
-    // (an ini file gives everything back as text)
-    m_prefs.insert(QStringLiteral("multiplier"), qBound(1, m_prefs.value(QStringLiteral("multiplier")).toInt(), 4));
-    for (const char* flag : {"panel", "watch", "closeAfterLaunch", "welcomed", "lastLaunchLayer"})
-        m_prefs.insert(QString::fromLatin1(flag), m_prefs.value(QString::fromLatin1(flag)).toBool());
+    flag("watch");
+    flag("closeAfterLaunch");
+    flag("welcomed");
+    flag("lastLaunchLayer");
+    // What is chosen on Play: off, a multiplier that is held (2, 3, 4), or auto: the layer picks the
+    // multiplier as the game's own rate changes, up to the limit. Settings from before "mode" had one
+    // number, which was off (1) or that limit: they become off, or auto with that limit.
+    static const QStringList modes = {QStringLiteral("off"), QStringLiteral("2"), QStringLiteral("3"), QStringLiteral("4"), QStringLiteral("auto")};
+    const int before = stored.value(QStringLiteral("multiplier"), 0).toInt();
+    QString mode = m_prefs.value(QStringLiteral("mode")).toString();
+    if (!modes.contains(mode)) mode = before == 1 ? QStringLiteral("off") : QStringLiteral("auto");
+    m_prefs.insert(QStringLiteral("mode"), mode);
+    int limit = m_prefs.value(QStringLiteral("limit")).toInt();   // (an ini file gives everything back as text)
+    if (limit < 2) limit = before > 1 ? before : 4;
+    m_prefs.clear(QStringLiteral("limit"));   // (so that the number takes the text's place, see above)
+    m_prefs.insert(QStringLiteral("limit"), qBound(2, limit, 4));
 }
 
 QString Backend::launchScriptInUse() const {
@@ -338,10 +378,13 @@ QString Backend::launchScriptInUse() const {
 }
 
 QStringList Backend::launchWords() const {
-    const int n = m_prefs.value(QStringLiteral("multiplier")).toInt();
+    const QString mode = m_prefs.value(QStringLiteral("mode")).toString();
     const bool logs = m_prefs.value(QStringLiteral("watch")).toBool();   // "Run with logs"
-    if (n <= 1) return logs ? QStringList{QStringLiteral("run"), QStringLiteral("watch")} : QStringList{QStringLiteral("run")};
-    QStringList words{QStringLiteral("fg"), QString::number(n)};
+    if (mode == QStringLiteral("off")) return logs ? QStringList{QStringLiteral("run"), QStringLiteral("watch")} : QStringList{QStringLiteral("run")};
+    // auto: "fg N", the layer picks up to N; a multiplier of one's own: "fg N fixed", held there
+    const bool held = mode != QStringLiteral("auto");
+    QStringList words{QStringLiteral("fg"), held ? mode : QString::number(m_prefs.value(QStringLiteral("limit")).toInt())};
+    if (held) words << QStringLiteral("fixed");
     if (m_prefs.value(QStringLiteral("panel")).toBool()) words << QStringLiteral("panel");
     if (logs) words << QStringLiteral("watch");
     return words;
@@ -435,49 +478,67 @@ void Backend::launch() {
     if (m_prefs.value(QStringLiteral("closeAfterLaunch")).toBool()) QTimer::singleShot(2500, qApp, &QCoreApplication::quit);
 }
 
-void Backend::setMultiplier(int n) {
-    n = qBound(1, n, 4);
-    m_prefs.insert(QStringLiteral("multiplier"), n);
-    QSettings(configFile(), QSettings::IniFormat).setValue(QStringLiteral("multiplier"), n);
+bool Backend::steering() const { return (m_state == QStringLiteral("running") || m_state == QStringLiteral("launcher")) && m_layerSession; }
+
+void Backend::setMode(const QString& mode) {
+    static const QStringList modes = {QStringLiteral("off"), QStringLiteral("2"), QStringLiteral("3"), QStringLiteral("4"), QStringLiteral("auto")};
+    if (!modes.contains(mode)) return;
+    m_prefs.insert(QStringLiteral("mode"), mode);
+    QSettings(configFile(), QSettings::IniFormat).setValue(QStringLiteral("mode"), mode);
     emit commandChanged();
     if (m_state != QStringLiteral("running") && m_state != QStringLiteral("launcher")) return;
     if (!m_layerSession) {
-        if (n > 1) emit said(QStringLiteral("This session was not started with the layer from here: generated frames come with the next launch"));
+        if (mode != QStringLiteral("off")) emit said(QStringLiteral("This session was not started with the layer from here: generated frames come with the next launch"));
         return;
     }
     QString answer;
-    if (n <= 1) {
+    if (mode == QStringLiteral("off")) {
         scTurbo({QStringLiteral("fg-off")}, &answer);
     } else {
         scTurbo({QStringLiteral("fg-on")});
-        scTurbo({QStringLiteral("fg-mult"), QString::number(n)}, &answer);
+        if (mode == QStringLiteral("auto")) scTurbo({QStringLiteral("fg-mult"), QString::number(m_prefs.value(QStringLiteral("limit")).toInt()), QStringLiteral("auto")}, &answer);
+        else scTurbo({QStringLiteral("fg-mult"), mode, QStringLiteral("fixed")}, &answer);
     }
     emit said(answer.section(QLatin1Char('\n'), -1));
     poll();
 }
 
-void Backend::setGeneration(bool on) {
+void Backend::setLimit(int n) {
+    n = qBound(2, n, 4);
+    m_prefs.insert(QStringLiteral("limit"), n);
+    QSettings(configFile(), QSettings::IniFormat).setValue(QStringLiteral("limit"), n);
+    emit commandChanged();
+    // (the limit is Auto's: a multiplier that is held is not moved by it)
+    if (!steering() || m_prefs.value(QStringLiteral("mode")).toString() != QStringLiteral("auto")) return;
     QString answer;
-    scTurbo({on ? QStringLiteral("fg-on") : QStringLiteral("fg-off")}, &answer);
+    scTurbo({QStringLiteral("fg-mult"), QString::number(n), QStringLiteral("auto")}, &answer);
     emit said(answer.section(QLatin1Char('\n'), -1));
-    poll();
 }
 
-void Backend::sendParam(const QString& name, const QString& value) {
-    static const QRegularExpression safe(QStringLiteral(R"(^[a-z]+$)"));
-    static const QRegularExpression safeValue(QStringLiteral(R"(^-?[0-9.]+$)"));
-    if (!safe.match(name).hasMatch() || !safeValue.match(value).hasMatch()) return;
+// A switch of Options: written to sc-turbo.conf for the next launch, and sent to a running game.
+void Backend::setOption(const QString& name, bool on) {
+    static const QStringList params = {QStringLiteral("markers"), QStringLiteral("gapfill"), QStringLiteral("pictures"), QStringLiteral("boost")};
+    if (name != QStringLiteral("keepHud") && name != QStringLiteral("performance") && !params.contains(name)) return;
+    m_conf.insert(name, on);
+    m_saveLater.start();   // (insert() from here does not say "changed", which is what a page's own change does)
+    if (!steering()) return;
     QString answer;
-    scTurbo({QStringLiteral("fg-params"), name + QLatin1Char('=') + value}, &answer);
+    if (name == QStringLiteral("keepHud")) scTurbo({QStringLiteral("fg-hud"), on ? QStringLiteral("on") : QStringLiteral("off")}, &answer);
+    // ("Performance" is the layer's "fill" the other way round)
+    else if (name == QStringLiteral("performance")) scTurbo({QStringLiteral("fg-params"), on ? QStringLiteral("fill=0") : QStringLiteral("fill=1")}, &answer);
+    else scTurbo({QStringLiteral("fg-params"), name + (on ? QStringLiteral("=1") : QStringLiteral("=0"))}, &answer);
     emit said(answer.section(QLatin1Char('\n'), 0, 0));
 }
 
-void Backend::liveSwitch(const QString& command, bool on) {
-    static const QStringList allowed = {QStringLiteral("fg-hud"), QStringLiteral("fg-cap"), QStringLiteral("fg-scd"), QStringLiteral("fg-layer")};
-    if (!allowed.contains(command)) return;
-    QString answer;
-    scTurbo({command, on ? QStringLiteral("on") : QStringLiteral("off")}, &answer);
-    emit said(answer.section(QLatin1Char('\n'), 0, 0));
+// One thing over the game's picture, or none: MangoHud (SC_MANGOHUD in sc-turbo.conf) or the layer's own panel.
+void Backend::setOverlay(const QString& which) {
+    static const QStringList known = {QStringLiteral("off"), QStringLiteral("mangohud"), QStringLiteral("panel")};
+    if (!known.contains(which)) return;
+    m_conf.insert(QStringLiteral("mangohud"), which == QStringLiteral("mangohud"));
+    m_prefs.insert(QStringLiteral("panel"), which == QStringLiteral("panel"));
+    QSettings(configFile(), QSettings::IniFormat).setValue(QStringLiteral("panel"), which == QStringLiteral("panel"));
+    m_saveLater.start();
+    emit commandChanged();
 }
 
 void Backend::panel(const QString& word) {
@@ -489,10 +550,75 @@ void Backend::panel(const QString& word) {
     emit said(answer.section(QLatin1Char('\n'), 0, 0));
 }
 
+// A key press as the panel's key: Qt hands over the keyboard's own number for the key (on Linux the
+// input code plus 8), which is what the layer goes by, whatever the keyboard layout prints.
+QString Backend::keyName(int nativeScanCode, int modifiers) const {
+    if (modifiers & Qt::MetaModifier) return {};   // (no Super keys: desktops keep those)
+    const char* name = nativeScanCode > 8 ? panel_key::NameOf(static_cast<uint16_t>(nativeScanCode - 8)) : nullptr;
+    if (!name) return {};
+    return QLatin1String(modifiers & Qt::ControlModifier ? "Ctrl+" : "") + QLatin1String(modifiers & Qt::ShiftModifier ? "Shift+" : "") +
+           QLatin1String(modifiers & Qt::AltModifier ? "Alt+" : "") + QString::fromUtf8(name);
+}
+
+void Backend::setPanelKey(const QString& keys) {
+    panel_key::Combo combo;
+    if (!panel_key::Parse(keys.toUtf8().constData(), combo)) {
+        emit said(QStringLiteral("Not a key the panel can use: %1").arg(keys));
+        return;
+    }
+    const QString tidy = QString::fromUtf8(combo.text);
+    m_conf.insert(QStringLiteral("panelKey"), tidy);
+    m_saveLater.start();
+    QString answer;
+    if (steering() && m_prefs.value(QStringLiteral("panel")).toBool()) scTurbo({QStringLiteral("fg-panel"), QStringLiteral("key=") + tidy}, &answer);
+    emit said(answer.isEmpty() ? QStringLiteral("Panel key: %1").arg(tidy) : answer.section(QLatin1Char('\n'), 0, 0));
+}
+
+// Stop: the game, the RSI Launcher and what else of Wine runs in the prefix are asked to end. Should
+// any of it still be there two seconds later, "Kill" is offered, which ends it without asking.
+void Backend::stop() {
+    if (m_stopping || (m_state != QStringLiteral("launcher") && m_state != QStringLiteral("running"))) return;
+    m_stopping = true;
+    m_canKill = false;
+    emit stateChanged();
+    startAsync(m_runtime + QStringLiteral("/sc-turbo"), {QStringLiteral("stop")}, [this](int, const QString& output) {
+        if (!output.isEmpty()) emit said(output.section(QLatin1Char('\n'), -1));
+        poll();
+    });
+    QTimer::singleShot(2000, this, [this] {
+        poll();
+        if (!m_stopping || m_canKill) return;
+        m_canKill = true;
+        emit stateChanged();
+    });
+    m_poll.start(400);
+}
+
+void Backend::kill() {
+    if (!m_stopping || !m_canKill) return;
+    startAsync(m_runtime + QStringLiteral("/sc-turbo"), {QStringLiteral("kill")}, [this](int, const QString& output) {
+        if (!output.isEmpty()) emit said(output.section(QLatin1Char('\n'), -1));
+        poll();
+    });
+}
+
+void Backend::showLaunchLog() {
+    m_toolBusy = false;
+    m_toolTitle = QStringLiteral("The last launch");
+    m_toolOutput = m_launchLog.isEmpty() ? QStringLiteral("Nothing yet: what sc-turbo says when it starts the game shows up here (the display it found, the runner, anything in the way).") : m_launchLog;
+    emit toolChanged();
+}
+
+void Backend::closeTool() {
+    if (m_toolTitle.isEmpty()) return;
+    m_toolTitle.clear();   // (one that still runs ends by itself; what it says is not shown)
+    if (!m_toolBusy) m_toolOutput.clear();
+    emit toolChanged();
+}
+
 void Backend::runTool(const QString& title, const QStringList& words) {
     static const QStringList allowed = {QStringLiteral("check"),   QStringLiteral("latency"), QStringLiteral("displays"), QStringLiteral("fg-stat"),
-                                        QStringLiteral("fg-watch"), QStringLiteral("threads"), QStringLiteral("fg-where"), QStringLiteral("iowatch"),
-                                        QStringLiteral("fg-panel-key")};
+                                        QStringLiteral("fg-watch"), QStringLiteral("threads"), QStringLiteral("fg-where"), QStringLiteral("iowatch")};
     if (m_toolBusy || words.isEmpty() || !allowed.contains(words.first())) return;
     m_toolBusy = true;
     m_toolTitle = title;
@@ -524,13 +650,15 @@ void Backend::poll() {
     else if (m_startedAt && now - m_startedAt < 90000) m_state = QStringLiteral("starting");
     else m_state = QStringLiteral("idle");
     if (m_state != QStringLiteral("starting")) m_startedAt = 0;   // (the launcher closed again is "idle", not "starting")
+    const bool stopped = m_stopping && m_state == QStringLiteral("idle");
+    if (stopped) m_stopping = m_canKill = false;
 
     readStats(gameUp);
     // With the layer: the game writes the layer's log (a line every ten seconds at least). Before the game
     // is up, what the last launch from this window asked for is all there is to go by.
     const bool layer = gameUp ? m_statsFresh : (launcherUp && m_prefs.value(QStringLiteral("lastLaunchLayer")).toBool());
     const bool generating = layer && !QFile::exists(m_runtime + QStringLiteral("/logs/fg/OFF"));
-    const bool changed = before != m_state || layer != m_layerSession || generating != m_generating;
+    const bool changed = before != m_state || layer != m_layerSession || generating != m_generating || stopped;
     m_layerSession = layer;
     m_generating = generating;
     if (changed) emit stateChanged();
@@ -545,7 +673,7 @@ void Backend::poll() {
         emit runtimeChanged();
         refreshChecks();
     }
-    m_poll.setInterval(m_state == QStringLiteral("idle") ? 2500 : 1500);
+    m_poll.setInterval(m_stopping ? 400 : m_state == QStringLiteral("idle") ? 2500 : 1500);
 }
 
 void Backend::readStats(bool gameUp) {
@@ -844,6 +972,23 @@ void Backend::refreshChecks() {
             list << check(QStringLiteral("runner"), QStringLiteral("Wine runner"), dll.exists() ? QStringLiteral("%1, with vkd3d-proton").arg(name) : name, QStringLiteral("ok"));
     }
 
+    // What DLSS needs in the prefix under Wine: NVAPI (nvapi64.dll of dxvk-nvapi, which the LUG Helper
+    // installs) and the NVIDIA driver's NGX libraries (which the LUG's runners link in). The same test
+    // as sc-turbo's own note at a launch; nothing is put into the prefix from here.
+    const QString system32 = (prefix.isEmpty() ? QFileInfo(script).absolutePath() : prefix) + QStringLiteral("/drive_c/windows/system32");
+    if (QDir(system32).exists()) {
+        const bool nvapi = QFileInfo::exists(system32 + QStringLiteral("/nvapi64.dll"));
+        const bool ngx = QFileInfo::exists(system32 + QStringLiteral("/nvngx.dll")) && QFileInfo::exists(system32 + QStringLiteral("/_nvngx.dll"));
+        const QString title = QStringLiteral("NVAPI in the prefix");
+        const QString without = QStringLiteral(" the game offers no DLSS, and without DLSS there are no generated frames.");
+        if (!nvapi)
+            list << check(QStringLiteral("nvapi"), title, QStringLiteral("The prefix has no nvapi64.dll (dxvk-nvapi). The LUG Helper installs it. Without it") + without, QStringLiteral("warn"));
+        else if (!ngx)
+            list << check(QStringLiteral("nvapi"), title, QStringLiteral("nvapi64.dll is there, but NVIDIA's NGX libraries (nvngx.dll and _nvngx.dll) are not. A LUG runner links them in from the driver. Without them") + without, QStringLiteral("warn"));
+        else
+            list << check(QStringLiteral("nvapi"), title, QStringLiteral("nvapi64.dll (dxvk-nvapi) and NVIDIA's NGX libraries are there: the game can offer DLSS"), QStringLiteral("ok"));
+    }
+
     // the graphics driver
     const QString nvidia = readAll(QStringLiteral("/proc/driver/nvidia/version"));
     static const QRegularExpression driverVersion(QStringLiteral(R"(Kernel Module.*?\s(\d+\.\d+(?:\.\d+)?)\s)"));
@@ -862,7 +1007,34 @@ void Backend::refreshChecks() {
     if (m_conf.value(QStringLiteral("mangohud")).toBool() && !m_mangohud)
         list << check(QStringLiteral("mangohud"), QStringLiteral("MangoHud"), QStringLiteral("Switched on in Options, but MangoHud is not installed: the game starts without it."), QStringLiteral("warn"), {}, QStringLiteral("options"));
 
-    list << check(QStringLiteral("dlss"), QStringLiteral("In the game"), QStringLiteral("Set the upscaler to DLSS (Options > Graphics): its motion vectors and depth are what the generated frames are made from."), QStringLiteral("info"));
+    // The game's own choice of upscaler, read from the settings file it keeps in its folder (the newest
+    // of its channels': LIVE, PTU ...). Only read, and only the one value. "UpscalingTechnique" 2 is
+    // DLSS: what the file held on 2026-11-20 while the game's own log said "DLSS initialized
+    // successfully" and frames were generated. The game writes the file when a setting is changed.
+    {
+        const QString title = QStringLiteral("DLSS in the game");
+        const QString why = QStringLiteral(" Its motion vectors and depth are what the generated frames are made from.");
+        const QString games = (prefix.isEmpty() ? QFileInfo(script).absolutePath() : prefix) + QStringLiteral("/drive_c/Program Files/Roberts Space Industries/StarCitizen");
+        QFileInfo newest;
+        const QFileInfoList channels = QDir(games).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+        for (const QFileInfo& channel : channels) {
+            for (const char* inside : {"/user/client/0/Profiles/default/attributes.xml", "/USER/Client/0/Profiles/default/attributes.xml"}) {
+                const QFileInfo file(channel.absoluteFilePath() + QLatin1String(inside));
+                if (file.isFile() && (!newest.exists() || file.lastModified() > newest.lastModified())) newest = file;
+            }
+        }
+        if (!newest.exists()) {
+            list << check(QStringLiteral("dlss"), title, QStringLiteral("Not known yet: the game keeps its settings in a file that is written once it has run. Set the upscaler to DLSS there (Options > Graphics).") + why, QStringLiteral("info"));
+        } else {
+            static const QRegularExpression technique(QStringLiteral(R"re(<Attr\s+name="UpscalingTechnique"\s+value="([^"]*)")re"));
+            const auto match = technique.match(readAll(newest.absoluteFilePath()));
+            const QString channel = newest.absoluteFilePath().mid(games.size() + 1).section(QLatin1Char('/'), 0, 0);
+            if (match.hasMatch() && match.captured(1) == QStringLiteral("2"))
+                list << check(QStringLiteral("dlss"), title, QStringLiteral("The game's upscaler is set to DLSS (%1)").arg(channel), QStringLiteral("ok"));
+            else
+                list << check(QStringLiteral("dlss"), title, QStringLiteral("The game's upscaler is not set to DLSS (%1): no frames are generated until it is. In the game: Options > Graphics > Upscaling Technique.").arg(channel) + why, QStringLiteral("warn"));
+        }
+    }
 
     m_checks = list;
     m_blocker = blocker;

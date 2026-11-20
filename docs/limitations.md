@@ -33,9 +33,11 @@ run on.
   the 12 GB test card the game runs close to the limit. Switching the upscaler to native
   resolution in a running session exhausted it, turned generation off and was followed by a
   driver hang. Leave headroom, and do not change the upscaling mode during a session.
-- Desktop integration (the panel's key, naming the display the game should use, reading its
-  refresh rate) is written for KDE Plasma and COSMIC. Elsewhere, bind `./sc-turbo fg-panel` to a
-  key yourself and set `SC_MONITOR` and `SC_FG_TARGET`.
+- Desktop integration (naming the display the game should use, reading its refresh rate) is
+  written for KDE Plasma and COSMIC. Elsewhere, set `SC_MONITOR` and `SC_FG_TARGET`. The panel's
+  key needs no desktop: the layer reads it inside the game.
+- The panel's key goes by the key's place on a US keyboard, and the game gets the key press as
+  well. Shift+7 is the default; another one is set in Options or as `SC_FG_PANEL_KEY`.
 - No installer and no packages yet. x86_64 only.
 
 ## Known faults

@@ -4,12 +4,15 @@
 //   myrddin fg 4 hud            anything that does not start with "-" goes to sc-turbo as it is
 //   myrddin --runtime DIR       use the sc-turbo in DIR (a source checkout) instead of the installed copy
 //   myrddin --screenshot FILE [--page NAME] [--settle MS] [--size WxH]   a picture of the window, for tests
-//   myrddin --test-eval CODE    for tests: a QML expression run after the start ("backend.launch()")
+//   myrddin --test-eval CODE    for tests: a QML expression run half a second after the start
+//                               ("backend.launch()"; "@2600 CODE": after that many milliseconds;
+//                               "pointer.move(X, Y)" and "pointer.click(X, Y)" stand in for a mouse)
 //
 // Run from the AppImage, the runtime (sc-turbo, its tools, the layer) is first copied to
 // ~/.local/share/myrddin/runtime when it is missing or older there.
 #include "backend.h"
 #include "systemcolors.h"
+#include "testpointer.h"
 
 #include <QCommandLineParser>
 #include <QDir>
@@ -24,6 +27,7 @@
 #include <QQmlExpression>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QRegularExpression>
 #include <QTimer>
 
 #include <cstdio>
@@ -119,13 +123,22 @@ int main(int argc, char** argv) {
     engine.loadFromModule("Myrddin", "Main");
     if (engine.rootObjects().isEmpty()) return 2;
 
-    for (const QString& code : args.values(QStringLiteral("test-eval")))
-        QTimer::singleShot(500, &engine, [&engine, code] {
+    if (args.isSet(QStringLiteral("test-eval")))
+        engine.rootContext()->setContextProperty(QStringLiteral("pointer"), new TestPointer(qobject_cast<QQuickWindow*>(engine.rootObjects().first()), &engine));
+    for (QString code : args.values(QStringLiteral("test-eval"))) {
+        int after = 500;   // ("@2600 CODE": that many milliseconds after the start)
+        static const QRegularExpression timed(QStringLiteral(R"(^@(\d+)\s+)"));
+        if (const auto match = timed.match(code); match.hasMatch()) {
+            after = match.captured(1).toInt();
+            code = code.mid(match.capturedLength());
+        }
+        QTimer::singleShot(after, &engine, [&engine, code] {
             QObject* root = engine.rootObjects().first();
             QQmlExpression expression(QQmlEngine::contextForObject(root), root, code);   // (the window's ids are known there)
             expression.evaluate();
             if (expression.hasError()) std::fprintf(stderr, "myrddin: --test-eval: %s\n", qPrintable(expression.error().toString()));
         });
+    }
 
     if (args.isSet(QStringLiteral("screenshot"))) {
         auto* window = qobject_cast<QQuickWindow*>(engine.rootObjects().first());

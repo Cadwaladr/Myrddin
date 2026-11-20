@@ -89,6 +89,22 @@ PageView {
             detail: backend.cliNote !== "" ? backend.cliNote : "A link in ~/.local/bin, so that \"myrddin fg 4\" works from any terminal. Every sc-turbo command goes through it."
             Toggle { checked: backend.cliLink; onToggled: (v) => backend.setCliLink(v) }
         }
+        SettingRow {
+            title: "The launch as a command"
+            detail: "What Launch on the Play page does as it is set now, for a terminal."
+            RowLayout {
+                spacing: 6
+                Text {
+                    text: backend.command
+                    color: Theme.dim
+                    font.family: Theme.mono
+                    font.pixelSize: 13
+                    Layout.maximumWidth: 300
+                    elide: Text.ElideRight
+                }
+                ActionButton { kind: "quiet"; icon: Theme.iconCopy; onClicked: backend.copy(backend.command) }
+            }
+        }
         Divider {}
         SettingRow {
             title: "Close this window after a launch"

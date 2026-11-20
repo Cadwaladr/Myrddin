@@ -29,9 +29,12 @@ AMD's FSR 3.1 frame interpolation on the motion vectors and depth the game gives
 one, two or three generated frames.
 
 - You set the multiplier (×2, ×3 or ×4) at launch and can change it while the game runs. Up to
-  that limit it follows the game's frame rate and uses the fewest generated frames that fill the
-  display. If the game alone gets above 92 % of the refresh rate, generation pauses until it
-  drops below 80 %.
+  that limit it follows the game's frame rate and never slows the game down to fit more
+  generated frames in (`SC_FG_FILL=1`, the window's "Performance" switched off, limits the
+  game's frames instead so that the display is filled evenly). If the game alone gets above
+  92 % of the refresh rate, generation pauses until it drops below 80 %. With the word `fixed`
+  (the launcher window's 2×, 3× and 4×) the multiplier is held instead, whatever the game's
+  frame rate.
 - The HUD stays sharp. The game draws its HUD into a layer of its own, and `sc_fg` captures it,
   interpolates the picture without it and puts the HUD back over every generated frame. A frame
   that arrives without a capture gets its HUD-free picture worked out from the frame and the
@@ -47,7 +50,7 @@ one, two or three generated frames.
 - With `./sc-turbo fg 3 hud`, MangoHud sits below the layer and counts every frame that goes out.
   Keep MangoHud's own `fps_limit` off, or it holds the layer's frames back. The layer also has a
   small panel of its own (shown rate, the game's own rate, a pacing graph) when you ask for it
-  at launch.
+  at launch; Shift+7 in the game steps through it.
 
 Around the layer there is a launcher window, an optional CPU scheduler for the time the game
 runs, and tools for measuring: two settings compared within one session, the time from a frame
@@ -82,7 +85,7 @@ git clone https://github.com/Cadwaladr/Myrddin.git
 cd Myrddin
 ./build.sh            # AMD's library (once), both layers, the test program
 ./build.sh install    # puts the new layer in place; not while the game runs
-./sc-turbo fg 3       # launch with frame generation, ×3 (2, 3 or 4)
+./sc-turbo fg 3       # launch with frame generation, up to ×3 (2, 3 or 4; "fg 3 fixed" holds it at ×3)
 ./sc-turbo fg-off     # in a running game: frames pass through untouched; fg-on brings generation back
 ```
 

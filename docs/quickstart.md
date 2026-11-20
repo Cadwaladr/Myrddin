@@ -24,16 +24,31 @@ chmod +x Myrddin-x86_64.AppImage
 
 The first start asks where the game is (it looks where the LUG Helper puts it) and checks what a
 launch needs: the launch script, a runner with vkd3d-proton, the NVIDIA driver, the display.
-After that the window has five pages:
+After that the window has four pages:
 
-- Play: the multiplier (Off, ×2, ×3, ×4) and the launch. While the game runs it shows the shown
-  frame rate, the game's own and the frame time, and a change of multiplier acts at once.
-- Setup: the game's folder and launch script, the system check with its fixes, an entry in the
-  application menu, and a `myrddin` command for the terminal.
-- Options: display and refresh rate, MangoHud, the panel with its corner and key, moving HUD
-  elements, the CPU scheduler, running with logs, and the switches that act on a running game.
-- Session: frame rates over the last fifteen minutes, the reports `sc-turbo` can make, and what
-  the last launch printed.
+- Play: the multiplier, the performance overlay and the launch, and below them the session's
+  frame rates while the game runs. The multiplier is Off, 2×, 3×, 4× or Auto. 2×, 3× and 4× hold
+  that multiplier whatever the game's frame rate. With Auto the layer picks the multiplier as the
+  game's own rate changes, 2× at the least and no more than the highest multiplier set in Options
+  (4× unless you change it). "Performance" is Auto's: on, the game's own frames are never
+  limited, which is the fastest response; off, they are limited so that every refresh of the
+  display gets a frame, a smoother picture with more latency. A change acts at once in a running
+  game. The overlay is MangoHud, Myrddin's own panel or none; the panel is there from the start
+  of the game, and Shift+7 in the game steps through it. "Run with logs" is the tab under the
+  launch button. While the RSI Launcher or the game is up, the launch button says "Stop" under
+  the pointer: a click asks the session to end. If something of it is still there two seconds
+  later, the button offers "Kill", which ends it at once.
+- Setup: the game's folder and launch script, the system check with its fixes (the runner, NVAPI
+  in the prefix, whether the game is set to DLSS, the graphics driver, the display), an entry in
+  the application menu, a
+  `myrddin` command for the terminal, and the launch as it is set, as a command to copy.
+- Options: display and refresh rate, the multiplier, the highest one Auto may pick and
+  "Performance" with what it does, the
+  performance overlay with the panel's corner and its key (click the key and press another to
+  change it), how the HUD is treated in generated
+  frames, the CPU scheduler, running with logs, and the reports `sc-turbo` can make. The
+  multiplier and the HUD and performance switches are kept for the next launch and also act at
+  once in a running game.
 - About: versions and licences.
 
 With "Run with logs" switched on (Play or Options), the window offers the session's log once the
@@ -61,9 +76,10 @@ one for Star Citizen), and none is part of this project.
 ## From a terminal
 
 ```sh
-./sc-turbo fg 3                  # launch with frame generation, ×3 (2, 3 or 4; the number comes first)
+./sc-turbo fg 4                  # launch with frame generation: the layer picks the multiplier, up to ×4
+./sc-turbo fg 3 fixed            # launch with ×3, held there whatever the game's frame rate
 ./sc-turbo run                   # launch without it
-./sc-turbo fg-mult 4             # change the multiplier while the game runs
+./sc-turbo fg-mult 3 fixed       # in a running game: ×3, held ("fg-mult 4 auto": the layer picks again, up to ×4)
 ./sc-turbo fg-off                # frames pass through untouched; fg-on brings generation back
 ```
 

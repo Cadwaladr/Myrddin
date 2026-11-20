@@ -28,7 +28,6 @@ TOOLS=(
     "sc-launch-copy|sc-turbo: the copy of the launch script that every launch starts (own_launch)"
     "sc-sched|sc-turbo: \"sched=NAME\" / SC_SCHED at launch (allowed, follow); \"tools/sc-sched rule\" is named in the usage and sc-turbo.conf.example"
     "sc-iowatch|sc-turbo: \"fg N watch\" starts it in the background, \"sc-turbo iowatch [report]\""
-    "sc-panel-key|sc-turbo: \"fg-panel-key\""
     "fg-where.py|sc-turbo: \"fg-where\""
     "fg-watch.py|sc-turbo: \"fg-watch\""
     "fg-ab.sh|sc-turbo: \"fg-ab\"; also run by sc-ab-threads.sh"
@@ -81,7 +80,7 @@ this code and data from elsewhere:
 | AMD FidelityFX SDK 1.1.4 (frame interpolation, optical flow), Copyright (C) 2024 Advanced Micro Devices, Inc., with our changes that yield several generated frames per pair | linked into `libsc_fg.so` | MIT | `licenses/FidelityFX-SDK-MIT.txt` |
 | Our Linux build recipe of the SDK, its compatibility header and swapchain stub, first written for our build of Lichii; the files carry the notice of the project they were written in, Copyright 2026 Eden Emulator Project | linked into `libsc_fg.so` | GPL-3.0-or-later | `LICENSE` |
 | Adwaita Sans (the performance panel's letters, as a glyph atlas), Copyright the Inter Project Authors, Renzhi Li, Jamie Gravendeel, Florian Müllner | compiled into `libsc_fg.so` | SIL Open Font License 1.1 | `licenses/AdwaitaSans-OFL-1.1.txt` |
-| GNU C++ library (libstdc++) and GCC's runtime library (libgcc), Copyright Free Software Foundation, Inc. | linked statically into `libsc_fg.so` (and libgcc into `libsc_probe.so`) so that they need no C++ library of the system | GPL-3.0 with the GCC Runtime Library Exception 3.1 | `LICENSE`, `licenses/GCC-RUNTIME-LIBRARY-EXCEPTION-3.1.txt` |
+| GNU C++ library (libstdc++) and helper routines of GCC's runtime library (libgcc), Copyright Free Software Foundation, Inc. | linked statically into `libsc_fg.so` (and libgcc's into `libsc_probe.so`) so that they need no C++ library of the system; the unwinder is the system's `libgcc_s.so.1` | GPL-3.0 with the GCC Runtime Library Exception 3.1 | `LICENSE`, `licenses/GCC-RUNTIME-LIBRARY-EXCEPTION-3.1.txt` |
 | Khronos Vulkan headers 1.4.341 | used when compiling (types and constants) | Apache-2.0 OR MIT | not required for compiled use |
 
 `build/BUILDINFO` says how and from which source the libraries were built.

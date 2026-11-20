@@ -28,6 +28,8 @@ set_source_files_properties(qml/Theme.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 
 qt_add_executable(myrddin ${MYRDDIN_SOURCES})
 target_compile_definitions(myrddin PRIVATE MYRDDIN_VERSION="${PROJECT_VERSION}")
+# (the list of keys the layer knows for its panel is the layer's: fg/panel_key.h)
+target_include_directories(myrddin PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../fg)
 qt_add_qml_module(myrddin
     URI Myrddin
     VERSION 1.0

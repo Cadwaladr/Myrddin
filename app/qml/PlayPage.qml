@@ -9,12 +9,7 @@ PageView {
     headerExtra: StatePill {}
 
     readonly property bool live: backend.state === "running" && backend.layerSession
-    readonly property var words: [
-        "The game as it is, with none of Myrddin's layers loaded.",
-        "One generated frame between every two of the game's.",
-        "Two generated frames between every two of the game's.",
-        "Three generated frames between every two of the game's."
-    ]
+    readonly property bool roomy: width > 820     // (a window at its smallest is narrower)
 
     // what stands in the way of a launch
     Card {
@@ -47,179 +42,140 @@ PageView {
         }
     }
 
-    // the launch, or the running game's figures
+    // 1. what the game is launched with, and the launch. (This card and the session's below it are
+    // both in view in a window of the size it opens with: what is added here has to fit.)
     Card {
-        id: hero
-        padding: 28
-        spacing: 0
-        clip: true
+        padding: 24
 
-        Item {
+        RowLayout {
             Layout.fillWidth: true
-            implicitHeight: page.live ? figures.implicitHeight : controls.implicitHeight
-            Behavior on implicitHeight { NumberAnimation { duration: Theme.slow; easing.type: Easing.OutCubic } }
+            spacing: 28
 
-            RowLayout {
-                id: controls
-                width: parent.width
-                spacing: 28
-                opacity: page.live ? 0 : 1
-                visible: opacity > 0.01
-                Behavior on opacity { NumberAnimation { duration: Theme.smooth } }
+            ColumnLayout {
+                Layout.fillWidth: true
+                Layout.alignment: Qt.AlignTop
+                spacing: 10
+                Caption { text: "Frame generation" }
+                ModePicker { Layout.fillWidth: true; live: page.live; brief: true }
 
-                ColumnLayout {
+                GridLayout {
                     Layout.fillWidth: true
-                    spacing: 14
-                    Text {
-                        text: "Frames shown per game frame"
-                        color: Theme.dim
-                        font.pixelSize: 12
-                        font.weight: Font.Medium
-                        font.capitalization: Font.AllUppercase
-                        font.letterSpacing: 0.8
-                    }
-                    Segmented {
-                        large: true
-                        cell: 86
-                        options: ["Off", "×2", "×3", "×4"]
-                        index: backend.prefs.multiplier - 1
-                        onChosen: (i) => backend.setMultiplier(i + 1)
-                    }
-                    Text {
-                        id: explain
-                        text: page.words[Math.max(0, Math.min(3, backend.prefs.multiplier - 1))]
-                        color: Theme.dim
-                        font.pixelSize: 14
-                        wrapMode: Text.WordWrap
+                    Layout.topMargin: 8
+                    columns: page.roomy ? 2 : 1
+                    uniformCellWidths: page.roomy
+                    columnSpacing: 24
+                    rowSpacing: 14
+
+                    // Performance: whether Auto may limit the game's own frames to fill the display
+                    ColumnLayout {
                         Layout.fillWidth: true
-                        onTextChanged: swap.restart()
-                        SequentialAnimation {
-                            id: swap
-                            NumberAnimation { target: explain; property: "opacity"; from: 0.2; to: 1; duration: Theme.smooth }
+                        Layout.alignment: Qt.AlignTop
+                        spacing: 10
+                        opacity: backend.prefs.mode === "auto" ? 1 : 0.45
+                        Behavior on opacity { NumberAnimation { duration: Theme.smooth } }
+                        Caption { text: "Performance" }
+                        RowLayout {
+                            Layout.preferredHeight: overlay.implicitHeight     // (level with the drop-down beside it)
+                            spacing: 10
+                            Toggle { checked: backend.conf.performance; onToggled: (v) => backend.setOption("performance", v) }
+                            Text { text: backend.conf.performance ? "On" : "Off"; color: Theme.text; font.pixelSize: 14 }
+                        }
+                        Text {
+                            text: backend.prefs.mode !== "auto" ? "Only Auto uses this."
+                                : backend.conf.performance ? "Fastest response: the game's frames are never limited."
+                                : "Smoother picture: the game's frames are limited, which adds latency."
+                            color: Theme.dim
+                            font.pixelSize: 13
+                            lineHeight: 1.2
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
                         }
                     }
-                }
-                ColumnLayout {
-                    spacing: 10
-                    Layout.alignment: Qt.AlignVCenter
-                    ActionButton {
-                        id: launchButton
-                        kind: backend.state === "idle" ? "primary" : "plain"
-                        large: true
-                        Layout.alignment: Qt.AlignRight
-                        Layout.minimumWidth: 190
-                        enabled: backend.ready && backend.state === "idle"
-                        busy: backend.state === "starting"
-                        icon: backend.state === "idle" ? Theme.iconPlay : ""
-                        text: backend.state === "idle" ? "Launch" : backend.state === "starting" ? "Starting" : backend.state === "launcher" ? "Launcher open" : "Running"
-                        onClicked: backend.launch()
-                    }
-                    Text {
-                        Layout.alignment: Qt.AlignRight
-                        Layout.maximumWidth: 230
-                        horizontalAlignment: Text.AlignRight
-                        wrapMode: Text.WordWrap
-                        color: Theme.faint
-                        font.pixelSize: 12
-                        text: backend.state === "launcher" ? "Start the game from the RSI Launcher."
-                            : backend.state === "running" ? "This session does not write to Myrddin's log: it was started without the layer, or not from here. Generated frames come with a launch from this window."
-                            : "Opens the RSI Launcher."
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        Layout.alignment: Qt.AlignTop
+                        spacing: 10
+                        Caption { text: "Performance overlay" }
+                        OverlayChoice { id: overlay }
+                        Text {
+                            text: overlay.few + (backend.state === "idle" || overlay.which === "off" ? "" : " From the next launch.")
+                            color: Theme.dim
+                            font.pixelSize: 13
+                            lineHeight: 1.2
+                            wrapMode: Text.WordWrap
+                            Layout.fillWidth: true
+                        }
                     }
                 }
             }
 
             ColumnLayout {
-                id: figures
-                width: parent.width
-                spacing: 18
-                opacity: page.live ? 1 : 0
-                visible: opacity > 0.01
-                Behavior on opacity { NumberAnimation { duration: Theme.smooth } }
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 34
-                    Figure { value: backend.shownRate; label: "shown"; unit: "fps"; tone: Theme.accent; size: 54 }
-                    Figure { value: backend.baseRate; label: "the game's own"; unit: "fps"; size: 54 }
-                    Figure { value: backend.frameP99; label: "frame time, 99th"; unit: "ms"; decimals: 1; size: 30; Layout.alignment: Qt.AlignBottom }
-                    Item { Layout.fillWidth: true }
-                    ColumnLayout {
-                        spacing: 10
-                        Layout.alignment: Qt.AlignVCenter
-                        Segmented {
-                            Layout.alignment: Qt.AlignRight
-                            cell: 54
-                            options: ["Off", "×2", "×3", "×4"]
-                            index: backend.generating ? Math.max(1, backend.prefs.multiplier - 1) : 0
-                            onChosen: (i) => backend.setMultiplier(i + 1)
-                        }
-                        Text {
-                            Layout.alignment: Qt.AlignRight
-                            color: Theme.faint
-                            font.pixelSize: 12
-                            text: backend.generating ? "Changes at once, in the running game." : "Generation is off; the game shows its own frames."
-                        }
-                    }
+                spacing: 12
+                Layout.alignment: Qt.AlignVCenter
+                // Launch. While the RSI Launcher or the game is up, the button says so, and "Stop" with
+                // the pointer on it: that asks the session to end. Should it still be there two seconds
+                // later, the button, which says "Stopping" meanwhile, offers "Kill" under the pointer.
+                LaunchButton {
+                    id: launch
+                    readonly property bool up: backend.state === "launcher" || backend.state === "running"
+                    readonly property bool kill: backend.stopping && backend.canKill && pointed
+                    Layout.alignment: Qt.AlignRight
+                    reserve: "Launcher open"
+                    primary: backend.state === "idle"
+                    active: backend.state === "idle" ? backend.ready : backend.stopping ? backend.canKill : up
+                    busy: backend.state === "starting" || (backend.stopping && !kill)
+                    danger: kill
+                    icon: backend.state === "idle" ? Theme.iconPlay : kill ? Theme.iconCross : up && !backend.stopping && pointed ? Theme.iconStop : ""
+                    text: backend.state === "idle" ? "Launch" : backend.state === "starting" ? "Starting"
+                        : kill ? "Kill" : backend.stopping ? "Stopping" : pointed ? "Stop"
+                        : backend.state === "launcher" ? "Launcher open" : "Running"
+                    checked: backend.prefs.watch
+                    onClicked: backend.state === "idle" ? backend.launch() : backend.stopping ? backend.kill() : backend.stop()
+                    onToggled: (v) => backend.prefs.watch = v
                 }
-                Sparkline {
-                    Layout.fillWidth: true
-                    implicitHeight: 76
-                    shown: backend.shownHistory
-                    base: backend.baseHistory
+                Text {
+                    // (as wide and at least as high whatever it says: the button above it stays where
+                    // it is when its words change under the pointer)
+                    Layout.alignment: Qt.AlignRight
+                    Layout.preferredWidth: 230
+                    Layout.minimumHeight: 30
+                    horizontalAlignment: Text.AlignRight
+                    wrapMode: Text.WordWrap
+                    color: Theme.faint
+                    font.pixelSize: 12
+                    lineHeight: 1.2
+                    text: backend.stopping ? (backend.canKill ? "Something of the session is still there. Kill ends it at once." : "The game and the RSI Launcher are asked to end.")
+                        : backend.state === "launcher" ? "Start the game from the RSI Launcher."
+                        : backend.state === "running" ? (page.live ? "The game runs with Myrddin's layer: a change here acts at once." : "This session does not write to Myrddin's log: it was started without the layer, or not from here. Generated frames come with a launch from this window.")
+                        : backend.prefs.watch ? "Opens the RSI Launcher. The session's log is offered when the game has closed." : "Opens the RSI Launcher."
                 }
             }
         }
     }
 
-    // the switches most people touch
+    // 2. the session: frame rates while the game runs with the layer
     Card {
-        heading: backend.state === "idle" ? "At launch" : "At the next launch"
-        GridLayout {
-            Layout.fillWidth: true
-            columns: page.width > 820 ? 2 : 1
-            columnSpacing: 36
-            rowSpacing: 18
-            SettingRow {
-                title: "MangoHud"
-                detail: backend.mangohudInstalled ? "Its frame rate counts what reaches the display, generated frames included." : "Not installed on this system."
-                dimmed: !backend.mangohudInstalled
-                Toggle { checked: backend.conf.mangohud; enabled: backend.mangohudInstalled; onToggled: (v) => backend.conf.mangohud = v }
-            }
-            SettingRow {
-                title: "Performance panel"
-                detail: "Myrddin's own readout in the game: the shown rate, the game's rate, pacing."
-                Toggle { checked: backend.prefs.panel; onToggled: (v) => backend.prefs.panel = v }
-            }
-            SettingRow {
-                title: "Move HUD markers"
-                detail: "Markers, the compass and flight displays move in every shown frame, not in steps."
-                Toggle { checked: backend.conf.markers; onToggled: (v) => backend.conf.markers = v }
-            }
-            SettingRow {
-                title: "Run with logs"
-                detail: "Keeps a log of the session. When the game closes you can read it, copy it or delete it."
-                Toggle { checked: backend.prefs.watch; onToggled: (v) => backend.prefs.watch = v }
-            }
-        }
-    }
-
-    // the same thing as a command
-    Card {
-        padding: 14
+        heading: "Session"
+        note: page.live ? "Frame rates: a point every ten seconds, the last fifteen minutes." : "Frame rates appear here while the game runs with the layer."
         RowLayout {
             Layout.fillWidth: true
-            spacing: 12
-            Icon { path: Theme.iconTerminal; size: 18; color: Theme.faint; Layout.leftMargin: 6 }
-            Text {
-                text: backend.command
-                color: Theme.dim
-                font.family: Theme.mono
-                font.pixelSize: 13
-                Layout.fillWidth: true
-                elide: Text.ElideRight
-            }
-            Text { text: "the same from a terminal"; color: Theme.faint; font.pixelSize: 12 }
-            ActionButton { kind: "quiet"; icon: Theme.iconCopy; onClicked: backend.copy(backend.command) }
+            spacing: page.roomy ? 34 : 18
+            opacity: page.live ? 1 : 0.35
+            Behavior on opacity { NumberAnimation { duration: Theme.smooth } }
+            Figure { value: backend.shownRate; label: "shown"; unit: "fps"; tone: Theme.accent }
+            Figure { value: backend.baseRate; label: page.roomy ? "the game's own" : "game's own"; unit: "fps" }
+            Figure { value: backend.liveMultiplier; label: "multiplier"; unit: "×" }
+            Figure { value: backend.frameP50; label: page.roomy ? "frame time, median" : "median"; unit: "ms"; decimals: 1; size: 30; Layout.alignment: Qt.AlignBottom }
+            Figure { value: backend.frameP99; label: "99th"; unit: "ms"; decimals: 1; size: 30; Layout.alignment: Qt.AlignBottom }
+            Item { Layout.fillWidth: true }
+        }
+        Sparkline {
+            Layout.fillWidth: true
+            implicitHeight: 92
+            opacity: page.live ? 1 : 0.3
+            shown: backend.shownHistory
+            base: backend.baseHistory
         }
     }
 }

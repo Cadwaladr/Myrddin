@@ -25,37 +25,46 @@ window() {   # STATE SETTLE_MS [args...]
 
 echo "1. a launch from the window"
 fresh
-window idle 2500 --page play --test-eval 'backend.prefs.multiplier = 3; backend.prefs.panel = true; backend.conf.mangohud = true; backend.conf.scheduler = "lavd"; backend.launch()' || bad "the window ran"
+window idle 2500 --page play --test-eval 'backend.setMode("3"); backend.setOverlay("panel"); backend.conf.scheduler = "lavd"; backend.launch()' || bad "the window ran"
 sleep 0.5
-has "$rt/calls.log" "fg 3 panel" "sc-turbo was called with the chosen words"
+has "$rt/calls.log" "fg 3 fixed panel" "sc-turbo was called with the chosen words (x3, held; Myrddin's panel)"
+hasnt "$rt/sc-turbo.conf" 'SC_MANGOHUD' "the panel as the overlay: no MangoHud in sc-turbo.conf"
+window idle 2500 --test-eval 'backend.setOverlay("mangohud")' || bad "the window ran"
+grep -q '^panel=false' "$MYRDDIN_CONFIG_DIR/myrddin.conf" && ok "MangoHud as the overlay takes the panel's place" || bad "MangoHud as the overlay takes the panel's place"
 has "$rt/sc-turbo.conf" "SC_PREFIX='$work/t/prefix'" "the game folder is in sc-turbo.conf"
 has "$rt/sc-turbo.conf" "SC_MANGOHUD=1" "MangoHud is in sc-turbo.conf"
 has "$rt/sc-turbo.conf" "SC_SCHED=lavd" "the scheduler is in sc-turbo.conf"
 bash -n "$rt/sc-turbo.conf" && ok "sc-turbo.conf is valid shell" || bad "sc-turbo.conf is valid shell"
 hasnt "$rt/calls.env" '^(APPDIR|APPIMAGE|LD_LIBRARY_PATH|QT_|QML|MYRDDIN_)' "nothing of the window's environment reaches sc-turbo"
 grep -q 'Frame generation x3' "$rt/logs/launch.out" 2>/dev/null && ok "sc-turbo's words are kept for the window" || bad "sc-turbo's words are kept for the window"
-grep -q '^multiplier=3' "$MYRDDIN_CONFIG_DIR/myrddin.conf" && ok "the multiplier is remembered" || bad "the multiplier is remembered"
+grep -q '^mode=3' "$MYRDDIN_CONFIG_DIR/myrddin.conf" && ok "the multiplier is remembered" || bad "the multiplier is remembered"
 
-echo "2. off: the game as it is; \"Run with logs\""
+echo "2. off: the game as it is; \"Run with logs\"; the switches of Options at a launch"
 fresh
-window idle 2500 --test-eval 'backend.setMultiplier(1); backend.launch()' || bad "the window ran"
+window idle 2500 --test-eval 'backend.setMode("off"); backend.launch()' || bad "the window ran"
 sleep 0.5
 has "$rt/calls.log" "run" "\"run\" for Off"
 fresh
-window idle 2500 --test-eval 'backend.setMultiplier(1); backend.prefs.watch = true; backend.launch()' || bad "the window ran"
+window idle 2500 --test-eval 'backend.setMode("off"); backend.prefs.watch = true; backend.launch()' || bad "the window ran"
 sleep 0.5
 has "$rt/calls.log" "run watch" "Off with logs: \"run watch\""
 fresh
-window idle 2500 --test-eval 'backend.prefs.multiplier = 4; backend.prefs.watch = true; backend.conf.markers = false; backend.conf.fill = false; backend.launch()' || bad "the window ran"
+window idle 2500 --test-eval 'backend.setMode("4"); backend.prefs.watch = true; backend.setOption("markers", false); backend.setOption("keepHud", false); backend.setOption("gapfill", false); backend.setOption("pictures", false); backend.setOption("boost", true); backend.setOption("performance", false); backend.setOption("rm -rf", true); backend.launch()' || bad "the window ran"
 sleep 0.5
-has "$rt/calls.log" "fg 4 watch" "\"watch\" is passed"
+has "$rt/calls.log" "fg 4 fixed watch" "\"watch\" is passed"
+hasnt "$rt/calls.log" '^fg-(params|hud)' "no game runs: nothing is sent to one"
 has "$rt/sc-turbo.conf" "SC_FG_MARKERS=0" "markers off is in sc-turbo.conf"
-has "$rt/sc-turbo.conf" "export SC_FG_FILL=0" "fill off is exported from sc-turbo.conf"
-( . "$rt/sc-turbo.conf"; [ "$(sh -c 'echo $SC_FG_FILL')" = 0 ] ) && ok "a program started after it sees SC_FG_FILL=0" || bad "a program started after it sees SC_FG_FILL=0"
+has "$rt/sc-turbo.conf" "SC_FG_KEEP_HUD=0" "the HUD not kept apart is in sc-turbo.conf"
+has "$rt/sc-turbo.conf" "export SC_FG_GAPFILL=0" "frames without the HUD not bridged: exported from sc-turbo.conf"
+has "$rt/sc-turbo.conf" "export SC_FG_PICTURES=0" "the map moved: exported from sc-turbo.conf"
+has "$rt/sc-turbo.conf" "export SC_FG_BOOST=1" "the GPU's speed held up: exported from sc-turbo.conf"
+has "$rt/sc-turbo.conf" "SC_FG_FILL=1" "Performance off: the game's frames limited to fill the display, in sc-turbo.conf"
+hasnt "$rt/sc-turbo.conf" 'rm -rf' "a switch that is not one of them is not written"
+( . "$rt/sc-turbo.conf"; [ "$(sh -c 'echo $SC_FG_GAPFILL$SC_FG_PICTURES$SC_FG_BOOST')" = 001 ] ) && ok "a program started after it sees the three" || bad "a program started after it sees the three"
 window idle 2500 --test-eval 'backend.conf.targetRate = "100"' || bad "the window ran"
-[ "$(grep -c 'SC_FG_FILL' "$rt/sc-turbo.conf")" = 1 ] && ok "fill off is read back and written once" || bad "fill off is read back and written once"
-window idle 2500 --test-eval 'backend.conf.fill = true' || bad "the window ran"
-hasnt "$rt/sc-turbo.conf" 'SC_FG_FILL' "fill on again takes the line out"
+[ "$(grep -c 'SC_FG_GAPFILL\|SC_FG_BOOST\|SC_FG_KEEP_HUD\|SC_FG_PICTURES\|SC_FG_FILL' "$rt/sc-turbo.conf")" = 5 ] && ok "they are read back and written once" || bad "they are read back and written once"
+window idle 2500 --test-eval 'backend.setOption("keepHud", true); backend.setOption("gapfill", true); backend.setOption("pictures", true); backend.setOption("boost", false); backend.setOption("performance", true)' || bad "the window ran"
+hasnt "$rt/sc-turbo.conf" 'SC_FG_GAPFILL|SC_FG_BOOST|SC_FG_KEEP_HUD|SC_FG_PICTURES|SC_FG_FILL' "back at their defaults the lines are taken out"
 
 echo "3. nothing is launched while something is in the way"
 fresh; rm "$work/t/prefix/sc-launch.sh"
@@ -67,14 +76,20 @@ hasnt "$rt/calls.log" '^(fg|run)' "no second launch while the launcher is open"
 
 echo "4. in the running game"
 fresh
-window running 3000 --test-eval 'backend.setMultiplier(3); backend.sendParam("fill", "0"); backend.sendParam("bad;name", "1"); backend.sendParam("fill", "$(id)"); backend.liveSwitch("fg-cap", false); backend.liveSwitch("rm", true); backend.panel("tr"); backend.panel("--help")' || bad "the window ran"
-has "$rt/calls.log" "fg-mult 3" "the multiplier is sent"
-has "$rt/calls.log" "fg-params fill=0" "a parameter is sent"
-has "$rt/calls.log" "fg-cap off" "a switch is sent"
+window running 3000 --test-eval 'backend.setMode("3"); backend.setOption("markers", false); backend.setOption("keepHud", false); backend.setOption("boost", true); backend.setOption("performance", false); backend.setOption("bad;name", true); backend.setMode("$(id)"); backend.panel("tr"); backend.panel("--help")' || bad "the window ran"
+has "$rt/calls.log" "fg-mult 3 fixed" "a multiplier of one's own is sent, held"
+has "$rt/calls.log" "fg-params markers=0" "a switch of Options is sent"
+has "$rt/calls.log" "fg-hud off" "the HUD switch is sent"
+has "$rt/calls.log" "fg-params boost=1" "the GPU switch is sent"
+has "$rt/calls.log" "fg-params fill=1" "Performance off is sent as the layer's \"fill\""
 has "$rt/calls.log" "fg-panel tr" "the panel's corner is sent"
+has "$rt/sc-turbo.conf" "SC_FG_MARKERS=0" "and what was switched is kept for the next launch"
 hasnt "$rt/calls.log" 'bad|id\)|^rm|help' "words outside the lists are not sent"
 hasnt "$rt/calls.log" '^(fg [0-9]|run)' "nothing is launched"
-window running 2500 --test-eval 'backend.setMultiplier(1)' || bad "the window ran"
+window running 2500 --test-eval 'backend.setOption("performance", true)' || bad "the window ran"
+has "$rt/calls.log" "fg-params fill=0" "and Performance on again"
+hasnt "$rt/sc-turbo.conf" 'SC_FG_FILL' "which is what a launch does anyway: no line for it"
+window running 2500 --test-eval 'backend.setMode("off")' || bad "the window ran"
 has "$rt/calls.log" "fg-off" "Off stops generation"
 [ -e "$rt/logs/fg/OFF" ] && ok "the OFF file is there" || bad "the OFF file is there"
 
@@ -84,19 +99,25 @@ cat > "$rt/sc-turbo.conf" <<CONF
 # my own note
 SC_PREFIX="\$HOME/somewhere else"
 SC_LAUNCH="\$SC_PREFIX/start.sh"
-SC_FG_BOOST=1
+SC_FG_PRIORITY=5
+export SC_FG_FILL=0
 export WINE_SOMETHING="a b"
 CONF
 window idle 2500 --test-eval 'backend.conf.targetRate = "144"' || bad "the window ran"
 has "$rt/sc-turbo.conf" "SC_PREFIX='$HOME/somewhere else'" "a \$HOME path is kept (written out)"
 has "$rt/sc-turbo.conf" "SC_LAUNCH='$HOME/somewhere else/start.sh'" "a \$SC_PREFIX path is kept (written out)"
 has "$rt/sc-turbo.conf" "SC_FG_TARGET=144" "the new value is written"
-has "$rt/sc-turbo.conf" "SC_FG_BOOST=1" "an unknown setting is kept"
+has "$rt/sc-turbo.conf" "SC_FG_PRIORITY=5" "an unknown setting is kept"
+hasnt "$rt/sc-turbo.conf" 'SC_FG_FILL' "a fill rule of 0 set by hand is what a launch does anyway: read, not written again"
 has "$rt/sc-turbo.conf" 'export WINE_SOMETHING="a b"' "an unknown export is kept"
 has "$rt/sc-turbo.conf" "# my own note" "a comment is kept"
 window idle 2500 --test-eval 'backend.conf.targetRate = ""' || bad "the window ran"
 [ "$(grep -c 'my own note' "$rt/sc-turbo.conf")" = 1 ] && [ "$(grep -c 'lines the window does not know' "$rt/sc-turbo.conf")" = 1 ] && ok "nothing doubles on the second save" || bad "nothing doubles on the second save"
 hasnt "$rt/sc-turbo.conf" 'SC_FG_TARGET' "an emptied value is taken out"
+echo 'export SC_FG_FILL=1' >> "$rt/sc-turbo.conf"
+window idle 2500 --test-eval 'if (backend.conf.performance === false) backend.conf.targetRate = "165"' || bad "the window ran"
+has "$rt/sc-turbo.conf" "SC_FG_TARGET=165" "a fill rule of 1 set by hand is read as Performance off"
+has "$rt/sc-turbo.conf" "SC_FG_FILL=1" "and kept"
 
 echo "6. menu entry and terminal command"
 fresh
@@ -201,7 +222,7 @@ mkdir -p "$MYRDDIN_CONFIG_DIR"; printf '[General]\nwelcomed=true\n' > "$MYRDDIN_
 MYRDDIN_COLORS="$work/t/colors" window idle 2000 --test-eval 'backend.setMenuEntry(true)' || bad "the window ran"
 icon="$XDG_DATA_HOME/icons/hicolor/scalable/apps/io.github.cadwaladr.Myrddin.svg"
 grep -q 'fill="#faf0e6"' "$icon" 2>/dev/null && grep -q 'stroke="#c83c14"' "$icon" && grep -q 'fill="#1e140a"' "$icon" && ok "the menu icon is drawn in the scheme's colours" || bad "the menu icon is drawn in the scheme's colours"
-python3 "$here/pixel.py" "$work/last.png" -40 -100 250 240 230 && ok "the window is drawn in them (its background is the scheme's)" || bad "the window is drawn in them (its background is the scheme's)"
+python3 "$here/pixel.py" "$work/last.png" 232 60 250 240 230 && ok "the window is drawn in them (its background is the scheme's)" || bad "the window is drawn in them (its background is the scheme's)"
 window idle 2000 || bad "the window ran"
 grep -q 'fill="#faf0e6"' "$icon" && bad "another scheme at the next start redraws the menu icon" || ok "another scheme at the next start redraws the menu icon"
 
@@ -209,6 +230,159 @@ echo "11. the first start finds the game"
 fresh
 window idle 2000 || bad "the window ran"
 has "$rt/sc-turbo.conf" "SC_PREFIX='$work/t/prefix'" "found through the LUG Helper's note"
+
+echo "12. Off, a multiplier of one's own or Auto, and the highest multiplier"
+fresh; conf="$MYRDDIN_CONFIG_DIR/myrddin.conf"
+window idle 2500 --test-eval 'backend.launch()' || bad "the window ran"
+sleep 0.5
+has "$rt/calls.log" "fg 4" "a first launch: Auto, up to x4"
+fresh
+window idle 2500 --test-eval 'backend.setLimit(3); backend.launch()' || bad "the window ran"
+sleep 0.5
+has "$rt/calls.log" "fg 3" "Auto: the limit set in Options is the launch's number"
+grep -q '^limit=3' "$conf" && ok "the limit is remembered" || bad "the limit is remembered"
+fresh
+window idle 2500 --test-eval 'backend.setMode("2"); backend.setLimit(3); backend.launch()' || bad "the window ran"
+sleep 0.5
+has "$rt/calls.log" "fg 2 fixed" "x2 is x2, held, whatever the limit"
+fresh
+window idle 2500 --test-eval 'backend.setMode("off"); backend.setLimit(2); backend.launch()' || bad "the window ran"
+sleep 0.5
+has "$rt/calls.log" "run" "Off stays off when the limit is changed"
+grep -q '^limit=2' "$conf" && grep -q '^mode=off' "$conf" && ok "and the limit is kept for the next Auto" || bad "and the limit is kept for the next Auto"
+fresh; mkdir -p "$MYRDDIN_CONFIG_DIR"; printf '[General]\nwelcomed=true\nmultiplier=3\n' > "$conf"   # (settings from before there was a mode)
+window idle 2500 --test-eval 'backend.launch()' || bad "the window ran"
+sleep 0.5
+has "$rt/calls.log" "fg 3" "a multiplier chosen in an earlier version is Auto with that limit, as it was then"
+fresh; mkdir -p "$MYRDDIN_CONFIG_DIR"; printf '[General]\nwelcomed=true\nmultiplier=1\n' > "$conf"
+window idle 2500 --test-eval 'backend.launch()' || bad "the window ran"
+sleep 0.5
+has "$rt/calls.log" "run" "Off chosen in an earlier version stays off"
+fresh; mkdir -p "$MYRDDIN_CONFIG_DIR"; printf '[General]\nwelcomed=true\npanel=true\n' > "$conf"; echo "SC_MANGOHUD=1" >> "$rt/sc-turbo.conf"
+window idle 2500 --test-eval 'backend.launch()' || bad "the window ran"
+sleep 0.5
+has "$rt/calls.log" "fg 4" "settings with both overlays: MangoHud alone (no \"panel\" word)"
+has "$rt/sc-turbo.conf" "SC_MANGOHUD=1" "and MangoHud stays in sc-turbo.conf"
+fresh
+window running 3000 --test-eval 'backend.setLimit(2)' || bad "the window ran"
+has "$rt/calls.log" "fg-mult 2 auto" "Auto: a new limit reaches the running game"
+window running 2500 --test-eval 'backend.setMode("3")' || bad "the window ran"
+has "$rt/calls.log" "fg-mult 3 fixed" "x3 reaches the running game, held"
+window running 2500 --test-eval 'backend.setLimit(4)' || bad "the window ran"
+hasnt "$rt/calls.log" '^fg-mult 4' "a multiplier that is held is not moved by the limit"
+window running 2500 --test-eval 'backend.setMode("off")' || bad "the window ran"
+has "$rt/calls.log" "fg-off" "Off stops generation in the running game"
+window running 2500 --test-eval 'backend.setMode("auto")' || bad "the window ran"
+has "$rt/calls.log" "fg-on" "Auto brings it back"
+has "$rt/calls.log" "fg-mult 4 auto" "and follows the game's rate, up to the limit"
+fresh; mkdir -p "$MYRDDIN_CONFIG_DIR"; printf '[General]\nwelcomed=true\nlastLaunchLayer=true\n' > "$conf"
+window launcher 2500 --test-eval 'backend.setOption("markers", false); backend.setMode("2")' || bad "the window ran"
+has "$rt/calls.log" "fg-params markers=0" "with the RSI Launcher open a switch is kept for the game it starts"
+has "$rt/calls.log" "fg-mult 2 fixed" "and so is the multiplier"
+
+echo "13. a report over the page, and putting it away"
+fresh
+printf 'Display: HDMI-A-1\n' > "$rt/logs/launch.out"
+window idle 2500 --test-eval 'backend.showLaunchLog(); if (backend.toolTitle === "The last launch" && backend.toolOutput.indexOf("HDMI-A-1") >= 0) backend.panel("bl"); backend.closeTool(); if (backend.toolTitle === "") backend.panel("br")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel bl" "the last launch's words are shown"
+has "$rt/calls.log" "fg-panel br" "and put away again"
+window idle 2500 --page session || bad "the window ran (a page that is gone)"
+ok "a page that is gone opens Play"
+
+echo "14. the system check says whether the prefix has NVAPI"
+level='backend.checks.filter((c) => c.key === "nvapi").map((c) => c.level).join("")'
+fresh
+window idle 2500 --test-eval "if ($level === \"\") backend.panel(\"tl\")" || bad "the window ran"
+has "$rt/calls.log" "fg-panel tl" "a folder that is no prefix yet: no row"
+fresh; sys="$work/t/prefix/drive_c/windows/system32"; mkdir -p "$sys"; : > "$sys/nvngx.dll"; : > "$sys/_nvngx.dll"
+window idle 2500 --test-eval "if ($level === \"warn\") backend.panel(\"tr\"); if (backend.ready) backend.panel(\"br\")" || bad "the window ran"
+has "$rt/calls.log" "fg-panel tr" "a prefix without nvapi64.dll: a warning"
+has "$rt/calls.log" "fg-panel br" "which does not stand in the way of a launch"
+: > "$sys/nvapi64.dll"; rm "$sys/_nvngx.dll"; ln -s /nonexistent/_nvngx.dll "$sys/_nvngx.dll"
+window idle 2500 --test-eval "if ($level === \"warn\") backend.panel(\"bl\")" || bad "the window ran"
+has "$rt/calls.log" "fg-panel bl" "NVAPI there but a link to a driver file that is gone: a warning"
+rm "$sys/_nvngx.dll"; : > "$sys/_nvngx.dll"; : > "$rt/calls.log"
+window idle 2500 --test-eval "if ($level === \"ok\") backend.panel(\"tl\")" || bad "the window ran"
+has "$rt/calls.log" "fg-panel tl" "NVAPI and NVIDIA's NGX libraries there: good"
+
+echo "15. the system check says whether the game itself is set to DLSS"
+level='backend.checks.filter((c) => c.key === "dlss").map((c) => c.level).join("")'
+detail='backend.checks.filter((c) => c.key === "dlss").map((c) => c.detail).join("")'
+fresh; games="$work/t/prefix/drive_c/Program Files/Roberts Space Industries/StarCitizen"; attr="$games/LIVE/user/client/0/Profiles/default/attributes.xml"
+window idle 2500 --test-eval "if ($level === \"ok\" && $detail.indexOf(\"(LIVE)\") > 0) backend.panel(\"tl\")" || bad "the window ran"
+has "$rt/calls.log" "fg-panel tl" "the game's settings name DLSS: good, and the channel is said"
+sed -i 's/name="UpscalingTechnique" value="2"/name="UpscalingTechnique" value="0"/' "$attr"
+window idle 2500 --test-eval "if ($level === \"warn\") backend.panel(\"tr\"); if (backend.ready) backend.panel(\"br\")" || bad "the window ran"
+has "$rt/calls.log" "fg-panel tr" "another upscaler: a warning"
+has "$rt/calls.log" "fg-panel br" "which does not stand in the way of a launch"
+sed -i '/UpscalingTechnique/d' "$attr"; : > "$rt/calls.log"
+window idle 2500 --test-eval "if ($level === \"warn\") backend.panel(\"tr\")" || bad "the window ran"
+has "$rt/calls.log" "fg-panel tr" "no upscaler named in the settings: a warning"
+mkdir -p "$games/PTU/user/client/0/Profiles/default"
+printf '<Attributes Version="1">\n <Attr name="UpscalingTechnique" value="2"/>\n</Attributes>\n' > "$games/PTU/user/client/0/Profiles/default/attributes.xml"
+touch -d '-1 hour' "$attr"; : > "$rt/calls.log"
+window idle 2500 --test-eval "if ($level === \"ok\" && $detail.indexOf(\"(PTU)\") > 0) backend.panel(\"bl\")" || bad "the window ran"
+has "$rt/calls.log" "fg-panel bl" "the channel played last is the one that counts"
+rm -rf "$games"; : > "$rt/calls.log"
+window idle 2500 --test-eval "if ($level === \"info\") backend.panel(\"tl\")" || bad "the window ran"
+has "$rt/calls.log" "fg-panel tl" "no settings file yet: said as not known, not as a fault"
+
+echo "16. Stop and Kill on the launch button (a pointer stands in for the mouse)"
+# (the launch button, at the window's own size of 1080x720)
+bx=930; by=215
+fresh
+window idle 2500 --page play --test-eval "@700 pointer.click($bx, $by)" || bad "the window ran"
+sleep 0.5
+grep -q '^fg ' "$rt/calls.log" && ok "idle: a click on the button launches" || bad "idle: a click on the button launches"
+hasnt "$rt/calls.log" '^(stop|kill)$' "and stops nothing"
+fresh
+window launcher 2200 --page play --test-eval "@700 pointer.click($bx, $by)" --test-eval "@1500 pointer.click($bx, $by)" || bad "the window ran"
+sleep 0.3
+has "$rt/calls.log" "stop" "the RSI Launcher open: a click on the button asks the session to end (sc-turbo stop)"
+[ "$(grep -cx stop "$rt/calls.log")" = 1 ] && ok "a second click while it is stopping asks nothing again" || bad "a second click while it is stopping asks nothing again"
+hasnt "$rt/calls.log" '^kill$' "within two seconds there is no Kill"
+fresh
+window running 4200 --page play --test-eval "@700 pointer.click($bx, $by)" --test-eval "@3300 pointer.click($bx, $by)" || bad "the window ran"
+sleep 0.3
+has "$rt/calls.log" "stop" "the game running: the same"
+has "$rt/calls.log" "kill" "still there two seconds later: the button offers Kill, and a click ends the session (sc-turbo kill)"
+fresh
+window idle 2500 --page play --test-eval 'backend.stop(); backend.kill()' || bad "the window ran"
+hasnt "$rt/calls.log" '^(stop|kill)$' "nothing running: stop and kill do nothing"
+fresh
+window launcher 2500 --page play --test-eval 'backend.kill()' || bad "the window ran"
+hasnt "$rt/calls.log" '^kill$' "no Kill before a Stop"
+
+echo "17. the panel's key, and the window's own switches kept as they were left"
+fresh
+window idle 2500 --test-eval 'backend.setPanelKey("ctrl+f9")' || bad "the window ran"
+has "$rt/sc-turbo.conf" "SC_FG_PANEL_KEY='Ctrl+F9'" "another key for the panel is in sc-turbo.conf, written tidily"
+bash -n "$rt/sc-turbo.conf" && ok "sc-turbo.conf is valid shell" || bad "sc-turbo.conf is valid shell"
+hasnt "$rt/calls.log" '^fg-panel key' "no game runs: nothing is sent to one"
+window idle 2500 --test-eval 'if (backend.conf.panelKey === "Ctrl+F9") backend.panel("tr"); backend.setPanelKey("Super+P"); backend.setPanelKey("Shift+Enter")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel tr" "and is read back at the next start"
+has "$rt/sc-turbo.conf" "SC_FG_PANEL_KEY='Ctrl+F9'" "a Super key and a key the panel does not know are refused"
+window idle 2500 --test-eval 'backend.setPanelKey("Shift+7")' || bad "the window ran"
+hasnt "$rt/sc-turbo.conf" 'SC_FG_PANEL_KEY' "Shift+7 is the layer's own key: nothing is written for it"
+echo "SC_FG_PANEL_KEY='ctrl+shift+\`'" >> "$rt/sc-turbo.conf"; : > "$rt/calls.log"
+window idle 2500 --test-eval 'if (backend.conf.panelKey === "Ctrl+Shift+`") backend.panel("bl")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel bl" "a key written by hand is read, signs and all"
+fresh; mkdir -p "$MYRDDIN_CONFIG_DIR"; printf '[General]\nwelcomed=true\nmode=4\npanel=true\nlastLaunchLayer=true\n' > "$MYRDDIN_CONFIG_DIR/myrddin.conf"
+window running 2500 --test-eval 'backend.setPanelKey("Alt+Home")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel key=Alt+Home" "a game running with the panel: the new key goes to it at once"
+# what a key press is called: Qt hands over the key's own number (the input code plus 8) and what is held
+fresh; : > "$rt/calls.log"
+window idle 2500 --test-eval 'if (backend.keyName(16, Qt.ShiftModifier) === "Shift+7") backend.panel("tl"); if (backend.keyName(75, Qt.ControlModifier | Qt.AltModifier) === "Ctrl+Alt+F9") backend.panel("tr"); if (backend.keyName(16, Qt.MetaModifier) === "" && backend.keyName(36, 0) === "") backend.panel("bl")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel tl" "a key press is named by where the key is (Shift and the 7 of the number row: Shift+7)"
+has "$rt/calls.log" "fg-panel tr" "with what is held (Ctrl+Alt+F9)"
+has "$rt/calls.log" "fg-panel bl" "a Super key and Enter are not offered"
+window idle 2500 --test-eval 'backend.runTool("Panel key", ["fg-panel-key", "install"])' || bad "the window ran"
+hasnt "$rt/calls.log" 'fg-panel-key' "nothing is set up on the desktop any more"
+fresh; mkdir -p "$MYRDDIN_CONFIG_DIR"; printf '[General]\nwelcomed=true\nmode=auto\npanel=false\nwatch=false\nlimit=3\n' > "$MYRDDIN_CONFIG_DIR/myrddin.conf"
+window idle 2500 --test-eval 'backend.panel(backend.prefs.watch ? "tr" : "tl"); backend.panel(backend.prefs.panel ? "br" : "bl"); backend.panel(backend.prefs.limit === 3 ? "1" : "2")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel tl" "a switch that was left off is off after a restart (\"Run with logs\")"
+has "$rt/calls.log" "fg-panel bl" "and so is the panel as the overlay"
+has "$rt/calls.log" "fg-panel 1" "the highest multiplier comes back as a number"
 
 echo
 [ $fails = 0 ] && echo "all checks passed" || echo "$fails check(s) FAILED"

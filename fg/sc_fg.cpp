@@ -32,10 +32,13 @@
 //   SC_FG_FILL=0      the multiplier is the largest that does not hold the game back (default: the smallest
 //                      that fills the display)    SC_FG_PROBE=0   a held game is not probed for what it could do
 //   SC_FG_MAX_BASE=0   the multiplier stays as given: it does not follow the game's rate
+//   SC_FG_ADAPT=0      the same, and this one can be changed while the game runs (PARAMS adapt): 0 the
+//                      multiplier is held where it was asked for, 1 (default) it follows the game's rate
 //   SC_FG_AUTO_OFF=0   generation never stops on its own
 //   SC_FG_FIX_VECTORS  the game's vectors are checked against the picture (mv_check.comp): 1 where the
 //                      scene without the HUD is known (default), 2 also on the presented frame, 0 never
 //                      (SC_FG_VECTOR_FACTOR, SC_FG_VECTOR_MARGIN: how much better a neighbour's vector must be)
+//   SC_FG_PANEL_KEY=Shift+7   the key that steps the panel on, read in the game's own process (panel_key.h)
 //   SC_FG_PANEL=1      the layer's own performance panel can be shown (control file PANEL); without it
 //                      there is none, whatever that file says
 //   SC_FG_TEST_INPUTS=1, SC_FG_TEST_LAYER, SC_FG_TEST_WAIT_MS, SC_FG_TEST_CHECKS, SC_FG_TEST_LOCKS   tests only
@@ -45,7 +48,7 @@
 //   DUMP    removed when seen; the next generated frame and its real frame are written as .ppm
 //   EVENTS  removed when seen; the last presents (captures used, timings) are written as text
 //   PARAMS  name=value lines, removed when read: HUD detection, and chain / nohud / wait / shift / vectors /
-//           gate / guard / first / gpuwait / fill / probe
+//           gate / guard / first / gpuwait / fill / probe / adapt
 //   (sc-turbo has a command for each of these and for the others)
 // Files the layer keeps there for when something goes wrong (see Crumb, Lock, Stage):
 //   STAGE-<pid>    where the present hook is
@@ -102,6 +105,7 @@
 #include "mv_spread.spv.h"
 #include "mv_tiles.spv.h"
 #include "hud_panel.h"
+#include "panel_key.h"
 #include "panel.spv.h"
 #include "hud_moved.spv.h"
 #include "hud_blocks.spv.h"
@@ -1531,6 +1535,14 @@ void GpuWaited(double waited, bool done) {
 /// How the multiplier is chosen (PARAMS: fill): 1 the fewest generated frames that fill the
 /// display, 0 the most that do not hold the game back (see where it is chosen, in Generate).
 std::atomic<float> g_live_fill{EnvFloat("SC_FG_FILL", 1.0f)};
+/// Whether the multiplier follows the game's rate at all (PARAMS: adapt; 1: it does, up to what
+/// was asked for, 0: it is held at what was asked for, whatever the game's rate: a player's "x3"
+/// as opposed to "Auto").
+std::atomic<float> g_live_adapt{EnvFloat("SC_FG_ADAPT", 1.0f)};
+bool FollowsRate() {
+    static const bool allowed = EnvFloat("SC_FG_MAX_BASE", 62.0f) > 0.0f;
+    return allowed && g_live_adapt.load() != 0.0f;
+}
 /// ... and whether a held game is probed for what it could do (PARAMS: probe; 0: taken from the
 /// time its handing-over thread and the GPU need, which is more than the game can do).
 std::atomic<float> g_live_probe{EnvFloat("SC_FG_PROBE", 1.0f)};
@@ -3130,6 +3142,9 @@ struct Fg {
         int step{};         ///< 0: not shown; 1 the shown rate, 2 and the game's, 3 and the pacing graph
         int corner{};       ///< 0 top left, 1 top right, 2 bottom left, 3 bottom right
         double checked{};   ///< when the control file was last looked at
+        panel_key::Combo key;        ///< the key that steps it on, read in the game's own process (panel_key.h)
+        const char* key_source = ""; ///< where it is read from, as last said in the log
+        bool key_none_said{};
         int64_t stamp{-1};  ///< ... and what it was then: its time of change (0: no file)
         uint64_t inode{};
         bool ready{}, failed{};
@@ -3597,7 +3612,8 @@ void ReadParameters() {
         {"vectors", &g_live_vectors}, {"gate", &g_live_gate},   {"guard", &g_live_guard}, {"first", &g_live_first},
         {"fill", &g_live_fill},       {"probe", &g_live_probe}, {"gpuwait", &g_live_lag}, {"markers", &g_live_markers},
         {"gapfill", &g_live_gapfill}, {"cross", &g_live_cross}, {"pictures", &g_live_pictures},
-        {"boost", &g_live_boost}, {"priority", &g_live_priority}, {"timing", &g_live_timing}};
+        {"boost", &g_live_boost}, {"priority", &g_live_priority}, {"timing", &g_live_timing},
+        {"adapt", &g_live_adapt}};
     char name[64];
     float value = 0.0f;
     while (std::fscanf(file, " %63[^= \n]=%f", name, &value) == 2) {
@@ -3627,6 +3643,7 @@ void ReadParameters() {
         g_live_markers.load() != 0.0f ? "on its way in the generated frames" : "as in the frame that follows",
         g_live_pictures.load() != 0.0f ? "stay at the game's rate" : "are moved like the rest",
         g_live_gapfill.load() != 0.0f ? "on" : "off", g_live_cross.load() != 0.0f ? "on" : "off");
+    Log("fg: the multiplier %s", g_live_adapt.load() != 0.0f ? "follows the game's rate" : "is held where it was asked for");
     Log("fg: HUD parameters bias=%g ratio=%g motion=%g up=%g down=%g level=%g grow=%g", g_hud_parameters[0],
         g_hud_parameters[1], g_hud_parameters[2], g_hud_parameters[4], g_hud_parameters[5], g_hud_parameters[6],
         g_hud_parameters[7]);
@@ -4797,6 +4814,10 @@ float PanelRate(const float* ring, uint32_t count, uint32_t size) {
     return n >= 2 && sum > 0.0 ? static_cast<float>(n * 1000.0 / sum) : 0.0f;
 }
 
+/// The keyboard, for the panel's key (panel_key.h). It learns of the game's window when that is made
+/// (the surface hooks below) and is read by the presenting thread.
+panel_key::Reader g_panel_keys;
+
 /// What is asked of the panel: the control file PANEL, "STEP [tl|tr|bl|br]" (sc-turbo fg-panel
 /// writes it, and a desktop shortcut can be bound to that). Looked at up to twenty times a second,
 /// so that a key press shows at once; read only when it has changed. It is left where it is: the
@@ -4810,12 +4831,49 @@ void ReadPanelRequest(Fg& fg, double now) {
         return;
     }
     Fg::Panel& panel = fg.panel;
+    static const char* const names[4] = {"top left", "top right", "bottom left", "bottom right"};
+    static const char* const steps[4] = {"off", "the shown rate", "the shown rate and the game's",
+                                         "both rates and the pacing graph"};
+    char path[600];
+    std::snprintf(path, sizeof path, "%s/PANEL", Dir());
+    // The key: a press steps the panel on, and the control file is written anew so that it says what
+    // is shown (the launcher and the next launch read it). Looked at with every frame: on Wayland
+    // that hands out the key events that have arrived, which costs nothing when there are none.
+    if (!panel.key.code) {
+        const char* asked = std::getenv("SC_FG_PANEL_KEY");
+        if (!asked || !panel_key::Parse(asked, panel.key)) {
+            panel_key::Parse("Shift+7", panel.key);
+        }
+    }
+    if (const int presses = g_panel_keys.Poll(panel.key)) {
+        panel.step = (panel.step + presses) % 4;
+        Log("fg: performance panel: %s%s%s (%s)", steps[panel.step], panel.step ? ", " : "",
+            panel.step ? names[panel.corner] : "", panel.key.text);
+        static const char* const corners[4] = {"tl", "tr", "bl", "br"};
+        char fresh[620];
+        std::snprintf(fresh, sizeof fresh, "%s.layer", path);
+        if (FILE* file = std::fopen(fresh, "w")) {
+            std::fprintf(file, "%d %s %s\n", panel.step, corners[panel.corner], panel.key.text);
+            std::fclose(file);
+            struct stat written {};
+            if (std::rename(fresh, path) == 0 && stat(path, &written) == 0) {
+                // (its own writing is not a request)
+                panel.stamp = static_cast<int64_t>(written.st_mtim.tv_sec) * 1'000'000'000 + written.st_mtim.tv_nsec;
+                panel.inode = static_cast<uint64_t>(written.st_ino);
+            }
+        }
+    }
+    if (const char* source = g_panel_keys.Source(); source != panel.key_source && *source) {
+        panel.key_source = source;
+        Log("fg: performance panel: %s steps it on, read from the game's own keyboard (%s)", panel.key.text, source);
+    } else if (!*source && g_panel_keys.Failed() && !panel.key_none_said) {
+        panel.key_none_said = true;
+        Log("fg: performance panel: no keyboard can be read here; \"sc-turbo fg-panel next\" steps it on");
+    }
     if (now - panel.checked < 0.05) {
         return;
     }
     panel.checked = now;
-    char path[600];
-    std::snprintf(path, sizeof path, "%s/PANEL", Dir());
     struct stat status {};
     const bool there = stat(path, &status) == 0;
     const int64_t stamp =
@@ -4827,10 +4885,10 @@ void ReadPanelRequest(Fg& fg, double now) {
     panel.stamp = stamp;
     panel.inode = inode;
     int step = 0;
-    char where[8] = "";
+    char where[8] = "", key[40] = "";
     if (there) {
         if (FILE* file = std::fopen(path, "r")) {
-            if (std::fscanf(file, "%d %7s", &step, where) < 1) {
+            if (std::fscanf(file, "%d %7s %39s", &step, where, key) < 1) {
                 step = 0;
             }
             std::fclose(file);
@@ -4839,12 +4897,20 @@ void ReadPanelRequest(Fg& fg, double now) {
     step = std::clamp(step, 0, 3);
     const int corner = !std::strcmp(where, "tr") ? 1 : !std::strcmp(where, "bl") ? 2 : !std::strcmp(where, "br") ? 3 : 0;
     if (step != panel.step || corner != panel.corner) {
-        static const char* const names[4] = {"top left", "top right", "bottom left", "bottom right"};
-        static const char* const steps[4] = {"off", "the shown rate", "the shown rate and the game's",
-                                             "both rates and the pacing graph"};
         Log("fg: performance panel: %s%s%s", steps[step], step ? ", " : "", step ? names[corner] : "");
         panel.step = step;
         panel.corner = corner;
+    }
+    // (the key, where the file names one: "sc-turbo fg-panel key=..." and the launch write it)
+    if (panel_key::Combo asked; *key && panel_key::Parse(key, asked) && std::strcmp(asked.text, panel.key.text)) {
+        panel.key = asked;
+        Log("fg: performance panel: the key is %s now", panel.key.text);
+    } else if (*key && !panel_key::Parse(key, asked)) {
+        static char refused[40] = "";
+        if (std::strcmp(refused, key)) {
+            std::snprintf(refused, sizeof refused, "%s", key);
+            Log("fg: performance panel: \"%s\" is no key this layer knows; it stays %s", key, panel.key.text);
+        }
     }
 }
 
@@ -5336,12 +5402,22 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
         std::snprintf(path, sizeof path, "%s/MULT", Dir());
         if (FILE* file = std::fopen(path, "r")) {
             unsigned multiplier = 0;
-            if (std::fscanf(file, "%u", &multiplier) == 1 && multiplier >= 2 && multiplier <= MAX_GENERATED + 1 &&
-                multiplier - 1 != fg.generated) {
-                fg.generated = multiplier - 1;
-                fg.max_generated = fg.generated;
-                GateMultiplierChanged();
-                Log("fg: multiplier x%u", multiplier);
+            if (std::fscanf(file, "%u", &multiplier) == 1 && multiplier >= 2 && multiplier <= MAX_GENERATED + 1) {
+                // What is asked for is the limit. A multiplier that is held goes there at once; one
+                // that follows the game's rate only comes down to it, and goes up by itself when
+                // the rate asks for that (a jump to the limit would hold the game for the seconds
+                // it takes to come back).
+                const uint32_t asked = multiplier - 1;
+                const uint32_t next = FollowsRate() ? std::min(fg.generated, asked) : asked;
+                if (asked != fg.max_generated || next != fg.generated) {
+                    fg.max_generated = asked;
+                    if (next != fg.generated) {
+                        fg.generated = next;
+                        GateMultiplierChanged();
+                    }
+                    Log("fg: multiplier x%u asked for (%s), now x%u", multiplier,
+                        FollowsRate() ? "the limit" : "held", fg.too_fast ? 1 : fg.generated + 1);
+                }
             }
             std::fclose(file);
             unlink(path);
@@ -5474,6 +5550,33 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
         fg.limit_gpu_seconds += gpu_seconds;
         fg.window_held = fg.window_out = 0;
         fg.window_start = now;
+    }
+    if (fg.decide && !FollowsRate()) {
+        // Held (PARAMS adapt=0): the multiplier is what was asked for, whatever the game's rate,
+        // and generation does not stop near the display's rate either. Where it was following
+        // the rate until now, it goes back to what was asked for; what was measured belongs to
+        // the multiplier that was.
+        fg.decide = false;
+        if (fg.too_fast || fg.generated != fg.max_generated) {
+            Log("fg: multiplier x%u -> x%u, held there", fg.too_fast ? 1 : fg.generated + 1, fg.max_generated + 1);
+            fg.multiplier_changed = now;
+            fg.generated = fg.max_generated;
+            fg.too_fast = false;
+            GateMultiplierChanged();
+            fg.ready_count = 0;
+            fg.ready_seconds = 0.0;
+            fg.binding = false;
+            fg.window_held = fg.window_out = 0;
+            fg.window_start = now;
+            fg.votes_up = fg.votes_down = 0;
+            fg.interval_count = 0;
+            fg.free_rate = fg.free_last = 0.0;
+            fg.probe_wait = 1.0;
+            fg.probe_after = 0.0;
+            for (Fg::Probe& probe : fg.probes) {
+                probe = {};
+            }
+        }
     }
     if (fg.decide && max_base > 0.0) {
         fg.decide = false;
@@ -8543,7 +8646,79 @@ VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL HookGetDeviceProcAddr(VkDevice device, 
     return next;
 }
 
+// The game's window being given to Vulkan: where the panel was asked for at launch (SC_FG_PANEL=1),
+// the layer notes which display connection it is on, so that the panel's key can be read there.
+// Nothing else is done with it, and without the panel these hooks are not even handed out.
+struct PlatformSurfaceInfo { // (the head of VkWaylandSurfaceCreateInfoKHR: sType, pNext, flags, display, surface)
+    VkStructureType sType;
+    const void* pNext;
+    VkFlags flags;
+    void* display;
+    void* surface;
+};
+using PFN_CreatePlatformSurface = VkResult(VKAPI_PTR*)(VkInstance, const void*, const VkAllocationCallbacks*, VkSurfaceKHR*);
+
+VkResult CreatePlatformSurface(const char* name, VkInstance instance, const void* info, const VkAllocationCallbacks* allocator,
+                               VkSurfaceKHR* surface) {
+    Instance* in = GetInstance(Key(instance));
+    const auto next = in ? reinterpret_cast<PFN_CreatePlatformSurface>(in->gipa(instance, name)) : nullptr;
+    if (!next) {
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    return next(instance, info, allocator, surface);
+}
+VKAPI_ATTR VkResult VKAPI_CALL HookCreateWaylandSurface(VkInstance instance, const void* info,
+                                                        const VkAllocationCallbacks* allocator, VkSurfaceKHR* surface) {
+    IN_HOOK("CreateSurface");
+    const VkResult result = CreatePlatformSurface("vkCreateWaylandSurfaceKHR", instance, info, allocator, surface);
+    if (result == VK_SUCCESS && info) {
+        g_panel_keys.SeenWayland(static_cast<const PlatformSurfaceInfo*>(info)->display);
+        Log("fg: the game's window is on Wayland");
+    }
+    return result;
+}
+VKAPI_ATTR VkResult VKAPI_CALL HookCreateXlibSurface(VkInstance instance, const void* info,
+                                                     const VkAllocationCallbacks* allocator, VkSurfaceKHR* surface) {
+    IN_HOOK("CreateSurface");
+    const VkResult result = CreatePlatformSurface("vkCreateXlibSurfaceKHR", instance, info, allocator, surface);
+    if (result == VK_SUCCESS) {
+        g_panel_keys.SeenX11();
+        Log("fg: the game's window is on X11");
+    }
+    return result;
+}
+VKAPI_ATTR VkResult VKAPI_CALL HookCreateXcbSurface(VkInstance instance, const void* info,
+                                                    const VkAllocationCallbacks* allocator, VkSurfaceKHR* surface) {
+    IN_HOOK("CreateSurface");
+    const VkResult result = CreatePlatformSurface("vkCreateXcbSurfaceKHR", instance, info, allocator, surface);
+    if (result == VK_SUCCESS) {
+        g_panel_keys.SeenX11();
+        Log("fg: the game's window is on X11");
+    }
+    return result;
+}
+
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL HookGetInstanceProcAddr(VkInstance instance, const char* name) {
+    if (!std::strncmp(name, "vkCreate", 8) && std::strstr(name, "SurfaceKHR") && EnvFloat("SC_FG_PANEL", 0.0f) != 0.0f) {
+        struct SurfaceHook {
+            const char* name;
+            PFN_CreatePlatformSurface function;
+        };
+        static const SurfaceHook hooks[] = {{"vkCreateWaylandSurfaceKHR", HookCreateWaylandSurface},
+                                            {"vkCreateXlibSurfaceKHR", HookCreateXlibSurface},
+                                            {"vkCreateXcbSurfaceKHR", HookCreateXcbSurface}};
+        for (const SurfaceHook& hook : hooks) {
+            if (!std::strcmp(name, hook.name)) {
+                // (only where the instance has it: the window system's extension has to be on.
+                // Otherwise the usual way below, which hands back whatever is there.)
+                Instance* in = instance ? GetInstance(Key(instance)) : nullptr;
+                if (in && in->gipa(instance, name)) {
+                    return reinterpret_cast<PFN_vkVoidFunction>(hook.function);
+                }
+                break;
+            }
+        }
+    }
     if (!std::strcmp(name, "vkGetInstanceProcAddr")) {
         return reinterpret_cast<PFN_vkVoidFunction>(HookGetInstanceProcAddr);
     }

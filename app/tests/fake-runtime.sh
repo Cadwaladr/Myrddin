@@ -40,6 +40,10 @@ printf '#!/usr/bin/env bash\n[ "$1" = allowed ] && exit 0\necho stock\n' > "$rt/
 chmod +x "$rt/sc-turbo" "$rt/tools/sc-sched"
 : > "$rt/build/fg/libsc_fg.so"; echo '{}' > "$rt/build/fg/sc_fg.json"
 printf 'v0.1-test\n2026-11-19 UTC\n' > "$rt/VERSION"
+# the game's own settings file, with DLSS as its upscaler (the system check reads that one value)
+profile="$prefix/drive_c/Program Files/Roberts Space Industries/StarCitizen/LIVE/user/client/0/Profiles/default"
+mkdir -p "$profile"
+printf '<Attributes Version="1">\n <Attr name="Upscaling" value="4"/>\n <Attr name="UpscalingTechnique" value="2"/>\n <Attr name="WindowMode" value="2"/>\n</Attributes>\n' > "$profile/attributes.xml"
 # ten minutes of the layer's frame-rate lines: a game near 30 fps shown at 120, with one dip
 python3 - "$rt/logs/fg/fg-1234.log" <<'PY'
 import math, sys

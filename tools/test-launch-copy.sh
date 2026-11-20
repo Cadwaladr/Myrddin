@@ -18,9 +18,9 @@ runner() {   # runner NAME
     mkdir -p "$work/runners/$1/bin"
     cat > "$work/runners/$1/bin/wine" <<EOF
 #!/usr/bin/env bash
-{ echo "runner=$1"; echo "args=\$*"
+{ echo "runner=$1"; echo "args=\$*"; echo "core=\$(ulimit -c)"
   for v in __GL_SHADER_DISK_CACHE __GL_SHADER_DISK_CACHE_SIZE __GL_SHADER_DISK_CACHE_SKIP_CLEANUP __GL_SHADER_DISK_CACHE_PATH \\
-           WINEDLLOVERRIDES MY_FLAG SPACED SC_FG WINE_SC_THP LIST PATHS PROTON_ENABLE_NGX_UPDATER \\
+           WINEDLLOVERRIDES MY_FLAG SPACED SC_FG SC_FG_MULT SC_FG_ADAPT SC_FG_PANEL SC_FG_PANEL_KEY SC_FG_GAPFILL SC_FG_FILL WINE_SC_THP LIST PATHS PROTON_ENABLE_NGX_UPDATER \\
            DXVK_NVAPI_DRS_NGX_DLSS_SR_OVERRIDE DXVK_NVAPI_DRS_NGX_DLSS_RR_OVERRIDE DXVK_NVAPI_DRS_NGX_DLSS_FG_OVERRIDE \\
            DXVK_NVAPI_DRS_NGX_DLSS_SR_OVERRIDE_RENDER_PRESET_SELECTION DXVK_NVAPI_DRS_NGX_DLSS_RR_OVERRIDE_RENDER_PRESET_SELECTION \\
            DXVK_NVAPI_SET_NGX_DEBUG_OPTIONS VK_LOADER_LAYERS_ENABLE VK_VRAM_REPORT_LIMIT_HEAP_SIZE VK_VRAM_REPORT_LIMIT_DEVICE_ID \\
@@ -180,9 +180,28 @@ if [ -x "$here/sc-turbo" ] && grep -q 'sc-launch-copy' "$here/sc-turbo"; then
     ! grep -q '^VK_' "$work/prefix/called" && called "PROTON_ENABLE_NGX_UPDATER=1"; check $? "SC_VRAM_LIMIT=off leaves the memory limit out"
     turbo env CARD="" ./sc-turbo run
     called "runner=stock"; check $? "(default card again)"
+    turbo ./sc-turbo run
+    ! grep -q "more than one NVIDIA card" "$work/turbo.txt"; check $? "one card: no word about several"
+    turbo env CARD="12282, 0x278310DE, NVIDIA GeForce RTX 4070 SUPER
+4096, 0x1C8110DE, NVIDIA GeForce GTX 1050" ./sc-turbo run
+    called "VK_VRAM_REPORT_LIMIT_HEAP_SIZE=9216" && called "VK_VRAM_REPORT_LIMIT_DEVICE_ID=0x10de:0x2783" \
+        && grep -q "more than one NVIDIA card here. The limit is for the first one nvidia-smi names, NVIDIA GeForce RTX 4070 SUPER" "$work/turbo.txt"; check $? "two different cards: the limit is for the first, and that is said"
+    turbo env CARD="12282, 0x278310DE, NVIDIA GeForce RTX 4070 SUPER
+12282, 0x278310DE, NVIDIA GeForce RTX 4070 SUPER" ./sc-turbo run
+    called "VK_VRAM_REPORT_LIMIT_HEAP_SIZE=9216" && ! grep -q "more than one NVIDIA card" "$work/turbo.txt"; check $? "two cards of one kind: the limit fits both, nothing more is said"
+    turbo env CARD="16376, 0x270410DE, NVIDIA GeForce RTX 4080
+4096, 0x1C8110DE, NVIDIA GeForce GTX 1050" ./sc-turbo run
+    ! grep -q '^VK_' "$work/prefix/called" && ! grep -q "more than one NVIDIA card" "$work/turbo.txt"; check $? "no limit placed: no word about several cards either"
     printf '#!/usr/bin/env bash\nexit 9\n' > "$work/fakebin/nvidia-smi"
     turbo ./sc-turbo run
-    ! grep -q '^VK_' "$work/prefix/called" && called "runner=stock" && ! grep -q "NOTE: the graphics" "$work/turbo.txt"; check $? "no NVIDIA card to ask: nothing placed, nothing said, the game starts"
+    ! grep -q '^VK_' "$work/prefix/called" && called "runner=stock" && grep -q "NOTE: the graphics memory limit is not set: nvidia-smi named no card" "$work/turbo.txt"; check $? "nvidia-smi gives no card: nothing placed, that is said, the game starts"
+    turbo env SC_VRAM_LIMIT=off ./sc-turbo run
+    ! grep -q "NOTE: the graphics" "$work/turbo.txt"; check $? "SC_VRAM_LIMIT=off ends the note"
+    # a machine without the driver's tool: the system's programs, all but that one
+    rm "$work/fakebin/nvidia-smi"; mkdir -p "$work/nosmi"
+    find /usr/bin -maxdepth 1 ! -name nvidia-smi ! -name bin -exec ln -s -t "$work/nosmi" {} + 2>/dev/null
+    turbo env PATH="$work/fakebin:$work/nosmi" ./sc-turbo run
+    ! grep -q '^VK_' "$work/prefix/called" && called "runner=stock" && grep -q "nvidia-smi, which names the card and its memory, was" "$work/turbo.txt"; check $? "no nvidia-smi at all: nothing placed, that is said, the game starts"
     printf '#!/usr/bin/env bash\necho "${CARD:-12282, 0x278310DE}"\n' > "$work/fakebin/nvidia-smi"
     # with frame generation (an empty file stands in for the layer; the stand-in Wine loads nothing)
     mkdir -p "$t/build/fg" "$work/prefix/drive_c/windows/system32"; : > "$t/build/fg/libsc_fg.so"
@@ -196,6 +215,99 @@ if [ -x "$here/sc-turbo" ] && grep -q 'sc-launch-copy' "$here/sc-turbo"; then
     rm "$work/prefix/drive_c/windows/system32/_nvngx.dll"; : > "$work/prefix/drive_c/windows/system32/_nvngx.dll"
     turbo ./sc-turbo fg 2
     ! grep -q "NOTE: the prefix" "$work/turbo.txt" && called "SC_FG=1"; check $? "a prefix that has them gets no note"
+    echo "8. The multiplier's words, and the layer's settings from sc-turbo.conf"
+    turbo ./sc-turbo fg 4
+    called "SC_FG_MULT=4" && ! grep -q '^SC_FG_ADAPT=' "$work/prefix/called" && ! grep -q "held at" "$work/turbo.txt"; check $? "\"fg 4\": up to x4, following the game's rate"
+    turbo ./sc-turbo fg 3 fixed panel
+    called "SC_FG_MULT=3" && called "SC_FG_ADAPT=0" && called "SC_FG_PANEL=1" && grep -q "held at x3" "$work/turbo.txt"; check $? "\"fg 3 fixed panel\": x3, held, and that is said"
+    turbo ./sc-turbo fg fixed
+    called "SC_FG_MULT=2" && called "SC_FG_ADAPT=0"; check $? "the number is optional: \"fg fixed\" is x2, held"
+    turbo ./sc-turbo fg panel
+    called "SC_FG_MULT=2" && called "SC_FG_PANEL=1"; check $? "a word in the number's place is taken as a word"
+    turbo ./sc-turbo fg 3 nonsense
+    [ ! -e "$work/prefix/called" ] && grep -q '"nonsense" is not known' "$work/turbo.txt"; check $? "a word that is not known: nothing is started"
+    [ ! -e "$t/logs/fg/HUDOFF" ]; check $? "the HUD is kept apart unless the settings say otherwise"
+    printf 'SC_FG_KEEP_HUD=0\nexport SC_FG_GAPFILL=0\n' >> "$t/sc-turbo.conf"
+    turbo ./sc-turbo fg 4
+    [ -e "$t/logs/fg/HUDOFF" ] && grep -q "The HUD is not kept apart" "$work/turbo.txt" && called "SC_FG_GAPFILL=0"; check $? "SC_FG_KEEP_HUD=0 and an exported setting of the layer's reach the launch"
+    sed -i '/SC_FG_KEEP_HUD/d; /SC_FG_GAPFILL/d' "$t/sc-turbo.conf"
+    turbo ./sc-turbo fg 4
+    [ ! -e "$t/logs/fg/HUDOFF" ]; check $? "and the next launch without it keeps the HUD apart again"
+    called "SC_FG_FILL=0" && ! grep -q "fills the display" "$work/turbo.txt"; check $? "a launch does not limit the game's frames to fill the display (SC_FG_FILL=0)"
+    echo 'SC_FG_FILL=1' >> "$t/sc-turbo.conf"
+    turbo ./sc-turbo fg 4
+    called "SC_FG_FILL=1" && grep -q "fills the display evenly (SC_FG_FILL=1)" "$work/turbo.txt"; check $? "SC_FG_FILL=1 in sc-turbo.conf: it does, and that is said"
+    turbo ./sc-turbo fg 3 fixed
+    called "SC_FG_FILL=1" && ! grep -q "fills the display" "$work/turbo.txt"; check $? "with a multiplier that is held nothing is said about it"
+    sed -i '/SC_FG_FILL/d' "$t/sc-turbo.conf"
+    echo "9. In a running game: the multiplier and parameters (control files; no game is needed to write them)"
+    ( cd "$t" && ./sc-turbo fg-mult 3 fixed > "$work/turbo.txt" 2>&1 )
+    [ "$(cat "$t/logs/fg/MULT")" = 3 ] && grep -qx 'adapt=0' "$t/logs/fg/PARAMS" && grep -q "held there" "$work/turbo.txt"; check $? "\"fg-mult 3 fixed\": the multiplier and the word that holds it"
+    ( cd "$t" && ./sc-turbo fg-mult 4 auto > "$work/turbo.txt" 2>&1 )
+    [ "$(cat "$t/logs/fg/MULT")" = 4 ] && [ "$(tr '\n' ' ' < "$t/logs/fg/PARAMS")" = "adapt=0 adapt=1 " ]; check $? "\"fg-mult 4 auto\": what the layer has not read yet is kept, the later word counts"
+    rm -f "$t/logs/fg/PARAMS" "$t/logs/fg/MULT"
+    ( cd "$t" && ./sc-turbo fg-mult 2 > "$work/turbo.txt" 2>&1 )
+    [ "$(cat "$t/logs/fg/MULT")" = 2 ] && [ ! -e "$t/logs/fg/PARAMS" ]; check $? "\"fg-mult 2\" alone leaves held or following as it is"
+    ( cd "$t" && ./sc-turbo fg-mult 7 > "$work/turbo.txt" 2>&1 ); [ $? != 0 ] && [ "$(cat "$t/logs/fg/MULT")" = 2 ]; check $? "a multiplier outside 2 to 4 is refused"
+    ( cd "$t" && ./sc-turbo fg-mult 3 sometimes > "$work/turbo.txt" 2>&1 ); [ $? != 0 ] && [ "$(cat "$t/logs/fg/MULT")" = 2 ]; check $? "and so is a word that is not fixed or auto"
+
+    echo "10. The panel at launch and its key; what a launch starts leaves no core dump"
+    rm -f "$t/logs/fg/PANEL"
+    turbo ./sc-turbo fg 4 panel
+    [ "$(cat "$t/logs/fg/PANEL")" = "1 tl Shift+7" ] && called "SC_FG_PANEL_KEY=Shift+7" && grep -q "The performance panel is shown; Shift+7" "$work/turbo.txt"
+    check $? "a launch with the panel shows it from the start (step 1), with Shift+7 as its key, and says so"
+    called "core=0"; check $? "what the launch starts is not allowed a core dump"
+    echo "3 br" > "$t/logs/fg/PANEL"; turbo ./sc-turbo fg 4 panel
+    [ "$(cat "$t/logs/fg/PANEL")" = "3 br Shift+7" ]; check $? "the step and the corner it was left at are kept"
+    echo "0 tr Ctrl+F9" > "$t/logs/fg/PANEL"; turbo ./sc-turbo fg 4 panel
+    [ "$(cat "$t/logs/fg/PANEL")" = "1 tr Shift+7" ]; check $? "a panel that was stepped off is back at the next launch; the key is the settings' one, not the last session's"
+    echo 'SC_FG_PANEL_KEY=Ctrl+F9' >> "$t/sc-turbo.conf"; turbo ./sc-turbo fg 4 panel
+    [ "$(cat "$t/logs/fg/PANEL")" = "1 tr Ctrl+F9" ] && called "SC_FG_PANEL_KEY=Ctrl+F9"; check $? "SC_FG_PANEL_KEY in sc-turbo.conf names the key"
+    sed -i 's/^SC_FG_PANEL_KEY=.*/SC_FG_PANEL_KEY=Super+7/' "$t/sc-turbo.conf"; turbo ./sc-turbo fg 4 panel
+    called "SC_FG_PANEL_KEY=Shift+7" && grep -q "SC_FG_PANEL_KEY=Super+7 is no key the panel knows" "$work/turbo.txt"; check $? "a key the panel does not know (a Super key) is said and not used"
+    sed -i '/SC_FG_PANEL_KEY/d' "$t/sc-turbo.conf"
+    echo "2 bl" > "$t/logs/fg/PANEL"; turbo ./sc-turbo fg 4
+    [ "$(cat "$t/logs/fg/PANEL")" = "2 bl" ] && ! grep -q '^SC_FG_PANEL' "$work/prefix/called"; check $? "a launch without the panel leaves all of that alone"
+    ( cd "$t" && ./sc-turbo fg-panel key=Alt+Home > "$work/turbo.txt" 2>&1 )
+    [ "$(cat "$t/logs/fg/PANEL")" = "2 bl Alt+Home" ] && grep -q "panel key: Alt+Home" "$work/turbo.txt"; check $? "\"fg-panel key=Alt+Home\": the key for the running game, the step as it was"
+    ( cd "$t" && ./sc-turbo fg-panel > /dev/null 2>&1 && ./sc-turbo fg-panel tr > /dev/null 2>&1 )
+    [ "$(cat "$t/logs/fg/PANEL")" = "3 tr Alt+Home" ]; check $? "a step and a corner from outside keep the key"
+    ( cd "$t" && ./sc-turbo fg-panel key=Super+P > "$work/turbo.txt" 2>&1 ); [ $? != 0 ] && [ "$(cat "$t/logs/fg/PANEL")" = "3 tr Alt+Home" ]
+    check $? "a key the panel does not know is refused"
+
+    echo "10b. the game's own upscaler setting, said at a launch when it is not DLSS"
+    profile="$work/prefix/drive_c/Program Files/Roberts Space Industries/StarCitizen/LIVE/user/client/0/Profiles/default"
+    mkdir -p "$profile" "$work/prefix/drive_c/windows/system32"
+    printf '<Attributes Version="1">\n <Attr name="UpscalingTechnique" value="0"/>\n</Attributes>\n' > "$profile/attributes.xml"
+    turbo ./sc-turbo fg 4
+    grep -q "the game's upscaler is not set to DLSS" "$work/turbo.txt"; check $? "another upscaler in the game's settings: a note"
+    sed -i 's/value="0"/value="2"/' "$profile/attributes.xml"
+    turbo ./sc-turbo fg 4
+    ! grep -q "upscaler is not set" "$work/turbo.txt"; check $? "DLSS there: nothing is said"
+    rm -rf "$work/prefix/drive_c"
+
+    echo "11. stop and kill: Wine's processes of this prefix, and nothing else"
+    # stand-ins: programs named like Wine's, started with the prefix in their environment
+    mkdir -p "$work/winebin"; cp "$(command -v sleep)" "$work/winebin/wine64-preloader"; cp "$(command -v sleep)" "$work/winebin/wineserver"
+    cp "$(command -v bash)" "$work/winebin/wine"; mkfifo "$work/hold"
+    ( cd "$t" && env -i PATH="$PATH" SC_PREFIX="$work/prefix" SC_LAUNCH="$work/sc-launch.sh" ./sc-turbo stop > "$work/turbo.txt" 2>&1 )
+    grep -q "nothing of the prefix is running" "$work/turbo.txt"; check $? "with nothing running, stop says so"
+    WINEPREFIX="$work/prefix" "$work/winebin/wine64-preloader" 300 & p1=$!
+    WINEPREFIX="$work/prefix/" "$work/winebin/wine64-preloader" 300 & p2=$!          # (the same folder, written differently)
+    WINEPREFIX="$work/prefix" "$work/winebin/wineserver" 300 & p3=$!
+    WINEPREFIX="$work/prefix" "$work/winebin/wine" -c 'trap "" TERM; exec 3<>"$1"; read -u 3' _ "$work/hold" & p4=$!   # (does not end when asked)
+    WINEPREFIX="$work/other-prefix" "$work/winebin/wine64-preloader" 300 & d1=$!    # another prefix
+    WINEPREFIX="$work/prefix" sleep 300 & d2=$!                                      # this prefix, but no program of Wine's
+    sleep 0.5
+    ( cd "$t" && env -i PATH="$PATH" SC_PREFIX="$work/prefix" SC_LAUNCH="$work/sc-launch.sh" ./sc-turbo stop > "$work/turbo.txt" 2>&1 ); rc=$?
+    alive() { kill -0 "$1" 2>/dev/null; }
+    [ $rc = 1 ] && ! alive $p1 && ! alive $p2 && ! alive $p3 && alive $p4 && grep -q "1 of 4 processes of the prefix are still there" "$work/turbo.txt"
+    check $? "stop ends what ends when asked, Wine's server too, and says what is still there"
+    alive $d1 && alive $d2; check $? "another prefix's processes and programs that are not Wine's are left alone"
+    ( cd "$t" && env -i PATH="$PATH" SC_PREFIX="$work/prefix" SC_LAUNCH="$work/sc-launch.sh" ./sc-turbo kill > "$work/turbo.txt" 2>&1 ); rc=$?
+    [ $rc = 0 ] && ! alive $p4 && grep -q "ended: 1 processes of the prefix" "$work/turbo.txt"; check $? "kill ends the one that stayed"
+    alive $d1 && alive $d2; check $? "and still nothing else"
+    kill $d1 $d2 2>/dev/null; wait 2>/dev/null
 fi
 
 echo

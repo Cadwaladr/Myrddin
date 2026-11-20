@@ -42,7 +42,6 @@ QtObject {
     readonly property string iconPlay: "M8 5.2v13.6a.8.8 0 0 0 1.2.7l11-6.8a.8.8 0 0 0 0-1.4l-11-6.8a.8.8 0 0 0-1.2.7z"
     readonly property string iconSetup: "M3.5 7.5a2 2 0 0 1 2-2h3.6l2 2.2h7.4a2 2 0 0 1 2 2v7.8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"
     readonly property string iconOptions: "M4 7h9M17 7h3M4 17h3M11 17h9M15 4.8v4.4M9 14.8v4.4"
-    readonly property string iconSession: "M3 12.5h3.6l2.7-7 4.2 13.5 2.7-6.5H21"
     readonly property string iconAbout: "M12 3.5a8.5 8.5 0 1 0 0 17a8.5 8.5 0 0 0 0-17zM12 11v5.5M12 7.6v.4"
     readonly property string iconCheck: "M5 12.8l4.3 4.3L19 7.4"
     readonly property string iconWarn: "M12 4.2l8.6 15H3.4zM12 10v4.2M12 16.9v.3"
