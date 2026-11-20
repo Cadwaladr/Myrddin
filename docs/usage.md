@@ -7,7 +7,7 @@ These do what the launcher windows do:
 ```sh
 ./sc-turbo fg 4                  # launch with frame generation: the layer picks the multiplier, up to ×4 (the window's Auto)
 ./sc-turbo fg 3 fixed            # launch with ×3, held there whatever the game's frame rate (the window's ×3)
-./sc-turbo run                   # launch without it
+./sc-turbo run                   # launch without it ("run hud": with MangoHud)
 ./sc-turbo fg-mult 3 fixed       # in a running game: ×3, held ("fg-mult 4 auto": the layer picks again, up to ×4)
 ./sc-turbo fg-off                # frames pass through untouched; fg-on brings generation back
 ```
@@ -23,6 +23,7 @@ These go further:
 ./sc-turbo latency               # where the time goes between a frame and the display, per multiplier
 ./sc-turbo fg 3 panel            # launch with the layer's own panel; Shift+7 in the game steps it:
                                  #   the shown rate, both rates, both with the pacing graph, off
+./sc-turbo fg 3 panel off        #   the panel with generation off at the start (fg-on: up to x3)
 ./sc-turbo fg-panel key=Ctrl+F9  #   another key for the running game (SC_FG_PANEL_KEY keeps it)
 ./sc-turbo fg-panel              #   the same step from a terminal
 ./sc-turbo stop                  # end the session: the game, the RSI Launcher, the rest of the prefix
@@ -90,7 +91,8 @@ cp sc-turbo.conf.example sc-turbo.conf
 - `SC_LAUNCH_COPY=0`: start the launch script itself, with nothing placed
 - `SC_MONITOR`, `SC_FG_TARGET`: the display the game should use and its refresh rate, where the
   desktop cannot be asked
-- `SC_MANGOHUD=1`: MangoHud at every launch with frame generation
+- `SC_MANGOHUD=1`: MangoHud at every launch, with frame generation or without (the window's
+  overlay choice "MangoHud")
 - `SC_FG_PANEL_KEY=Ctrl+F9`: the key that steps the layer's panel in the game, in place of
   Shift+7. Ctrl, Shift and Alt with one key: a letter, a digit, F1 to F12, Tab, Home, End,
   PageUp, PageDown, Insert, Delete, Pause, ScrollLock or one of ``- = [ ] ; ' ` \ , . /``. Keys
@@ -105,11 +107,12 @@ cp sc-turbo.conf.example sc-turbo.conf
 - `export SC_FG_GAPFILL=0`, `export SC_FG_PICTURES=0`, `export SC_FG_BOOST=1`: the layer's own
   settings, which it reads from the environment, so they are exported: frames that come without
   the HUD are not bridged, the map is moved like the markers, the GPU's speed is held up
-- `SC_FG_FILL=1`: with a multiplier that follows the game's rate, the game's own frames are
-  limited to an even part of the display's rate and the layer takes the fewest generated frames
-  that fill the display: a smoother picture, with more latency. Without the line the game is
-  never limited and the layer takes the most generated frames it can feed (the window's
-  "Performance" switch; `sc-turbo fg-params fill=0|1` in a running game)
+- `SC_FG_FILL=0`: with a multiplier that follows the game's rate, the game's own frames are never
+  limited and the layer takes the most generated frames it can feed: the quickest response.
+  Without the line the game's frames are limited to an even part of the display's rate and the
+  layer takes the fewest generated frames that fill the display: a smoother picture, with more
+  latency (the window's "Performance" switch, off by default; `sc-turbo fg-params fill=0|1` in a
+  running game)
 
 The launcher window writes the same file: what its Options page sets is there under these names,
 and lines it does not know are kept as they are.
@@ -124,9 +127,9 @@ AMD's FSR 3.1 frame interpolation on the motion vectors and depth the game gives
 one, two or three generated frames.
 
 - The multiplier is set at launch and can be changed while the game runs. Up to that limit it
-  follows the game's frame rate and never slows the game down to fit more generated frames in
-  (`SC_FG_FILL=1`, the window's "Performance" switched off, limits the game's frames instead so
-  that the display is filled evenly). If the game alone gets above 92 % of the refresh rate,
+  follows the game's frame rate, and the game's frames are limited to an even part of the
+  display's rate so that the display is filled evenly (`SC_FG_FILL=0`, the window's
+  "Performance" switched on, never slows the game down instead). If the game alone gets above 92 % of the refresh rate,
   generation pauses until it drops below 80 %. With the word `fixed` (the window's 2×, 3× and
   4×) the multiplier is held instead, whatever the game's frame rate.
 - The HUD stays sharp. The game draws its HUD into a layer of its own, and `sc_fg` captures it,

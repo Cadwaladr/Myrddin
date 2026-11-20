@@ -31,10 +31,11 @@ After that the window has four pages:
   that multiplier whatever the game's frame rate. With Auto the layer picks the multiplier as the
   game's own rate changes, 2× at the least and no more than the highest multiplier set in Options
   (4× unless you change it). "Performance" is Auto's: on, the game's own frames are never
-  limited, which is the fastest response; off, they are limited so that every refresh of the
-  display gets a frame, a smoother picture with more latency. A change acts at once in a running
-  game. The overlay is MangoHud, Myrddin's own panel or none; the panel is there from the start
-  of the game, and Shift+7 in the game steps through it. "Run with logs" is the tab under the
+  limited, which is the fastest response; off (the default), they are limited so that every
+  refresh of the display gets a frame, a smoother picture with more latency. A change acts at
+  once in a running game. The overlay is MangoHud, Myrddin's own panel or none, and what is
+  chosen is drawn with frame generation Off too; the panel is there from the start of the game,
+  and Shift+7 in the game steps through it. "Run with logs" is the tab under the
   launch button. While the RSI Launcher or the game is up, the launch button says "Stop" under
   the pointer: a click asks the session to end. If something of it is still there two seconds
   later, the button offers "Kill", which ends it at once.

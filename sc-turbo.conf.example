@@ -32,8 +32,8 @@
 #SC_MONITOR=HDMI-A-1
 #SC_FG_TARGET=120
 
-# MangoHud at every launch with frame generation ("sc-turbo fg N hud" does it for one launch).
-# It sits below the layer, so its frame rate counts the generated frames too.
+# MangoHud at every launch ("sc-turbo fg N hud" or "sc-turbo run hud" does it for one launch).
+# With frame generation it sits below the layer, so its frame rate counts the generated frames too.
 #SC_MANGOHUD=1
 
 # How the HUD is treated in generated frames, and the GPU's speed (the launcher window's Options
@@ -44,10 +44,11 @@
 #export SC_FG_PICTURES=0  # the map is moved like the markers (its lines double)
 #export SC_FG_BOOST=1     # the GPU is asked to keep its speed up while the game leaves it half idle
 
-# A multiplier that follows the game's rate ("fg N" without "fixed", the window's Auto) never limits
-# the game's own frames. With this line it does, to an even part of the display's rate, so that every
-# refresh gets a frame: a smoother picture, with more latency (the window's "Performance" off).
-#SC_FG_FILL=1
+# A multiplier that follows the game's rate ("fg N" without "fixed", the window's Auto) limits the
+# game's own frames to an even part of the display's rate, so that every refresh gets a frame: a
+# smoother picture, with more latency. With this line it never does: the quickest response (the
+# window's "Performance" on).
+#SC_FG_FILL=0
 
 # The key that steps the layer's own panel in the game ("sc-turbo fg N panel"), in place of
 # Shift+7: Ctrl, Shift and Alt with one key, by its place on a US keyboard. The layer reads it

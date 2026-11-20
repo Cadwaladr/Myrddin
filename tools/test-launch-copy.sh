@@ -20,7 +20,7 @@ runner() {   # runner NAME
 #!/usr/bin/env bash
 { echo "runner=$1"; echo "args=\$*"; echo "core=\$(ulimit -c)"
   for v in __GL_SHADER_DISK_CACHE __GL_SHADER_DISK_CACHE_SIZE __GL_SHADER_DISK_CACHE_SKIP_CLEANUP __GL_SHADER_DISK_CACHE_PATH \\
-           WINEDLLOVERRIDES MY_FLAG SPACED SC_FG SC_FG_MULT SC_FG_ADAPT SC_FG_PANEL SC_FG_PANEL_KEY SC_FG_GAPFILL SC_FG_FILL WINE_SC_THP LIST PATHS PROTON_ENABLE_NGX_UPDATER \\
+           WINEDLLOVERRIDES MY_FLAG SPACED SC_FG SC_FG_MULT SC_FG_ADAPT SC_FG_PANEL SC_FG_PANEL_KEY SC_FG_GAPFILL SC_FG_FILL MANGOHUD WINE_SC_THP LIST PATHS PROTON_ENABLE_NGX_UPDATER \\
            DXVK_NVAPI_DRS_NGX_DLSS_SR_OVERRIDE DXVK_NVAPI_DRS_NGX_DLSS_RR_OVERRIDE DXVK_NVAPI_DRS_NGX_DLSS_FG_OVERRIDE \\
            DXVK_NVAPI_DRS_NGX_DLSS_SR_OVERRIDE_RENDER_PRESET_SELECTION DXVK_NVAPI_DRS_NGX_DLSS_RR_OVERRIDE_RENDER_PRESET_SELECTION \\
            DXVK_NVAPI_SET_NGX_DEBUG_OPTIONS VK_LOADER_LAYERS_ENABLE VK_VRAM_REPORT_LIMIT_HEAP_SIZE VK_VRAM_REPORT_LIMIT_DEVICE_ID \\
@@ -233,10 +233,10 @@ if [ -x "$here/sc-turbo" ] && grep -q 'sc-launch-copy' "$here/sc-turbo"; then
     sed -i '/SC_FG_KEEP_HUD/d; /SC_FG_GAPFILL/d' "$t/sc-turbo.conf"
     turbo ./sc-turbo fg 4
     [ ! -e "$t/logs/fg/HUDOFF" ]; check $? "and the next launch without it keeps the HUD apart again"
-    called "SC_FG_FILL=0" && ! grep -q "fills the display" "$work/turbo.txt"; check $? "a launch does not limit the game's frames to fill the display (SC_FG_FILL=0)"
-    echo 'SC_FG_FILL=1' >> "$t/sc-turbo.conf"
+    called "SC_FG_FILL=1" && grep -q "fills the display evenly (Performance off)" "$work/turbo.txt"; check $? "a launch limits the game's frames to fill the display evenly (SC_FG_FILL=1, Performance off), and that is said"
+    echo 'SC_FG_FILL=0' >> "$t/sc-turbo.conf"
     turbo ./sc-turbo fg 4
-    called "SC_FG_FILL=1" && grep -q "fills the display evenly (SC_FG_FILL=1)" "$work/turbo.txt"; check $? "SC_FG_FILL=1 in sc-turbo.conf: it does, and that is said"
+    called "SC_FG_FILL=0" && ! grep -q "fills the display" "$work/turbo.txt"; check $? "SC_FG_FILL=0 in sc-turbo.conf (Performance on): it does not"
     # the prefetchers and huge pages through Myrddin's root helper: a stand-in that says whether it is set up
     printf '#!/usr/bin/env bash\ncase "$1" in allowed) exit "${TUNE_OK:-1}" ;; follow) shift; echo "$*" > "%s/tune-follow" ;; esac\n' "$work" > "$t/tools/sc-tune"
     chmod +x "$t/tools/sc-tune"; printf 'SC_PREFETCH=off\nSC_THP=on\n' >> "$t/sc-turbo.conf"
@@ -248,9 +248,27 @@ if [ -x "$here/sc-turbo" ] && grep -q 'sc-launch-copy' "$here/sc-turbo"; then
     sed -i '/SC_PREFETCH/d; /SC_THP/d' "$t/sc-turbo.conf"
     turbo env TUNE_OK=0 ./sc-turbo fg 4; sleep 0.3
     [ ! -e "$work/tune-follow" ] && ! grep -q "prefetchers" "$work/turbo.txt"; check $? "neither set: no follower, nothing said"
+    sed -i '/SC_FG_FILL/d' "$t/sc-turbo.conf"
     turbo ./sc-turbo fg 3 fixed
     called "SC_FG_FILL=1" && ! grep -q "fills the display" "$work/turbo.txt"; check $? "with a multiplier that is held nothing is said about it"
-    sed -i '/SC_FG_FILL/d' "$t/sc-turbo.conf"
+    # MangoHud with frame generation Off too (the window's overlay choice): "run hud", or SC_MANGOHUD=1
+    mkdir -p "$work/home/.local/share/vulkan/implicit_layer.d"; : > "$work/home/.local/share/vulkan/implicit_layer.d/MangoHud.x86_64.json"
+    turbo ./sc-turbo run hud
+    called "MANGOHUD=1" && grep -q "MangoHud on: the frame rate it shows is the game's own" "$work/turbo.txt"; check $? "\"run hud\": the game as it is, with MangoHud"
+    echo 'SC_MANGOHUD=1' >> "$t/sc-turbo.conf"
+    turbo ./sc-turbo run
+    called "MANGOHUD=1"; check $? "SC_MANGOHUD=1 in sc-turbo.conf: \"run\" has MangoHud as well"
+    turbo ./sc-turbo fg 4
+    called "MANGOHUD=1" && grep -q "generated frames included" "$work/turbo.txt"; check $? "and \"fg\", below the layer, as before"
+    sed -i '/SC_MANGOHUD/d' "$t/sc-turbo.conf"
+    turbo ./sc-turbo run
+    ! grep -q '^MANGOHUD=' "$work/prefix/called"; check $? "without either: no MangoHud"
+    rm -f "$work/home/.local/share/vulkan/implicit_layer.d/MangoHud.x86_64.json"
+    # the panel with generation off (the window's Off with Myrddin's panel)
+    turbo ./sc-turbo fg 4 panel off
+    called "SC_FG=1" && called "SC_FG_PANEL=1" && [ -e "$t/logs/fg/OFF" ] && grep -q "Frame generation off at the start" "$work/turbo.txt"; check $? "\"fg 4 panel off\": the layer and its panel, generation off from the start (the OFF file), and that is said"
+    turbo ./sc-turbo fg 4
+    [ ! -e "$t/logs/fg/OFF" ]; check $? "the next launch without \"off\" generates again"
     echo "9. In a running game: the multiplier and parameters (control files; no game is needed to write them)"
     ( cd "$t" && ./sc-turbo fg-mult 3 fixed > "$work/turbo.txt" 2>&1 )
     [ "$(cat "$t/logs/fg/MULT")" = 3 ] && grep -qx 'adapt=0' "$t/logs/fg/PARAMS" && grep -q "held there" "$work/turbo.txt"; check $? "\"fg-mult 3 fixed\": the multiplier and the word that holds it"

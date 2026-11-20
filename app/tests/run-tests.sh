@@ -39,7 +39,7 @@ hasnt "$rt/calls.env" '^(APPDIR|APPIMAGE|LD_LIBRARY_PATH|QT_|QML|MYRDDIN_)' "not
 grep -q 'Frame generation x3' "$rt/logs/launch.out" 2>/dev/null && ok "sc-turbo's words are kept for the window" || bad "sc-turbo's words are kept for the window"
 grep -q '^mode=3' "$MYRDDIN_CONFIG_DIR/myrddin.conf" && ok "the multiplier is remembered" || bad "the multiplier is remembered"
 
-echo "2. off: the game as it is; \"Run with logs\"; the switches of Options at a launch"
+echo "2. off: the game as it is, with the overlay that is chosen; \"Run with logs\"; the switches of Options at a launch"
 fresh
 window idle 2500 --test-eval 'backend.setMode("off"); backend.launch()' || bad "the window ran"
 sleep 0.5
@@ -49,7 +49,23 @@ window idle 2500 --test-eval 'backend.setMode("off"); backend.prefs.watch = true
 sleep 0.5
 has "$rt/calls.log" "run watch" "Off with logs: \"run watch\""
 fresh
-window idle 2500 --test-eval 'backend.setMode("4"); backend.prefs.watch = true; backend.setOption("markers", false); backend.setOption("keepHud", false); backend.setOption("gapfill", false); backend.setOption("pictures", false); backend.setOption("boost", true); backend.setOption("performance", false); backend.setOption("rm -rf", true); backend.launch()' || bad "the window ran"
+window idle 2500 --test-eval 'backend.setMode("off"); backend.setOverlay("mangohud"); backend.launch()' || bad "the window ran"
+sleep 0.5
+has "$rt/calls.log" "run" "Off with MangoHud: \"run\" ..."
+has "$rt/sc-turbo.conf" "SC_MANGOHUD=1" "... with SC_MANGOHUD=1 in sc-turbo.conf, which sc-turbo's \"run\" takes too"
+fresh
+window idle 2500 --page play --test-eval 'backend.setMode("off"); backend.setOverlay("panel"); backend.prefs.watch = true; backend.launch()' \
+    --test-eval '@900 console.warn("overlay words: " + (function find(o) { if (!o) return ""; if (typeof o.few === "string" && typeof o.generating === "boolean") return o.few; for (var i = 0; i < o.children.length; i++) { var r = find(o.children[i]); if (r) return r } return "" })(window.contentItem))' || bad "the window ran"
+sleep 0.5
+has "$rt/calls.log" "fg 4 panel off watch" "Off with Myrddin's panel: the layer loaded with nothing generated, up to the limit when switched on (\"fg 4 panel off\")"
+grep -q 'overlay words: The game.s rate and pacing; nothing is generated' "$work/last.err" && ok "and Play says what the panel shows then" || bad "and Play says what the panel shows then ($(grep -o 'overlay words: .*' "$work/last.err"))"
+fresh
+fresh
+window idle 2500 --test-eval 'backend.panel(backend.conf.performance === false ? "tl" : "tr")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel tl" "Performance is off at first"
+hasnt "$rt/sc-turbo.conf" 'SC_FG_FILL' "which is what a launch does anyway: no line for it"
+fresh
+window idle 2500 --test-eval 'backend.setMode("4"); backend.prefs.watch = true; backend.setOption("markers", false); backend.setOption("keepHud", false); backend.setOption("gapfill", false); backend.setOption("pictures", false); backend.setOption("boost", true); backend.setOption("performance", true); backend.setOption("rm -rf", true); backend.launch()' || bad "the window ran"
 sleep 0.5
 has "$rt/calls.log" "fg 4 fixed watch" "\"watch\" is passed"
 hasnt "$rt/calls.log" '^fg-(params|hud)' "no game runs: nothing is sent to one"
@@ -58,12 +74,12 @@ has "$rt/sc-turbo.conf" "SC_FG_KEEP_HUD=0" "the HUD not kept apart is in sc-turb
 has "$rt/sc-turbo.conf" "export SC_FG_GAPFILL=0" "frames without the HUD not bridged: exported from sc-turbo.conf"
 has "$rt/sc-turbo.conf" "export SC_FG_PICTURES=0" "the map moved: exported from sc-turbo.conf"
 has "$rt/sc-turbo.conf" "export SC_FG_BOOST=1" "the GPU's speed held up: exported from sc-turbo.conf"
-has "$rt/sc-turbo.conf" "SC_FG_FILL=1" "Performance off: the game's frames limited to fill the display, in sc-turbo.conf"
+has "$rt/sc-turbo.conf" "SC_FG_FILL=0" "Performance on: the game's frames never limited, in sc-turbo.conf"
 hasnt "$rt/sc-turbo.conf" 'rm -rf' "a switch that is not one of them is not written"
 ( . "$rt/sc-turbo.conf"; [ "$(sh -c 'echo $SC_FG_GAPFILL$SC_FG_PICTURES$SC_FG_BOOST')" = 001 ] ) && ok "a program started after it sees the three" || bad "a program started after it sees the three"
 window idle 2500 --test-eval 'backend.conf.targetRate = "100"' || bad "the window ran"
 [ "$(grep -c 'SC_FG_GAPFILL\|SC_FG_BOOST\|SC_FG_KEEP_HUD\|SC_FG_PICTURES\|SC_FG_FILL' "$rt/sc-turbo.conf")" = 5 ] && ok "they are read back and written once" || bad "they are read back and written once"
-window idle 2500 --test-eval 'backend.setOption("keepHud", true); backend.setOption("gapfill", true); backend.setOption("pictures", true); backend.setOption("boost", false); backend.setOption("performance", true)' || bad "the window ran"
+window idle 2500 --test-eval 'backend.setOption("keepHud", true); backend.setOption("gapfill", true); backend.setOption("pictures", true); backend.setOption("boost", false); backend.setOption("performance", false)' || bad "the window ran"
 hasnt "$rt/sc-turbo.conf" 'SC_FG_GAPFILL|SC_FG_BOOST|SC_FG_KEEP_HUD|SC_FG_PICTURES|SC_FG_FILL' "back at their defaults the lines are taken out"
 
 echo "3. nothing is launched while something is in the way"
@@ -76,18 +92,18 @@ hasnt "$rt/calls.log" '^(fg|run)' "no second launch while the launcher is open"
 
 echo "4. in the running game"
 fresh
-window running 3000 --test-eval 'backend.setMode("3"); backend.setOption("markers", false); backend.setOption("keepHud", false); backend.setOption("boost", true); backend.setOption("performance", false); backend.setOption("bad;name", true); backend.setMode("$(id)"); backend.panel("tr"); backend.panel("--help")' || bad "the window ran"
+window running 3000 --test-eval 'backend.setMode("3"); backend.setOption("markers", false); backend.setOption("keepHud", false); backend.setOption("boost", true); backend.setOption("performance", true); backend.setOption("bad;name", true); backend.setMode("$(id)"); backend.panel("tr"); backend.panel("--help")' || bad "the window ran"
 has "$rt/calls.log" "fg-mult 3 fixed" "a multiplier of one's own is sent, held"
 has "$rt/calls.log" "fg-params markers=0" "a switch of Options is sent"
 has "$rt/calls.log" "fg-hud off" "the HUD switch is sent"
 has "$rt/calls.log" "fg-params boost=1" "the GPU switch is sent"
-has "$rt/calls.log" "fg-params fill=1" "Performance off is sent as the layer's \"fill\""
+has "$rt/calls.log" "fg-params fill=0" "Performance on is sent as the layer's \"fill\" the other way round"
 has "$rt/calls.log" "fg-panel tr" "the panel's corner is sent"
 has "$rt/sc-turbo.conf" "SC_FG_MARKERS=0" "and what was switched is kept for the next launch"
 hasnt "$rt/calls.log" 'bad|id\)|^rm|help' "words outside the lists are not sent"
 hasnt "$rt/calls.log" '^(fg [0-9]|run)' "nothing is launched"
-window running 2500 --test-eval 'backend.setOption("performance", true)' || bad "the window ran"
-has "$rt/calls.log" "fg-params fill=0" "and Performance on again"
+window running 2500 --test-eval 'backend.setOption("performance", false)' || bad "the window ran"
+has "$rt/calls.log" "fg-params fill=1" "and Performance off again"
 hasnt "$rt/sc-turbo.conf" 'SC_FG_FILL' "which is what a launch does anyway: no line for it"
 window running 2500 --test-eval 'backend.setMode("off")' || bad "the window ran"
 has "$rt/calls.log" "fg-off" "Off stops generation"
@@ -108,7 +124,7 @@ has "$rt/sc-turbo.conf" "SC_PREFIX='$HOME/somewhere else'" "a \$HOME path is kep
 has "$rt/sc-turbo.conf" "SC_LAUNCH='$HOME/somewhere else/start.sh'" "a \$SC_PREFIX path is kept (written out)"
 has "$rt/sc-turbo.conf" "SC_FG_TARGET=144" "the new value is written"
 has "$rt/sc-turbo.conf" "SC_FG_PRIORITY=5" "an unknown setting is kept"
-hasnt "$rt/sc-turbo.conf" 'SC_FG_FILL' "a fill rule of 0 set by hand is what a launch does anyway: read, not written again"
+has "$rt/sc-turbo.conf" "SC_FG_FILL=0" "a fill rule of 0 set by hand is read as Performance on, and kept"
 has "$rt/sc-turbo.conf" 'export WINE_SOMETHING="a b"' "an unknown export is kept"
 has "$rt/sc-turbo.conf" "# my own note" "a comment is kept"
 window idle 2500 --test-eval 'backend.conf.targetRate = ""' || bad "the window ran"
@@ -116,8 +132,8 @@ window idle 2500 --test-eval 'backend.conf.targetRate = ""' || bad "the window r
 hasnt "$rt/sc-turbo.conf" 'SC_FG_TARGET' "an emptied value is taken out"
 echo 'export SC_FG_FILL=1' >> "$rt/sc-turbo.conf"
 window idle 2500 --test-eval 'if (backend.conf.performance === false) backend.conf.targetRate = "165"' || bad "the window ran"
-has "$rt/sc-turbo.conf" "SC_FG_TARGET=165" "a fill rule of 1 set by hand is read as Performance off"
-has "$rt/sc-turbo.conf" "SC_FG_FILL=1" "and kept"
+has "$rt/sc-turbo.conf" "SC_FG_TARGET=165" "a fill rule of 1 set by hand after it is read as Performance off"
+hasnt "$rt/sc-turbo.conf" 'SC_FG_FILL' "which is what a launch does anyway: no line for it"
 
 echo "6. menu entry and terminal command"
 fresh

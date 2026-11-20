@@ -301,7 +301,8 @@ QString Backend::selfPath() const {
 
 void Backend::loadConf() {
     QString prefix, launch, monitor, target, sched;
-    bool mangohud = false, markers = true, keepHud = true, gapfill = true, pictures = true, boost = false, performance = true,
+    // ("Performance" is off unless the settings say SC_FG_FILL=0: the smoother picture is the first one a player sees)
+    bool mangohud = false, markers = true, keepHud = true, gapfill = true, pictures = true, boost = false, performance = false,
          prefetchOff = false, hugePages = false;
     QString panelKey = QStringLiteral("Shift+7");
     m_confKept.clear();
@@ -324,7 +325,7 @@ void Backend::loadConf() {
         else if (name == QStringLiteral("SC_FG_GAPFILL")) gapfill = confValue(value, prefix) != QStringLiteral("0");
         else if (name == QStringLiteral("SC_FG_PICTURES")) pictures = confValue(value, prefix) != QStringLiteral("0");
         else if (name == QStringLiteral("SC_FG_BOOST")) boost = confValue(value, prefix) == QStringLiteral("1");
-        else if (name == QStringLiteral("SC_FG_FILL")) performance = confValue(value, prefix) != QStringLiteral("1");
+        else if (name == QStringLiteral("SC_FG_FILL")) performance = confValue(value, prefix) == QStringLiteral("0");
         else if (name == QStringLiteral("SC_PREFETCH")) prefetchOff = confValue(value, prefix) == QStringLiteral("off");
         else if (name == QStringLiteral("SC_THP")) hugePages = confValue(value, prefix) == QStringLiteral("on");
         else if (name == QStringLiteral("SC_FG_PANEL_KEY")) {
@@ -366,8 +367,9 @@ void Backend::saveConf() {
     if (word.match(text("scheduler")).hasMatch()) out << QStringLiteral("SC_SCHED=") + text("scheduler");
     if (!m_conf.value(QStringLiteral("markers")).toBool()) out << QStringLiteral("SC_FG_MARKERS=0");
     if (!m_conf.value(QStringLiteral("keepHud")).toBool()) out << QStringLiteral("SC_FG_KEEP_HUD=0");
-    // ("Performance" off: the game's frames are limited so that the display is filled evenly)
-    if (!m_conf.value(QStringLiteral("performance")).toBool()) out << QStringLiteral("SC_FG_FILL=1");
+    // ("Performance" on: the game's frames are never limited; off, a launch's default, they are, so that
+    // the display is filled evenly)
+    if (m_conf.value(QStringLiteral("performance")).toBool()) out << QStringLiteral("SC_FG_FILL=0");
     if (text("panelKey") != QStringLiteral("Shift+7") && !text("panelKey").isEmpty()) out << QStringLiteral("SC_FG_PANEL_KEY=") + shellQuoted(text("panelKey"));
     // (switched by Myrddin's root helper for the time the game runs, where a user has set it up)
     if (m_conf.value(QStringLiteral("prefetchOff")).toBool()) out << QStringLiteral("SC_PREFETCH=off");
@@ -428,12 +430,21 @@ QString Backend::launchScriptInUse() const {
 QStringList Backend::launchWords() const {
     const QString mode = m_prefs.value(QStringLiteral("mode")).toString();
     const bool logs = m_prefs.value(QStringLiteral("watch")).toBool();   // "Run with logs"
-    if (mode == QStringLiteral("off")) return logs ? QStringList{QStringLiteral("run"), QStringLiteral("watch")} : QStringList{QStringLiteral("run")};
+    const bool panel = m_prefs.value(QStringLiteral("panel")).toBool();
+    // Off: the game as it is ("run"; with MangoHud where that is the overlay, SC_MANGOHUD=1 in sc-turbo.conf).
+    // Off with Myrddin's panel: the layer draws the panel, so it is loaded with nothing generated ("fg N panel
+    // off"); generation can then be switched on in the running game, up to the limit.
+    if (mode == QStringLiteral("off") && !panel) return logs ? QStringList{QStringLiteral("run"), QStringLiteral("watch")} : QStringList{QStringLiteral("run")};
+    if (mode == QStringLiteral("off")) {
+        QStringList words{QStringLiteral("fg"), QString::number(m_prefs.value(QStringLiteral("limit")).toInt()), QStringLiteral("panel"), QStringLiteral("off")};
+        if (logs) words << QStringLiteral("watch");
+        return words;
+    }
     // auto: "fg N", the layer picks up to N; a multiplier of one's own: "fg N fixed", held there
     const bool held = mode != QStringLiteral("auto");
     QStringList words{QStringLiteral("fg"), held ? mode : QString::number(m_prefs.value(QStringLiteral("limit")).toInt())};
     if (held) words << QStringLiteral("fixed");
-    if (m_prefs.value(QStringLiteral("panel")).toBool()) words << QStringLiteral("panel");
+    if (panel) words << QStringLiteral("panel");
     if (logs) words << QStringLiteral("watch");
     return words;
 }

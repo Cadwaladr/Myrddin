@@ -6,7 +6,7 @@
 #   sc-turbo capture   like probe, and also saves a few frames of DLSS's inputs (colour, motion
 #                      vectors, depth) to logs/capture, but only after "sc-turbo go"
 #   sc-turbo go        start a capture series now: 4 consecutive frames every 10 s for 2 minutes
-#   sc-turbo fg [2|3|4] [fixed] [hud] [panel] [nomarkers] [watch] [sched=NAME] [trace|old|older|next]  launch with frame generation (DLSS must be the
+#   sc-turbo fg [2|3|4] [fixed] [hud] [panel] [off] [nomarkers] [watch] [sched=NAME] [trace|old|older|next]  launch with frame generation (DLSS must be the
 #                      upscaler in game); the number is the highest multiplier, default 2: up to it the
 #                      layer picks the multiplier as the game's own rate changes (the launcher window's
 #                      "Auto"). Log and dumps: logs/fg
@@ -16,6 +16,9 @@
 #                      is shown, the generated ones too; SC_MANGOHUD=1 in sc-turbo.conf: always.
 #                      "panel": the layer's own performance panel can be shown, see fg-panel; without
 #                      the word there is none.
+#                      "off": the layer is loaded with generation off; fg-on (or the window) switches it
+#                      on in the running game. With "panel", the panel without generated frames (the
+#                      window's Off with Myrddin's panel).
 #                      "nomarkers": HUD content that moves over the screen (world markers, the compass,
 #                      a flight display) is left at the game's own rate. Without the word it
 #                      is put where it is on its way in every generated frame (SC_FG_MARKERS=0 in
@@ -37,8 +40,8 @@
 #   sc-turbo gui [install|remove]   the launcher window: the game's icon (a click launches it) and - Nx +
 #                      below it for the multiplier, also while the game runs (gui/games.ini lists the
 #                      games). install / remove: its entry in the desktop's application menu.
-#   sc-turbo run [watch] [sched=NAME]   launch the game as it is, with none of this project's layers (SC_SCHED applies;
-#                      "watch" records as with fg)
+#   sc-turbo run [hud] [watch] [sched=NAME]   launch the game as it is, with none of this project's layers (SC_SCHED applies;
+#                      "watch" records as with fg; "hud" or SC_MANGOHUD=1: with MangoHud, which shows the game's own rate)
 #   sc-turbo latency [PID]   where the time goes between a frame of the game and the display, per
 #                      multiplier (default: the newest session; the display's part needs a runner whose
 #                      vkd3d-proton asks the driver for it, which the LUG experimental ones do).
@@ -85,9 +88,9 @@
 #                      a frame). "gate=0 guard=0 first=0 gpuwait=0" is how it was before these four.
 #                      How the multiplier follows the game: fill=0 the most generated frames that do not
 #                      hold the game back (a game that could do 50 a second gets x2 and shows 100: what a
-#                      launch sets, the window's "Performance"), fill=1 the fewest that fill the display
-#                      (the same game gets x3, is held at 40 and shows 120, evenly: SC_FG_FILL=1 in
-#                      sc-turbo.conf, a smoother picture with more delay); probe=0|1 (a held game is asked what it could do by letting
+#                      window's "Performance" on, SC_FG_FILL=0 in sc-turbo.conf), fill=1 the fewest that fill the
+#                      display (the same game gets x3, is held at 40 and shows 120, evenly: a smoother picture with
+#                      more delay, what a launch sets); probe=0|1 (a held game is asked what it could do by letting
 #                      one frame on early now and then, instead of guessing); adapt=0 the multiplier is
 #                      held where it was asked for, adapt=1 (default) it follows the game's rate (what
 #                      "fg N fixed" and "fg-mult N fixed|auto" set).
@@ -208,6 +211,24 @@ panel_key_known() {
     tab|minus|equal|grave|backslash|scrolllock|home|pageup|end|pagedown|insert|delete|pause) return 0 ;;
     esac
     return 1
+}
+# MangoHud where sc-turbo.conf says SC_MANGOHUD=1 or the launch says "hud" (the window's overlay
+# choice "MangoHud"); "layer": below this project's layer, so it counts the generated frames too.
+mangohud_on() {
+    [ "${SC_MANGOHUD:-0}" = 1 ] || return 0
+    # (ls fails when any one of the places has none, so what it lists is what counts)
+    if [ -n "$(ls /usr/share/vulkan/implicit_layer.d/MangoHud*.json /etc/vulkan/implicit_layer.d/MangoHud*.json \
+            "$HOME"/.local/share/vulkan/implicit_layer.d/MangoHud*.json 2>/dev/null)" ]; then
+        export MANGOHUD=1
+        if [ "${1:-}" = layer ]; then
+            echo "MangoHud on: the frame rate it shows is the shown one, generated frames included"
+            echo "  (its own frame limit must stay off: fps_limit in MangoHud's settings would hold the layer's presents)"
+        else
+            echo "MangoHud on: the frame rate it shows is the game's own"
+        fi
+    else
+        echo "MangoHud is not installed: launched without it"
+    fi
 }
 need_launch() {
     if [ ! -x "$launch" ]; then
@@ -485,10 +506,11 @@ fg)
     # HUD content that moves over the screen (markers, the compass, a flight display) is put where it
     # is on its way in every generated frame, unless "nomarkers" or sc-turbo.conf says otherwise.
     export SC_FG_MARKERS="${SC_FG_MARKERS:-1}"
-    # A multiplier that follows the game's rate takes the most generated frames that do not hold the
-    # game back (the quickest response), unless sc-turbo.conf says SC_FG_FILL=1: then the fewest that
-    # fill the display, with the game's own rate limited to an even part of the display's.
-    export SC_FG_FILL="${SC_FG_FILL:-0}"
+    # A multiplier that follows the game's rate takes the fewest generated frames that fill the display,
+    # with the game's own rate limited to an even part of the display's (a smoother picture), unless
+    # sc-turbo.conf says SC_FG_FILL=0 (the window's "Performance" on): then the most that do not hold
+    # the game back (the quickest response).
+    export SC_FG_FILL="${SC_FG_FILL:-1}"
     for word in ${fg_words[@]+"${fg_words[@]}"}; do
         case "$word" in
         fixed) export SC_FG_ADAPT=0 ;;   # the multiplier is held at the number
@@ -496,6 +518,7 @@ fg)
         trace) export SC_FG_TRACE=1 ;;   # lets "sc-turbo fg-trace" record the frame structure
         hud) SC_MANGOHUD=1 ;;
         panel) export SC_FG_PANEL=1 ;;   # the layer's own panel (sc-turbo fg-panel); without the word there is none
+        off) fg_off=1 ;;   # loaded with generation off (the OFF control file); fg-on switches it on
         markers) export SC_FG_MARKERS=1 ;;   # (what the launch does anyway; the word is still taken)
         watch) io_watch=1 ;;   # the recording of "sc-turbo iowatch", from outside the game
         sched=*) sc_sched="${word#sched=}" ;;   # the CPU scheduler while the game runs (start_sched)
@@ -509,24 +532,15 @@ fg)
             layer="$here/build/fg-next"
             [ -f "$layer/libsc_fg.so" ] || { echo "$layer/libsc_fg.so is missing (./build.sh)"; exit 1; }
             echo "Using the newest build, which is not validated yet ($layer)" ;;
-        *) echo "fg: \"$word\" is not known (fixed, hud, panel, nomarkers, watch, sched=NAME, trace, old, older, next)"; exit 1 ;;
+        *) echo "fg: \"$word\" is not known (fixed, hud, panel, off, nomarkers, watch, sched=NAME, trace, old, older, next)"; exit 1 ;;
         esac
     done
+    [ "${fg_off:-0}" = 1 ] && touch "$here/logs/fg/OFF"
     # (This layer's folder comes first among the implicit layers, which puts it nearest the game:
     # every other layer, MangoHud among them, sees what this one presents.)
     export VK_ADD_IMPLICIT_LAYER_PATH="$layer${VK_ADD_IMPLICIT_LAYER_PATH:+:$VK_ADD_IMPLICIT_LAYER_PATH}"
     export DISABLE_LSFGVK=1 WINE_SCHED_LOG=0
-    if [ "$SC_MANGOHUD" = 1 ]; then
-        # (ls fails when any one of the places has none, so what it lists is what counts)
-        if [ -n "$(ls /usr/share/vulkan/implicit_layer.d/MangoHud*.json /etc/vulkan/implicit_layer.d/MangoHud*.json \
-                "$HOME"/.local/share/vulkan/implicit_layer.d/MangoHud*.json 2>/dev/null)" ]; then
-            export MANGOHUD=1
-            echo "MangoHud on: the frame rate it shows is the shown one, generated frames included"
-            echo "  (its own frame limit must stay off: fps_limit in MangoHud's settings would hold the layer's presents)"
-        else
-            echo "MangoHud is not installed: launched without it"
-        fi
-    fi
+    mangohud_on layer
     if [ "${SC_FG_PANEL:-0}" = 1 ]; then
         # The panel is there from the start: at the step it was left at, or the first one. The key
         # is the one of sc-turbo.conf (the layer's own default is Shift+7).
@@ -545,13 +559,17 @@ fg)
     display_settings
     runner_note
     dlss_note
-    echo "Frame generation x$SC_FG_MULT; log: $here/logs/fg"
+    if [ "${fg_off:-0}" = 1 ]; then
+        echo "Frame generation off at the start (\"sc-turbo fg-on\" or the window switches it on, up to x$SC_FG_MULT); log: $here/logs/fg"
+    else
+        echo "Frame generation x$SC_FG_MULT; log: $here/logs/fg"
+    fi
     [ "${SC_FG_PANEL:-0}" = 1 ] && echo "  The performance panel is shown; $SC_FG_PANEL_KEY in the game steps it on (more, then off)."
     if [ "${SC_FG_ADAPT:-1}" = 0 ]; then
         echo "  The multiplier is held at x$SC_FG_MULT (\"fixed\"); without that word it follows the game's rate, up to x$SC_FG_MULT."
     fi
     if [ "${SC_FG_ADAPT:-1}" != 0 ] && [ "$SC_FG_FILL" = 1 ]; then
-        echo "  The game's own rate is limited where that fills the display evenly (SC_FG_FILL=1); \"sc-turbo fg-params fill=0\" lets it run free."
+        echo "  The game's own rate is limited where that fills the display evenly (Performance off); \"sc-turbo fg-params fill=0\" lets it run free."
     fi
     [ -e "$here/logs/fg/HUDOFF" ] && echo "  The HUD is not kept apart (SC_FG_KEEP_HUD=0); \"sc-turbo fg-hud on\" switches that on in the running game."
     if [ "${io_watch:-0}" = 1 ]; then
@@ -564,18 +582,21 @@ fg)
     launch_now
     ;;
 run)
-    # The game as it is, with none of this project's layers (the launcher window's 1x).
+    # The game as it is, with none of this project's layers (the launcher window's Off), with MangoHud
+    # where that is asked for ("hud", or SC_MANGOHUD=1 in sc-turbo.conf: the window's overlay choice).
     need_launch
     for word in "${@:2}"; do
         case "$word" in
+        hud) SC_MANGOHUD=1 ;;
         watch) io_watch=1 ;;   # the recording of "sc-turbo iowatch", from outside the game
         sched=*) sc_sched="${word#sched=}" ;;
-        *) echo "run: \"$word\" is not known (watch, sched=NAME)"; exit 1 ;;
+        *) echo "run: \"$word\" is not known (hud, watch, sched=NAME)"; exit 1 ;;
         esac
     done
     desktop_notes
     display_settings
     export WINE_SCHED_LOG=0
+    mangohud_on
     if [ "${io_watch:-0}" = 1 ]; then
         mkdir -p "$here/logs/io"
         nohup "$here/tools/sc-iowatch" > "$here/logs/io/watch.out" 2>&1 &

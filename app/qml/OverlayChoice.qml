@@ -5,15 +5,18 @@ import QtQuick
 Choice {
     id: box
     readonly property string which: backend.conf.mangohud ? "mangohud" : backend.prefs.panel ? "panel" : "off"
-    // (a launch with generation Off is the game as it is: nothing of Myrddin's is loaded, no overlay either)
-    readonly property bool unused: which !== "off" && backend.prefs.mode === "off"
-    readonly property string words: unused ? "A launch with frame generation Off starts the game as it is: no overlay is drawn."
-                                  : which === "mangohud" ? (backend.mangohudInstalled ? "Its frame rate counts every frame that is shown, generated ones too." : "MangoHud is not installed on this system: the game starts without it.")
-                                  : which === "panel" ? "Myrddin's own readout: the shown rate, the game's rate, pacing."
+    // (what is chosen is drawn, whatever the multiplier: with frame generation Off, MangoHud shows the
+    // game's own rate, and Myrddin's panel comes with the layer loaded and nothing generated)
+    readonly property bool generating: backend.prefs.mode !== "off"
+    readonly property string words: which === "mangohud" ? (!backend.mangohudInstalled ? "MangoHud is not installed on this system: the game starts without it."
+                                                           : generating ? "Its frame rate counts every frame that is shown, generated ones too."
+                                                           : "With frame generation Off it shows the game's own frame rate.")
+                                  : which === "panel" ? (generating ? "Myrddin's own readout: the shown rate, the game's rate, pacing."
+                                                        : "Myrddin's own readout. With frame generation Off the layer is loaded to draw it and generates nothing; generation can be switched on in the running game.")
                                   : "Nothing is drawn over the game."
-    readonly property string few: unused ? "Not drawn while frame generation is Off."
-                                : which === "mangohud" ? (backend.mangohudInstalled ? "Counts every shown frame, generated ones too." : "Not installed: the game starts without it.")
-                                : which === "panel" ? "The shown rate, the game's rate and pacing."
+    readonly property string few: which === "mangohud" ? (!backend.mangohudInstalled ? "Not installed: the game starts without it."
+                                                         : generating ? "Counts every shown frame, generated ones too." : "The game's own frame rate.")
+                                : which === "panel" ? (generating ? "The shown rate, the game's rate and pacing." : "The game's rate and pacing; nothing is generated.")
                                 : "Nothing is drawn over the game."
     implicitWidth: 220
     model: {

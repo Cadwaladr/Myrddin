@@ -70,7 +70,7 @@ PageView {
             title: "Performance"
             detail: "For Auto. On: the game's own frames are never limited, so it answers as fast as it can; the shown rate may stay under the display's. "
                   + "Off: the game's frames are limited to an even part of the display's rate (a half, a third or a quarter), so that every refresh gets a frame: a smoother picture, with more latency. "
-                  + "At 120 Hz, a game that could do 50 frames a second shows 100 with On (2×, the game at 50) and 120 with Off (3×, the game held at 40)."
+                  + "At 120 Hz, a game that could do 50 frames a second shows 100 with On (2×, the game at 50) and 120 with Off (3×, the game held at 40). Off by default."
             dimmed: backend.prefs.mode !== "auto"
             Toggle { checked: backend.conf.performance; onToggled: (v) => backend.setOption("performance", v) }
         }
@@ -81,10 +81,11 @@ PageView {
         note: "What is drawn over the game to show how it runs: one of them, or none. It is chosen at launch."
         SettingRow {
             title: "Overlay"
-            detail: overlay.unused ? overlay.words + " The choice is kept for a launch with frame generation."
-                  : overlay.which === "mangohud" ? (backend.mangohudInstalled ? "MangoHud sits below Myrddin's layer, so its frame rate is the shown one, generated frames included. Its own frame limit must stay off."
-                                                                              : "MangoHud is not installed on this system: the game starts without it.")
+            detail: overlay.which === "mangohud" ? (!backend.mangohudInstalled ? "MangoHud is not installed on this system: the game starts without it."
+                                                    : overlay.generating ? "MangoHud sits below Myrddin's layer, so its frame rate is the shown one, generated frames included. Its own frame limit must stay off."
+                                                    : "With frame generation Off, MangoHud shows the game's own frame rate.")
                   : overlay.which === "panel" ? "Myrddin's own readout, there from the start of the game. Its key steps through it in the game: the shown rate, both rates, both with a pacing graph, off."
+                                                + (overlay.generating ? "" : " With frame generation Off the layer is loaded to draw it and generates nothing; generation can be switched on in the running game.")
                   : backend.mangohudInstalled ? "Nothing is drawn over the game." : "Nothing is drawn over the game. MangoHud is not installed on this system, so it is not listed."
             OverlayChoice { id: overlay }
         }
