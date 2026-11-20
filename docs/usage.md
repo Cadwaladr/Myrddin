@@ -114,3 +114,38 @@ The launcher window writes the same file: what its Options page sets is there un
 and lines it does not know are kept as they are.
 
 What `SC_SCHED` and `SC_MANGOHUD` need is on the page [Optional extras](optional.md).
+
+## What the layer does
+
+The layer, `sc_fg`, loads the way MangoHud does. Between each pair of the game's frames it runs
+AMD's FSR 3.1 frame interpolation on the motion vectors and depth the game gives DLSS, and shows
+one, two or three generated frames.
+
+- The multiplier is set at launch and can be changed while the game runs. Up to that limit it
+  follows the game's frame rate and never slows the game down to fit more generated frames in
+  (`SC_FG_FILL=1`, the window's "Performance" switched off, limits the game's frames instead so
+  that the display is filled evenly). If the game alone gets above 92 % of the refresh rate,
+  generation pauses until it drops below 80 %. With the word `fixed` (the window's 2×, 3× and
+  4×) the multiplier is held instead, whatever the game's frame rate.
+- The HUD stays sharp. The game draws its HUD into a layer of its own, and `sc_fg` captures it,
+  interpolates the picture without it and puts the HUD back over every generated frame. A frame
+  that arrives without a capture gets its HUD-free picture worked out from the frame and the
+  last capture. A picture-based detection is the fallback.
+- HUD elements that move across the screen (markers pinned to the world, the compass, a ship's
+  flight display) move at the shown rate as well. The map at the top left stays at the game's
+  own rate. In a headless test where the GPU was the limit this cost 3 to 4 % of the game's
+  frames. `./sc-turbo fg 3 nomarkers` launches without it, and `./sc-turbo fg-params markers=0`
+  turns it off in a running game.
+- The game's motion vectors are checked against the picture. This stops thin objects from
+  flickering where their vectors are wrong.
+- Real and generated frames are spaced evenly and capped at the display's refresh rate.
+- With `./sc-turbo fg 3 hud`, MangoHud sits below the layer and counts every frame that goes out.
+  Keep MangoHud's own `fps_limit` off, or it holds the layer's frames back. The layer also has a
+  small panel of its own (shown rate, the game's own rate, a pacing graph) when you ask for it
+  at launch; Shift+7 in the game steps through it.
+
+Around the layer there is a launcher window, an optional CPU scheduler for the time the game
+runs, and tools for measuring: two settings compared within one session (`sc-turbo fg-ab`), the
+time from a frame to the display (`sc-turbo latency`), a recorder for the game's disk and memory
+use (`sc-turbo iowatch`), and a headless test chain that runs the layer without the game
+(`tools/test-chain.sh`).
