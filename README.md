@@ -125,18 +125,22 @@ The code, the tests and the documents in this repository were written by Claude,
 made by [Anthropic](https://www.anthropic.com), working in Claude Code. Cadwaladr directed the
 work, decided what it should do and tested it in the game.
 
-The frame generation from the game's motion vectors is our own implementation. The technique
-itself, taking the motion vectors a game already makes and running FSR's frame interpolation on
-them, is one we found in the PS5 emulator KytyPS5, where it had been built in. We took the idea
-and none of its code. Our changes to AMD's SDK that give several generated frames per pair, and
-the recipe that builds the SDK on Linux, were first written for Lichii, an emulator of ours made
-to run Nintendo Switch 2 games, and carried over. The parts that come from elsewhere are listed
-below, with the licence of what we carried over.
+The frame generation from the game's motion vectors is our own implementation. The approach,
+building AMD's FSR 3 frame interpolation from its sources on Linux and giving it a game's own
+depth and motion vectors with a HUD-free picture, is one we found in a fork of the PS5 emulator
+KytyPS5: [chenxiao07/KytyPS5](https://github.com/chenxiao07/KytyPS5), pull requests
+[#117](https://github.com/chenxiao07/KytyPS5/pull/117) and
+[#118](https://github.com/chenxiao07/KytyPS5/pull/118) by Bios2000. We used it as a guide and
+took none of its code, which is GPL-2.0-only. Our changes to AMD's SDK that give several
+generated frames per pair, and the recipe that builds the SDK on Linux, were first written for
+our own modified build of Lichii, an emulator made to run Nintendo Switch 2 games, and carried
+over. The parts that come from elsewhere are listed below, with the licence of what we carried
+over.
 
 | Component | Licence |
 |---|---|
 | AMD FidelityFX SDK 1.1.4, with our changes that yield several generated frames per pair | MIT, Copyright (C) 2024 Advanced Micro Devices, Inc. (`third_party/ffx_src/FidelityFX-SDK/LICENSE.txt`) |
-| Our Linux build recipe for the SDK and our Vulkan test helpers, first written for Lichii | GPL-3.0-or-later. The files carry the notice of the project they were written in: Copyright 2026 Eden Emulator Project |
+| Our Linux build recipe for the SDK and our Vulkan test helpers, first written for our build of Lichii | GPL-3.0-or-later. The files carry the notice of the project they were written in: Copyright 2026 Eden Emulator Project |
 | Adwaita Sans, a variation of Inter, drawn into `fg/hud_font.h` for the panel | SIL Open Font License 1.1 (copyright notices and licence text in `third_party/adwaita-sans/LICENSE`) |
 | Inter, the font of the AppImage's window (`app/assets/InterVariable.ttf`) | SIL Open Font License 1.1, Copyright (c) 2016 The Inter Project Authors (`app/assets/Inter-LICENSE.txt`) |
 | Qt 6, which the AppImage's window is built on (linked, not in this repository) | LGPL-3.0 |

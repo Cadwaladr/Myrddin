@@ -57,12 +57,12 @@ PageView {
             lineHeight: 1.35
             color: Theme.dim
             font.pixelSize: 13
-            text: "Myrddin is free software under the GNU General Public License, version 3 or later. The code, the tests and the documents were written by Claude, working in Claude Code; Cadwaladr directed the work, decided what it should do and tested it in the game. The frame generation from the game's motion vectors is our own. The technique itself was found in the PS5 emulator KytyPS5, where it had been built in (the idea, none of its code); our changes to AMD's SDK and its Linux build were first written for Lichii, an emulator of ours made to run Nintendo Switch 2 games."
+            text: "Myrddin is free software under the GNU General Public License, version 3 or later. The code, the tests and the documents were written by Claude, working in Claude Code; Cadwaladr directed the work, decided what it should do and tested it in the game. The frame generation from the game's motion vectors is our own. The approach was found in a fork of the PS5 emulator KytyPS5 (chenxiao07/KytyPS5, pull requests 117 and 118 by Bios2000): a guide, none of its code. Our changes to AMD's SDK and its Linux build were first written for our own modified build of Lichii, an emulator made to run Nintendo Switch 2 games."
         }
         Repeater {
             model: [
                 { name: "AMD FidelityFX SDK 1.1.4", what: "frame interpolation and optical flow, with our changes that yield several generated frames per pair", licence: "MIT" },
-                { name: "Lichii, our own", what: "the SDK's Linux build recipe and Vulkan test helpers, first written there", licence: "GPL-3.0-or-later" },
+                { name: "Our build of Lichii", what: "the SDK's Linux build recipe and Vulkan test helpers, first written there", licence: "GPL-3.0-or-later" },
                 { name: "Adwaita Sans", what: "the letters of the panel in the game", licence: "SIL OFL 1.1" },
                 { name: "Inter", what: "the letters of this window", licence: "SIL OFL 1.1" },
                 { name: "Qt 6", what: "this window", licence: "LGPL-3.0" },
