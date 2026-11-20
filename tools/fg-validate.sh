@@ -2,7 +2,7 @@
 # What a build of the frame-generation layer has to pass before it is installed. Everything runs
 # headless (tools/test-chain.sh); results are appended to logs/test/_validate.txt and printed.
 #
-#   tools/fg-validate.sh [all | regression | hose | limiter [A|B|C|D] | multiplier | gpuwait | soak | panel | markers]
+#   tools/fg-validate.sh [all | regression | hose | limiter [A|B|C|D] | multiplier | gpuwait | soak | panel | markers | experimental]
 #
 #   regression   the frame chain's cases: chain intact (unlinked=0, shift=0, off=0; "early": shift=1, off=1)
 #                ("own": a swapchain of the game's own renderer, left as it is: presents = frames, nothing generated;
@@ -49,6 +49,10 @@
 #                nothing of a ship's HUD held back, slow or fast (HUD_SHIP=PREFIX, eight in a row; default
 #                logs/fg/dump-1326375); and what the passes cost: a GPU-bound game with them once, eight
 #                times over and not at all, in turn.
+#   experimental 5x to 8x (SC_FG_EXPERIMENTAL=1; not part of "all"): held at x5, x6 and x8 with a game slow
+#                enough for each, the chain intact as in "regression" and as many generated frames as asked;
+#                Auto up to x8 with a game at about 20 a second goes above x4; and without the setting, x6
+#                asked for is x4 with no more swapchain images than before.
 #   FG_TARGET=RATE: the display rate the limiter, multiplier, gpuwait and soak cases run at (120).
 #   panel        the performance panel (off by default; all the above run without it): the chain's cases
 #                with it on, intact as without; frames that pass through from the first one, with the
@@ -289,9 +293,24 @@ markers() {
         say "no captures of the game's HUD layer ($captures-000-hud-*.bin): only the test shape was checked"
     fi
 }
+experimental() {
+    say "## experimental: 5x to 8x (SC_FG_EXPERIMENTAL=1), and x6 asked for without it"
+    local x="SC_FG_TARGET=120 SC_FG_EXPERIMENTAL=1 SC_FG_ADAPT=0" n
+    REG_SECS=16 reg e5 "$x SC_FG_MULT=5" --game-ms 42
+    REG_SECS=16 reg e6 "$x SC_FG_MULT=6" --game-ms 50
+    REG_SECS=16 reg e8 "$x SC_FG_MULT=8" --game-ms 67
+    for n in e5 e6 e8; do
+        say "$n: $(grep -ho '[0-9]* swapchain images, [0-9]* generated per frame[^,]*' logs/test/$n/fg-*.log | tail -1); $(grep STAT logs/test/$n/fg-*.log | tail -1 | grep -o 'STAT x[0-9]* real=[0-9.]*/s generated=[0-9.]*/s shown=[0-9.]*/s')"
+    done
+    REG_SECS=30 reg ea "SC_FG_TARGET=120 SC_FG_EXPERIMENTAL=1 SC_FG_MULT=8 SC_FG_MAX_BASE=62" --sim-ms 50 --sim-jitter 3 --game-ms 7 --jitter 1 --gpu-load 3 --unprotected
+    say "ea: $(grep -ho 'multiplier x[0-9]* -> x[0-9]*' logs/test/ea/fg-*.log | tr '\n' ' ')"
+    REG_SECS=12 reg en "SC_FG_TARGET=120 SC_FG_MULT=6 SC_FG_ADAPT=0" --game-ms 50
+    TEST_AT="4:MULT=6" REG_SECS=8 reg em "SC_FG_TARGET=120 SC_FG_MULT=4 SC_FG_ADAPT=0" --game-ms 50
+    say "en: $(grep -ho '[0-9]* swapchain images, [0-9]* generated per frame[^,]*' logs/test/en/fg-*.log | tail -1); em: $(grep -hc 'this launch has room for x4 at most' logs/test/em/fg-*.log) line(s) saying x6 is x4 here"
+}
 case "${1:-all}" in
 all) regression; hose; limiter all; multiplier; gpuwait; soak; panel; given_up ;;
-regression|hose|multiplier|gpuwait|soak|panel|markers) "$1" ;;
+regression|hose|multiplier|gpuwait|soak|panel|markers|experimental) "$1" ;;
 limiter) limiter "${2:-all}" ;;
 *) awk 'NR > 1 { if (/^#/) print; else exit }' "$0"; exit 1 ;;
 esac

@@ -113,6 +113,13 @@ cp sc-turbo.conf.example sc-turbo.conf
   layer takes the fewest generated frames that fill the display: a smoother picture, with more
   latency (the window's "Performance" switch, off by default; `sc-turbo fg-params fill=0|1` in a
   running game)
+- `export SC_FG_EXPERIMENTAL=1`: experimental, off by default. Multipliers from ×5 to ×8
+  (`sc-turbo fg 6`, `fg-mult 6`; the window's Options, "Experimental: 5× to 8×"), for places where
+  the game's own rate falls below 30 frames a second. The layer makes room for that many
+  generated frames when the game starts (up to about 120 MB more graphics memory at 2560x1440), so the
+  setting acts from the next launch. Every generated frame is a guess between two of the game's
+  and what you do still takes one of the game's frames to show: more of them make a smoother
+  picture, not a quicker one
 
 The launcher window writes the same file: what its Options page sets is there under these names,
 and lines it does not know are kept as they are.

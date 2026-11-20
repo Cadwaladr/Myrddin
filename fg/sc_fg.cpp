@@ -2879,6 +2879,10 @@ void SelftestImport(Device& p) {
 // ----------------------------------------------------------------------------- frame generation
 
 constexpr uint32_t MAX_GENERATED = FFX_FRAMEINTERPOLATION_MAX_GENERATED_FRAMES;
+/// The most generated frames a game frame gets: 3 (x4), or MAX_GENERATED (x8) with the experimental
+/// setting (SC_FG_EXPERIMENTAL=1). Only that many outputs, command buffers and extra swapchain images
+/// are made, so a launch without it uses no more memory than before the setting existed.
+const uint32_t g_generated_cap = EnvFloat("SC_FG_EXPERIMENTAL", 0.0f) != 0.0f ? MAX_GENERATED : std::min(3u, MAX_GENERATED);
 constexpr int COMMAND_SETS = 3;
 constexpr int HUD_PASSES = 10; ///< the HUD passes' pipelines; one more follows them:
 constexpr int UNMIX_PASS = 9;  ///< (the last of them) hud_unmix.comp: a scene worked out, see RecordUnmix
@@ -3039,7 +3043,7 @@ struct Fg {
     bool failed{};
     bool ready{};
 
-    uint32_t generated{std::clamp<uint32_t>(static_cast<uint32_t>(EnvFloat("SC_FG_MULT", 2.0f)), 2, MAX_GENERATED + 1) - 1};
+    uint32_t generated{std::clamp<uint32_t>(static_cast<uint32_t>(EnvFloat("SC_FG_MULT", 2.0f)), 2, g_generated_cap + 1) - 1};
     uint32_t max_generated{generated}; ///< what was asked for; `generated` adapts below it to the frame rate
     double multiplier_changed{};
     uint32_t family{};
@@ -3743,7 +3747,7 @@ bool PrepareHud(Device& d, Fg& fg) {
     hud.current_view = MakeView(d, fg.backbuffer.image, fg.format);
     hud.previous_view = MakeView(d, fg.previous.image, fg.format);
     bool ok = hud.current_view && hud.previous_view;
-    for (uint32_t i = 0; i < MAX_GENERATED; ++i) {
+    for (uint32_t i = 0; i < g_generated_cap; ++i) {
         hud.output_views[i] = MakeView(d, fg.outputs[i].image, fg.format);
         ok = ok && hud.output_views[i];
     }
@@ -4508,7 +4512,7 @@ bool Prepare(Device& d, Fg& fg, uint32_t family) {
         !CreateOwnImage(d, fg.zero_depth, VK_FORMAT_R32_SFLOAT, w / 2, h / 2)) {
         return false;
     }
-    for (uint32_t i = 0; i < MAX_GENERATED; ++i) {
+    for (uint32_t i = 0; i < g_generated_cap; ++i) {
         if (!CreateOwnImage(d, fg.outputs[i], fg.format, w, h)) {
             return false;
         }
@@ -4522,30 +4526,30 @@ bool Prepare(Device& d, Fg& fg, uint32_t family) {
     VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
     VkSemaphoreCreateInfo semaphore_info{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
     for (Fg::Set& set : fg.sets) {
-        VkCommandBuffer buffers[1 + MAX_GENERATED];
+        VkCommandBuffer buffers[1 + MAX_GENERATED]{};
         VkCommandBufferAllocateInfo allocate{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
         allocate.commandPool = fg.pool;
         allocate.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        allocate.commandBufferCount = 1 + MAX_GENERATED;
+        allocate.commandBufferCount = 1 + g_generated_cap;
         if (d.AllocateCommandBuffers(d.handle, &allocate, buffers) != VK_SUCCESS ||
             d.CreateFence(d.handle, &fence_info, nullptr, &set.fence) != VK_SUCCESS) {
             return false;
         }
-        for (VkCommandBuffer buffer : buffers) {
+        for (uint32_t i = 0; i < 1 + g_generated_cap; ++i) {
             // Command buffers made below the loader need its dispatch pointer set by hand.
             if (d.set_loader_data) {
-                d.set_loader_data(d.handle, buffer);
+                d.set_loader_data(d.handle, buffers[i]);
             }
         }
         set.main = buffers[0];
-        for (uint32_t i = 0; i < MAX_GENERATED; ++i) {
+        for (uint32_t i = 0; i < g_generated_cap; ++i) {
             set.blit[i] = buffers[1 + i];
         }
     }
     if (d.CreateSemaphore(d.handle, &semaphore_info, nullptr, &fg.real_ready) != VK_SUCCESS) {
         return false;
     }
-    for (uint32_t i = 0; i < MAX_GENERATED; ++i) {
+    for (uint32_t i = 0; i < g_generated_cap; ++i) {
         if (d.CreateSemaphore(d.handle, &semaphore_info, nullptr, &fg.acquired[i]) != VK_SUCCESS ||
             d.CreateSemaphore(d.handle, &semaphore_info, nullptr, &fg.blitted[i]) != VK_SUCCESS) {
             return false;
@@ -4581,10 +4585,10 @@ bool Prepare(Device& d, Fg& fg, uint32_t family) {
     fg.ready = true;
     g_fg_ready_time = Now();
     GpuMemory(d, memory_after, memory_budget);
-    Log("fg: ready for %ux%u format %d, %zu swapchain images, %u generated per frame, queue family %u "
+    Log("fg: ready for %ux%u format %d, %zu swapchain images, %u generated per frame%s, queue family %u "
         "(%.0f ms; GPU memory of the process %.0f -> %.0f MB, offered to it %.0f MB)",
-        w, h, fg.format, fg.images.size(), fg.generated, family, (Now() - start) * 1000.0, memory_before, memory_after,
-        memory_budget);
+        w, h, fg.format, fg.images.size(), fg.generated, g_generated_cap > 3 ? " (experimental: up to x8)" : "", family,
+        (Now() - start) * 1000.0, memory_before, memory_after, memory_budget);
     return true;
 }
 
@@ -5410,6 +5414,12 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
         if (FILE* file = std::fopen(path, "r")) {
             unsigned multiplier = 0;
             if (std::fscanf(file, "%u", &multiplier) == 1 && multiplier >= 2 && multiplier <= MAX_GENERATED + 1) {
+                // (above x4 only where the launch had the experimental setting: what it made room for)
+                if (multiplier > g_generated_cap + 1) {
+                    Log("fg: multiplier x%u asked for: this launch has room for x%u at most (the experimental "
+                        "setting was off when it started)", multiplier, g_generated_cap + 1);
+                    multiplier = g_generated_cap + 1;
+                }
                 // What is asked for is the limit. A multiplier that is held goes there at once; one
                 // that follows the game's rate only comes down to it, and goes up by itself when
                 // the rate asks for that (a jump to the limit would hold the game for the seconds
@@ -6076,7 +6086,7 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
     }
     mark(0);
     ToGeneral(d, cmd, fg.backbuffer);
-    for (uint32_t i = 0; i < MAX_GENERATED; ++i) {
+    for (uint32_t i = 0; i < g_generated_cap; ++i) {
         ToGeneral(d, cmd, fg.outputs[i]);
     }
     if (!fg.zero_cleared) {
@@ -7216,8 +7226,20 @@ VKAPI_ATTR VkResult VKAPI_CALL HookCreateSwapchainKHR(VkDevice device, const VkS
     const bool wanted = !keep && !own && (d->nvx || g_test_inputs || EnvFloat("SC_FG_FALLBACK", 0.0f) != 0.0f);
     VkSwapchainCreateInfoKHR changed = *info;
     if (wanted) {
-        // Room for the generated frames, and the right to copy from and into the images.
-        changed.minImageCount += MAX_GENERATED + 1;
+        // Room for the generated frames, and the right to copy from and into the images. No more
+        // images than the surface takes: with 5x to 8x (the game's own and eight more) the request went
+        // past that and NVIDIA's driver crashed in vkCreateSwapchainKHR instead of failing. A generated
+        // frame takes its image just before it is shown, so fewer is a smaller buffer, not a stop.
+        changed.minImageCount += g_generated_cap + 1;
+        const auto capabilities_of = d->instance ? reinterpret_cast<PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR>(
+                                                       d->instance->gipa(d->instance->handle, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR"))
+                                                 : nullptr;
+        VkSurfaceCapabilitiesKHR capabilities{};
+        if (capabilities_of && capabilities_of(d->physical, info->surface, &capabilities) == VK_SUCCESS &&
+            capabilities.maxImageCount != 0 && changed.minImageCount > capabilities.maxImageCount) {
+            Log("swapchain: %u images wanted, the surface takes %u at most", changed.minImageCount, capabilities.maxImageCount);
+            changed.minImageCount = std::max(info->minImageCount, capabilities.maxImageCount);
+        }
         changed.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     }
     VkResult result = d->CreateSwapchainKHR(device, &changed, allocator, swapchain);

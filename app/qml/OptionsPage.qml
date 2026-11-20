@@ -60,16 +60,23 @@ PageView {
             detail: "The most that Auto picks. 4× allows up to three generated frames between every two of the game's; with a lower limit the shown rate may stay under the display's."
             dimmed: backend.prefs.mode !== "auto"
             Segmented {
-                cell: 54
-                options: ["2×", "3×", "4×"]
+                cell: backend.conf.experimental ? 44 : 54
+                options: backend.conf.experimental ? ["2×", "3×", "4×", "5×", "6×", "7×", "8×"] : ["2×", "3×", "4×"]
                 index: backend.prefs.limit - 2
                 onChosen: (i) => backend.setLimit(i + 2)
             }
         }
         SettingRow {
+            title: "Experimental: 5× to 8×"
+            detail: "Lets Auto go up to 8×, for places where the game's own rate falls below 30 frames a second. "
+                  + "Every generated frame is a guess between two of the game's, and what you do still takes one of the game's frames to show, "
+                  + "so more of them make a smoother picture, not a quicker one. Off by default; acts from the next launch."
+            Toggle { checked: backend.conf.experimental; onToggled: (v) => backend.setOption("experimental", v) }
+        }
+        SettingRow {
             title: "Performance"
             detail: "For Auto. On: the game's own frames are never limited, so it answers as fast as it can; the shown rate may stay under the display's. "
-                  + "Off: the game's frames are limited to an even part of the display's rate (a half, a third or a quarter), so that every refresh gets a frame: a smoother picture, with more latency. "
+                  + "Off: the game's frames are limited to an even part of the display's rate (a half, a third or a quarter; down to an eighth with 5× to 8×), so that every refresh gets a frame: a smoother picture, with more latency. "
                   + "At 120 Hz, a game that could do 50 frames a second shows 100 with On (2×, the game at 50) and 120 with Off (3×, the game held at 40). Off by default."
             dimmed: backend.prefs.mode !== "auto"
             Toggle { checked: backend.conf.performance; onToggled: (v) => backend.setOption("performance", v) }

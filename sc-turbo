@@ -12,6 +12,7 @@
 #                      "Auto"). Log and dumps: logs/fg
 #                      ("fixed": the multiplier is held at the number, whatever the game's rate (the
 #                      window's x2, x3, x4); fg-mult changes either in the running game.
+#                      5 to 8: experimental, only with SC_FG_EXPERIMENTAL=1 in sc-turbo.conf.
 #                      "hud": with MangoHud, which sits below the layer and so counts every frame that
 #                      is shown, the generated ones too; SC_MANGOHUD=1 in sc-turbo.conf: always.
 #                      "panel": the layer's own performance panel can be shown, see fg-panel; without
@@ -49,7 +50,7 @@
 #                      from outside (it reads /proc and asks nvidia-smi; started by itself with "fg N watch");
 #                      report: the recording put together with the frame rates and the game's log, place by place
 #   sc-turbo fg-off / fg-on   switch generation off / on while the game runs
-#   sc-turbo fg-mult N [fixed|auto]   change the multiplier (2, 3 or 4) while the game runs. "fixed": it is
+#   sc-turbo fg-mult N [fixed|auto]   change the multiplier (2, 3 or 4; to 8 when experimental) while the game runs. "fixed": it is
 #                      held at N; "auto": it follows the game's rate, up to N; without a word it stays
 #                      held or following as it was (following: N is the new limit)
 #   sc-turbo fg-hud on|off   switch the HUD handling (keeps the HUD in place) while the game runs
@@ -229,6 +230,17 @@ mangohud_on() {
     else
         echo "MangoHud is not installed: launched without it"
     fi
+}
+# Whether N is a multiplier sc-turbo takes: 2 to 4, and 5 to 8 with SC_FG_EXPERIMENTAL=1. Says why not.
+multiplier_allowed() {
+    case "$1" in
+    [2-4]) return 0 ;;
+    [5-8]) [ "${SC_FG_EXPERIMENTAL:-0}" = 1 ] && return 0
+           echo "${2:+$2: }x$1 is experimental: SC_FG_EXPERIMENTAL=1 in sc-turbo.conf allows 5 to 8 (the window: Options,"
+           echo "  \"Experimental: 5x to 8x\"). It acts from the next launch: room for the frames is made when the game starts." ;;
+    *) echo "${2:+$2: }the multiplier is 2, 3 or 4 (5 to 8 with the experimental setting)" ;;
+    esac
+    return 1
 }
 need_launch() {
     if [ ! -x "$launch" ]; then
@@ -498,6 +510,10 @@ fg)
     mkdir -p "$here/logs/fg"; rm -f "$here/logs/fg/OFF" "$here/logs/fg/DUMP" "$here/logs/fg/MULT" "$here/logs/fg/HUDOFF" "$here/logs/fg/HUDLAYEROFF" "$here/logs/fg/HUDSCAN" "$here/logs/fg/TRACE" "$here/logs/fg/LAYER" "$here/logs/fg/SCDON" "$here/logs/fg/NOCAP" "$here/logs/fg/EVENTS" "$here/logs/fg/PARAMS" "$here"/logs/fg/PARAMS.layer-*
     # (the number is optional: "sc-turbo fg hud" is x2 with MangoHud)
     case "${2:-}" in ''|*[!0-9]*) fg_mult=2; fg_words=("${@:2}") ;; *) fg_mult="$2"; fg_words=("${@:3}") ;; esac
+    # 5x to 8x are experimental: only with SC_FG_EXPERIMENTAL=1 (sc-turbo.conf), which the layer reads
+    # too: it makes room for that many generated frames when the game starts.
+    multiplier_allowed "$fg_mult" || exit 1
+    [ "${SC_FG_EXPERIMENTAL:-0}" = 1 ] && export SC_FG_EXPERIMENTAL=1
     export SC_FG=1 SC_FG_DIR="$here/logs/fg" SC_FG_MULT="$fg_mult"
     layer="$here/build/fg"
     # The HUD kept apart from what is generated: on unless sc-turbo.conf says SC_FG_KEEP_HUD=0. Off is
@@ -564,6 +580,8 @@ fg)
     else
         echo "Frame generation x$SC_FG_MULT; log: $here/logs/fg"
     fi
+    [ "$SC_FG_MULT" -gt 4 ] 2>/dev/null &&
+        echo "  Experimental (x5 and above): a smoother picture where the game's own rate is low, not a quicker one."
     [ "${SC_FG_PANEL:-0}" = 1 ] && echo "  The performance panel is shown; $SC_FG_PANEL_KEY in the game steps it on (more, then off)."
     if [ "${SC_FG_ADAPT:-1}" = 0 ]; then
         echo "  The multiplier is held at x$SC_FG_MULT (\"fixed\"); without that word it follows the game's rate, up to x$SC_FG_MULT."
@@ -719,8 +737,8 @@ fg-panel)
     fi ;;
 fg-events) touch "$here/logs/fg/EVENTS" && echo "event log requested (logs/fg/events-*.txt)" ;;
 fg-mult)
-    n="${2:?multiplier 2, 3 or 4}"
-    case "$n" in [2-4]) ;; *) echo "fg-mult: the multiplier is 2, 3 or 4"; exit 1 ;; esac
+    n="${2:?multiplier 2, 3 or 4 (to 8 when experimental)}"
+    multiplier_allowed "$n" fg-mult || exit 1
     # (the word first: the layer reads the parameters before the multiplier, so that a held one goes
     # to N at once and one that follows the rate takes N as its limit)
     case "${3:-}" in

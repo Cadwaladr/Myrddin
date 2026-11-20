@@ -303,7 +303,7 @@ void Backend::loadConf() {
     QString prefix, launch, monitor, target, sched;
     // ("Performance" is off unless the settings say SC_FG_FILL=0: the smoother picture is the first one a player sees)
     bool mangohud = false, markers = true, keepHud = true, gapfill = true, pictures = true, boost = false, performance = false,
-         prefetchOff = false, hugePages = false;
+         prefetchOff = false, hugePages = false, experimental = false;
     QString panelKey = QStringLiteral("Shift+7");
     m_confKept.clear();
     static const QRegularExpression assignment(QStringLiteral(R"(^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$)"));
@@ -328,6 +328,7 @@ void Backend::loadConf() {
         else if (name == QStringLiteral("SC_FG_FILL")) performance = confValue(value, prefix) == QStringLiteral("0");
         else if (name == QStringLiteral("SC_PREFETCH")) prefetchOff = confValue(value, prefix) == QStringLiteral("off");
         else if (name == QStringLiteral("SC_THP")) hugePages = confValue(value, prefix) == QStringLiteral("on");
+        else if (name == QStringLiteral("SC_FG_EXPERIMENTAL")) experimental = confValue(value, prefix) == QStringLiteral("1");
         else if (name == QStringLiteral("SC_FG_PANEL_KEY")) {
             panel_key::Combo combo;   // (one the panel does not know: the default stays)
             if (panel_key::Parse(confValue(value, prefix).toUtf8().constData(), combo)) panelKey = QString::fromUtf8(combo.text);
@@ -349,6 +350,7 @@ void Backend::loadConf() {
     m_conf.insert(QStringLiteral("performance"), performance);
     m_conf.insert(QStringLiteral("prefetchOff"), prefetchOff);
     m_conf.insert(QStringLiteral("hugePages"), hugePages);
+    m_conf.insert(QStringLiteral("experimental"), experimental);
     m_conf.insert(QStringLiteral("panelKey"), panelKey);
 }
 
@@ -378,6 +380,8 @@ void Backend::saveConf() {
     if (!m_conf.value(QStringLiteral("gapfill")).toBool()) out << QStringLiteral("export SC_FG_GAPFILL=0");
     if (!m_conf.value(QStringLiteral("pictures")).toBool()) out << QStringLiteral("export SC_FG_PICTURES=0");
     if (m_conf.value(QStringLiteral("boost")).toBool()) out << QStringLiteral("export SC_FG_BOOST=1");
+    // (5x to 8x: room for that many generated frames is made at the launch, so it acts from the next one)
+    if (m_conf.value(QStringLiteral("experimental")).toBool()) out << QStringLiteral("export SC_FG_EXPERIMENTAL=1");
     if (!m_confKept.isEmpty()) {
         out << QStringLiteral("# (lines the window does not know, kept as they were)");
         out << m_confKept;
@@ -417,8 +421,11 @@ void Backend::loadPrefs() {
     int limit = m_prefs.value(QStringLiteral("limit")).toInt();   // (an ini file gives everything back as text)
     if (limit < 2) limit = before > 1 ? before : 4;
     m_prefs.clear(QStringLiteral("limit"));   // (so that the number takes the text's place, see above)
-    m_prefs.insert(QStringLiteral("limit"), qBound(2, limit, 4));
+    m_prefs.insert(QStringLiteral("limit"), qBound(2, limit, highestLimit()));
 }
+
+// The most Auto may pick: 4, or 8 with the experimental setting.
+int Backend::highestLimit() const { return m_conf.value(QStringLiteral("experimental")).toBool() ? 8 : 4; }
 
 QString Backend::launchScriptInUse() const {
     const QString own = m_conf.value(QStringLiteral("launchScript")).toString().trimmed();
@@ -563,7 +570,7 @@ void Backend::setMode(const QString& mode) {
 }
 
 void Backend::setLimit(int n) {
-    n = qBound(2, n, 4);
+    n = qBound(2, n, highestLimit());
     m_prefs.insert(QStringLiteral("limit"), n);
     QSettings(configFile(), QSettings::IniFormat).setValue(QStringLiteral("limit"), n);
     emit commandChanged();
@@ -576,10 +583,12 @@ void Backend::setLimit(int n) {
 
 // A switch of Options: written to sc-turbo.conf for the next launch, and sent to a running game.
 void Backend::setOption(const QString& name, bool on) {
-    // the prefetchers and huge pages: for the next launch (sc-turbo switches them when it starts the game)
-    if (name == QStringLiteral("prefetchOff") || name == QStringLiteral("hugePages")) {
+    // the prefetchers and huge pages: for the next launch (sc-turbo switches them when it starts the game);
+    // 5x to 8x (experimental): the same, and a limit above 4 goes when it is switched off
+    if (name == QStringLiteral("prefetchOff") || name == QStringLiteral("hugePages") || name == QStringLiteral("experimental")) {
         m_conf.insert(name, on);
         m_saveLater.start();
+        if (name == QStringLiteral("experimental") && !on && m_prefs.value(QStringLiteral("limit")).toInt() > 4) setLimit(4);
         if (m_state != QStringLiteral("idle")) emit said(QStringLiteral("From the next launch"));
         return;
     }

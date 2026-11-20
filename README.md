@@ -38,9 +38,9 @@ through in the [quick start guide](docs/quickstart.md).
 
 ## Features
 
-- 2×, 3× or 4× frame generation from the game's own motion vectors and depth: held at that
-  multiplier, or following the game's frame rate up to it (Auto). It can be changed while the
-  game runs.
+- 2×, 3× or 4× frame generation from the game's own motion vectors and depth (5× to 8× as an
+  experimental setting): held at that multiplier, or following the game's frame rate up to it
+  (Auto). It can be changed while the game runs.
 - A sharp HUD: it is taken from the game's own HUD layer and put back over every generated
   frame. Markers, the compass and other HUD elements that move across the screen move at the
   shown rate.

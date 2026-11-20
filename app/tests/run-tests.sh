@@ -482,6 +482,23 @@ has "$rt/calls.log" "fg-panel 1" "what the layer writes later is there too"
 window idle 2500 --page play --test-eval '@700 backend.panel(gameConsole.active ? "tr" : "br")' || bad "the window ran"
 has "$rt/calls.log" "fg-panel br" "another page shown: the Console reads nothing"
 
+echo "21. 5x to 8x, an experimental setting"
+fresh; : > "$rt/calls.log"
+window idle 2500 --test-eval 'backend.setLimit(6); backend.panel(backend.prefs.limit === 4 ? "tl" : "tr")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel tl" "without the experimental setting the highest multiplier stops at 4"
+window idle 2500 --test-eval 'backend.setOption("experimental", true); backend.setLimit(6); backend.setMode("auto"); backend.launch()' || bad "the window ran"
+sleep 0.5
+has "$rt/sc-turbo.conf" "export SC_FG_EXPERIMENTAL=1" "the setting is in sc-turbo.conf, exported for the layer"
+grep -q '^limit=6' "$MYRDDIN_CONFIG_DIR/myrddin.conf" && ok "with it the highest multiplier can be 6" || bad "with it the highest multiplier can be 6"
+grep -qE '^fg 6( |$)' "$rt/calls.log" && ok "and Auto launches up to x6 (sc-turbo fg 6)" || bad "and Auto launches up to x6 (sc-turbo fg 6)"
+window idle 2500 --test-eval 'backend.setOption("experimental", false)' || bad "the window ran"
+sleep 0.5
+hasnt "$rt/sc-turbo.conf" 'SC_FG_EXPERIMENTAL' "switched off: gone from sc-turbo.conf"
+grep -q '^limit=4' "$MYRDDIN_CONFIG_DIR/myrddin.conf" && ok "and a highest multiplier above 4 comes back to 4" || bad "and a highest multiplier above 4 comes back to 4"
+fresh; mkdir -p "$MYRDDIN_CONFIG_DIR"; printf '[General]\nwelcomed=true\nmode=auto\nlimit=6\n' > "$MYRDDIN_CONFIG_DIR/myrddin.conf"; : > "$rt/calls.log"
+window idle 2500 --test-eval 'backend.panel(backend.prefs.limit === 4 ? "bl" : "br")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel bl" "a stored 6 without the setting is read as 4"
+
 echo
 [ $fails = 0 ] && echo "all checks passed" || echo "$fails check(s) FAILED"
 exit $fails

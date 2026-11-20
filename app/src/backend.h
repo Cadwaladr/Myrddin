@@ -120,8 +120,8 @@ public:
     Q_INVOKABLE void launch();
     // Each of these is kept for the next launch and, where a game runs with the layer, sent to it at once.
     Q_INVOKABLE void setMode(const QString& mode);    // off | 2 | 3 | 4 (the multiplier, held there) | auto (the layer picks, up to the limit)
-    Q_INVOKABLE void setLimit(int n);                 // the highest multiplier Auto may pick (2 to 4)
-    Q_INVOKABLE void setOption(const QString& name, bool on);   // markers | keepHud | gapfill | pictures | boost | performance | prefetchOff | hugePages
+    Q_INVOKABLE void setLimit(int n);                 // the highest multiplier Auto may pick (2 to 4; to 8 with "experimental")
+    Q_INVOKABLE void setOption(const QString& name, bool on);   // markers | keepHud | gapfill | pictures | boost | performance | prefetchOff | hugePages | experimental
     Q_INVOKABLE void setOverlay(const QString& which);          // off | mangohud | panel: what is drawn over the game (at the next launch)
     Q_INVOKABLE void panel(const QString& word);      // next | off | 1 | 2 | 3 | tl | tr | bl | br
     Q_INVOKABLE QString keyName(int nativeScanCode, int modifiers) const;   // "Shift+7" for a key press; "" for one the panel cannot use
@@ -171,6 +171,7 @@ private:
     QString tidyText(QString text) const;
     QStringList launchWords() const;
     bool steering() const;         // a game that runs with the layer, started from here: what is chosen is sent to it
+    int highestLimit() const;      // 4, or 8 with the experimental setting
     bool scTurbo(const QStringList& words, QString* output = nullptr, int timeoutMs = 4000) const;
     void startAsync(const QString& program, const QStringList& words, std::function<void(int, const QString&)> done);
     void finishChecks();

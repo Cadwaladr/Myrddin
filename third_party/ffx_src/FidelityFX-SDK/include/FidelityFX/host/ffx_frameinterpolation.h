@@ -246,7 +246,8 @@ typedef enum FfxFrameInterpolationDispatchFlags
 } FfxFrameInterpolationDispatchFlags;
 
 /// Lichii: the most frames one dispatch generates between two frames (4x frame generation).
-#define FFX_FRAMEINTERPOLATION_MAX_GENERATED_FRAMES 3
+/// Myrddin: 7 (8x); more than 3 only with its experimental setting, which the layer checks.
+#define FFX_FRAMEINTERPOLATION_MAX_GENERATED_FRAMES 7
 
 typedef struct FfxFrameInterpolationDispatchDescription {
 

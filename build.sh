@@ -11,8 +11,11 @@
 set -eu
 cd "$(dirname "$(readlink -f "$0")")"
 mkdir -p build/fg build/test_chain
-# AMD's frame interpolation and optical flow (third_party/ffx_src), built once.
-[ -f build/ffx/ffx_fg/libffx_fg.a ] || third_party/ffx_src/build.sh > /dev/null
+# AMD's frame interpolation and optical flow (third_party/ffx_src): built at every build, which
+# costs nothing when nothing changed, so that a changed header (the most generated frames, which
+# sizes structures the layer shares with it) rebuilds what uses it. Built once, a library made for
+# 3 generated frames was linked with a layer compiled for 7.
+third_party/ffx_src/build.sh > build/ffx-build.log 2>&1 || { tail -30 build/ffx-build.log; exit 1; }
 # The manifests go beside the libraries: the Vulkan loader is pointed at these folders.
 cmp -s fg/sc_fg.json build/fg/sc_fg.json || cp fg/sc_fg.json build/fg/sc_fg.json
 cmp -s probe/sc_probe.json build/sc_probe.json || cp probe/sc_probe.json build/sc_probe.json

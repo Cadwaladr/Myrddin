@@ -20,7 +20,7 @@ runner() {   # runner NAME
 #!/usr/bin/env bash
 { echo "runner=$1"; echo "args=\$*"; echo "core=\$(ulimit -c)"
   for v in __GL_SHADER_DISK_CACHE __GL_SHADER_DISK_CACHE_SIZE __GL_SHADER_DISK_CACHE_SKIP_CLEANUP __GL_SHADER_DISK_CACHE_PATH \\
-           WINEDLLOVERRIDES MY_FLAG SPACED SC_FG SC_FG_MULT SC_FG_ADAPT SC_FG_PANEL SC_FG_PANEL_KEY SC_FG_GAPFILL SC_FG_FILL MANGOHUD WINE_SC_THP LIST PATHS PROTON_ENABLE_NGX_UPDATER \\
+           WINEDLLOVERRIDES MY_FLAG SPACED SC_FG SC_FG_MULT SC_FG_ADAPT SC_FG_PANEL SC_FG_PANEL_KEY SC_FG_GAPFILL SC_FG_FILL MANGOHUD SC_FG_EXPERIMENTAL WINE_SC_THP LIST PATHS PROTON_ENABLE_NGX_UPDATER \\
            DXVK_NVAPI_DRS_NGX_DLSS_SR_OVERRIDE DXVK_NVAPI_DRS_NGX_DLSS_RR_OVERRIDE DXVK_NVAPI_DRS_NGX_DLSS_FG_OVERRIDE \\
            DXVK_NVAPI_DRS_NGX_DLSS_SR_OVERRIDE_RENDER_PRESET_SELECTION DXVK_NVAPI_DRS_NGX_DLSS_RR_OVERRIDE_RENDER_PRESET_SELECTION \\
            DXVK_NVAPI_SET_NGX_DEBUG_OPTIONS VK_LOADER_LAYERS_ENABLE VK_VRAM_REPORT_LIMIT_HEAP_SIZE VK_VRAM_REPORT_LIMIT_DEVICE_ID \\
@@ -226,6 +226,18 @@ if [ -x "$here/sc-turbo" ] && grep -q 'sc-launch-copy' "$here/sc-turbo"; then
     called "SC_FG_MULT=2" && called "SC_FG_PANEL=1"; check $? "a word in the number's place is taken as a word"
     turbo ./sc-turbo fg 3 nonsense
     [ ! -e "$work/prefix/called" ] && grep -q '"nonsense" is not known' "$work/turbo.txt"; check $? "a word that is not known: nothing is started"
+    turbo ./sc-turbo fg 6
+    [ ! -e "$work/prefix/called" ] && grep -q "x6 is experimental: SC_FG_EXPERIMENTAL=1" "$work/turbo.txt"; check $? "\"fg 6\" without the experimental setting: nothing is started, and why is said"
+    turbo ./sc-turbo fg 9
+    [ ! -e "$work/prefix/called" ] && grep -q "the multiplier is 2, 3 or 4 (5 to 8 with the experimental setting)" "$work/turbo.txt"; check $? "\"fg 9\": nothing is started"
+    echo 'export SC_FG_EXPERIMENTAL=1' >> "$t/sc-turbo.conf"
+    turbo ./sc-turbo fg 6
+    called "SC_FG_MULT=6" && called "SC_FG_EXPERIMENTAL=1" && grep -q "Experimental (x5 and above)" "$work/turbo.txt"; check $? "with SC_FG_EXPERIMENTAL=1: x6, the setting reaches the layer, and a note says what it is"
+    turbo ./sc-turbo fg 4
+    called "SC_FG_EXPERIMENTAL=1" && ! grep -q "Experimental (x5" "$work/turbo.txt"; check $? "x4 with the setting: the layer still makes room for more (the limit can be raised in the game), no note"
+    sed -i '/SC_FG_EXPERIMENTAL/d' "$t/sc-turbo.conf"
+    turbo ./sc-turbo fg 4
+    ! grep -q '^SC_FG_EXPERIMENTAL=' "$work/prefix/called"; check $? "without the setting nothing of it reaches the launch"
     [ ! -e "$t/logs/fg/HUDOFF" ]; check $? "the HUD is kept apart unless the settings say otherwise"
     printf 'SC_FG_KEEP_HUD=0\nexport SC_FG_GAPFILL=0\n' >> "$t/sc-turbo.conf"
     turbo ./sc-turbo fg 4
@@ -278,6 +290,10 @@ if [ -x "$here/sc-turbo" ] && grep -q 'sc-launch-copy' "$here/sc-turbo"; then
     ( cd "$t" && ./sc-turbo fg-mult 2 > "$work/turbo.txt" 2>&1 )
     [ "$(cat "$t/logs/fg/MULT")" = 2 ] && [ ! -e "$t/logs/fg/PARAMS" ]; check $? "\"fg-mult 2\" alone leaves held or following as it is"
     ( cd "$t" && ./sc-turbo fg-mult 7 > "$work/turbo.txt" 2>&1 ); [ $? != 0 ] && [ "$(cat "$t/logs/fg/MULT")" = 2 ]; check $? "a multiplier outside 2 to 4 is refused"
+    grep -q "fg-mult: x7 is experimental" "$work/turbo.txt"; check $? "and 5 to 8 are named as the experimental setting's"
+    ( cd "$t" && SC_FG_EXPERIMENTAL=1 ./sc-turbo fg-mult 7 > "$work/turbo.txt" 2>&1 ); [ "$(cat "$t/logs/fg/MULT")" = 7 ]; check $? "with the setting, \"fg-mult 7\" is passed on"
+    ( cd "$t" && SC_FG_EXPERIMENTAL=1 ./sc-turbo fg-mult 9 > "$work/turbo.txt" 2>&1 ); [ $? != 0 ] && [ "$(cat "$t/logs/fg/MULT")" = 7 ]; check $? "and 9 is refused even then"
+    ( cd "$t" && ./sc-turbo fg-mult 2 > "$work/turbo.txt" 2>&1 )
     ( cd "$t" && ./sc-turbo fg-mult 3 sometimes > "$work/turbo.txt" 2>&1 ); [ $? != 0 ] && [ "$(cat "$t/logs/fg/MULT")" = 2 ]; check $? "and so is a word that is not fixed or auto"
 
     echo "10. The panel at launch and its key; what a launch starts leaves no core dump"
