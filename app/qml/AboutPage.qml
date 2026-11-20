@@ -57,7 +57,7 @@ PageView {
             lineHeight: 1.35
             color: Theme.dim
             font.pixelSize: 13
-            text: "Myrddin is free software under the GNU General Public License, version 3 or later. The code, the tests and the documents were written by Claude, working in Claude Code; Cadwaladr directed the work, decided what it should do and tested it in the game. The frame generation from the game's motion vectors is our own. The technique itself was found in a PS5 emulator that had it built in; our changes to AMD's SDK and its Linux build were first written for Lichii, an emulator of ours made to run Nintendo Switch 2 games."
+            text: "Myrddin is free software under the GNU General Public License, version 3 or later. The code, the tests and the documents were written by Claude, working in Claude Code; Cadwaladr directed the work, decided what it should do and tested it in the game. The frame generation from the game's motion vectors is our own. The technique itself was found in the PS5 emulator KytyPS5, where it had been built in (the idea, none of its code); our changes to AMD's SDK and its Linux build were first written for Lichii, an emulator of ours made to run Nintendo Switch 2 games."
         }
         Repeater {
             model: [

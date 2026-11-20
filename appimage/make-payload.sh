@@ -69,10 +69,10 @@ cat > "$new/THIRD-PARTY.md" <<'EOF'
 Myrddin is free software under the GNU General Public License, version 3 or later (`LICENSE`).
 The frame generation from the game's motion vectors is Myrddin's own implementation. The technique
 itself, taking the motion vectors a game already makes and running FSR's frame interpolation on
-them, was found in a PS5 emulator that had it built in. What was first written for Lichii, an
-emulator by the same authors made to run Nintendo Switch 2 games, and carried over is in the
-second row. The frame-generation layer, `build/fg/libsc_fg.so`, contains this code and data from
-elsewhere:
+them, was found in the PS5 emulator KytyPS5, where it had been built in: the idea was taken, none
+of its code. What was first written for Lichii, an emulator by the same authors made to run
+Nintendo Switch 2 games, and carried over is in the second row. The frame-generation layer,
+`build/fg/libsc_fg.so`, contains this code and data from elsewhere:
 
 | Component | Where it is | Licence | Text |
 |---|---|---|---|

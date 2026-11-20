@@ -127,10 +127,11 @@ work, decided what it should do and tested it in the game.
 
 The frame generation from the game's motion vectors is our own implementation. The technique
 itself, taking the motion vectors a game already makes and running FSR's frame interpolation on
-them, is one we found in a PS5 emulator that had it built in. Our changes to AMD's SDK that give
-several generated frames per pair, and the recipe that builds the SDK on Linux, were first
-written for Lichii, an emulator of ours made to run Nintendo Switch 2 games, and carried over.
-The parts that come from elsewhere are listed below, with the licence of what we carried over.
+them, is one we found in the PS5 emulator KytyPS5, where it had been built in. We took the idea
+and none of its code. Our changes to AMD's SDK that give several generated frames per pair, and
+the recipe that builds the SDK on Linux, were first written for Lichii, an emulator of ours made
+to run Nintendo Switch 2 games, and carried over. The parts that come from elsewhere are listed
+below, with the licence of what we carried over.
 
 | Component | Licence |
 |---|---|
