@@ -498,6 +498,13 @@ grep -q '^limit=4' "$MYRDDIN_CONFIG_DIR/myrddin.conf" && ok "and a highest multi
 fresh; mkdir -p "$MYRDDIN_CONFIG_DIR"; printf '[General]\nwelcomed=true\nmode=auto\nlimit=6\n' > "$MYRDDIN_CONFIG_DIR/myrddin.conf"; : > "$rt/calls.log"
 window idle 2500 --test-eval 'backend.panel(backend.prefs.limit === 4 ? "bl" : "br")' || bad "the window ran"
 has "$rt/calls.log" "fg-panel bl" "a stored 6 without the setting is read as 4"
+# the switch's page on GitHub, under its explanation
+mkdir -p "$work/opener"; printf '#!/bin/sh\necho "xdg-open $*" >> "%s/calls.log"\n' "$rt" > "$work/opener/xdg-open"; chmod +x "$work/opener/xdg-open"
+: > "$rt/calls.log"
+PATH="$work/opener:$PATH" window idle 1800 --page options \
+    --test-eval '@600 (function find(o) { if (!o) return null; if (o.text === "Experimental multipliers on GitHub" && typeof o.clicked === "function") return o; for (var i = 0; i < o.children.length; i++) { var r = find(o.children[i]); if (r) return r } return null })(window.contentItem).clicked()' || bad "the window ran"
+sleep 0.5
+has "$rt/calls.log" "xdg-open https://github.com/Cadwaladr/Myrddin/blob/main/docs/experimental-multipliers.md" "the switch's link opens Experimental multipliers on GitHub"
 
 echo
 [ $fails = 0 ] && echo "all checks passed" || echo "$fails check(s) FAILED"

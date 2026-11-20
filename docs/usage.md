@@ -116,10 +116,11 @@ cp sc-turbo.conf.example sc-turbo.conf
 - `export SC_FG_EXPERIMENTAL=1`: experimental, off by default. Multipliers from ×5 to ×8
   (`sc-turbo fg 6`, `fg-mult 6`; the window's Options, "Experimental: 5× to 8×"), for places where
   the game's own rate falls below 30 frames a second. The layer makes room for that many
-  generated frames when the game starts (up to about 120 MB more graphics memory at 2560x1440), so the
+  generated frames when the game starts (about 75 MB more graphics memory at 2560x1440), so the
   setting acts from the next launch. Every generated frame is a guess between two of the game's
   and what you do still takes one of the game's frames to show: more of them make a smoother
-  picture, not a quicker one
+  picture, not a quicker one. [Experimental multipliers](experimental-multipliers.md) has when
+  they help, what they cost and what was measured
 
 The launcher window writes the same file: what its Options page sets is there under these names,
 and lines it does not know are kept as they are.
@@ -131,14 +132,15 @@ tweaking](advanced-performance-tweaking.md), what `SC_MANGOHUD` needs on [Option
 
 The layer, `sc_fg`, loads the way MangoHud does. Between each pair of the game's frames it runs
 AMD's FSR 3.1 frame interpolation on the motion vectors and depth the game gives DLSS, and shows
-one, two or three generated frames.
+one, two or three generated frames (up to seven with the [experimental
+setting](experimental-multipliers.md)).
 
 - The multiplier is set at launch and can be changed while the game runs. Up to that limit it
   follows the game's frame rate, and the game's frames are limited to an even part of the
   display's rate so that the display is filled evenly (`SC_FG_FILL=0`, the window's
-  "Performance" switched on, never slows the game down instead). If the game alone gets above 92 % of the refresh rate,
-  generation pauses until it drops below 80 %. With the word `fixed` (the window's 2×, 3× and
-  4×) the multiplier is held instead, whatever the game's frame rate.
+  "Performance" switched on, never slows the game down instead). If the game alone gets above
+  92 % of the refresh rate, generation pauses until it drops below 80 %. With the word `fixed`
+  (the window's 2×, 3× and 4×) the multiplier is held instead, whatever the game's frame rate.
 - The HUD stays sharp. The game draws its HUD into a layer of its own, and `sc_fg` captures it,
   interpolates the picture without it and puts the HUD back over every generated frame. A frame
   that arrives without a capture gets its HUD-free picture worked out from the frame and the

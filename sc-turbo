@@ -12,7 +12,8 @@
 #                      "Auto"). Log and dumps: logs/fg
 #                      ("fixed": the multiplier is held at the number, whatever the game's rate (the
 #                      window's x2, x3, x4); fg-mult changes either in the running game.
-#                      5 to 8: experimental, only with SC_FG_EXPERIMENTAL=1 in sc-turbo.conf.
+#                      5 to 8: experimental, only with SC_FG_EXPERIMENTAL=1 in sc-turbo.conf
+#                      (docs/experimental-multipliers.md).
 #                      "hud": with MangoHud, which sits below the layer and so counts every frame that
 #                      is shown, the generated ones too; SC_MANGOHUD=1 in sc-turbo.conf: always.
 #                      "panel": the layer's own performance panel can be shown, see fg-panel; without

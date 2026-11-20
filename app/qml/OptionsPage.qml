@@ -71,6 +71,8 @@ PageView {
             detail: "Lets Auto go up to 8×, for places where the game's own rate falls below 30 frames a second. "
                   + "Every generated frame is a guess between two of the game's, and what you do still takes one of the game's frames to show, "
                   + "so more of them make a smoother picture, not a quicker one. Off by default; acts from the next launch."
+            link: backend.multipliersPage
+            linkText: "Experimental multipliers on GitHub"
             Toggle { checked: backend.conf.experimental; onToggled: (v) => backend.setOption("experimental", v) }
         }
         SettingRow {

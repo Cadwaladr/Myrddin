@@ -52,6 +52,7 @@ class Backend : public QObject {
     Q_PROPERTY(QString displayChoice READ displayChoice NOTIFY checksChanged)
     Q_PROPERTY(QStringList schedulers READ schedulers CONSTANT)   // offered in Options: lavd and bpfland always, others where installed
     Q_PROPERTY(QString tweaksPage READ tweaksPage CONSTANT)        // the page "Advanced performance tweaking" on GitHub
+    Q_PROPERTY(QString multipliersPage READ multipliersPage CONSTANT)   // the page "Experimental multipliers: 5× to 8×" on GitHub
     Q_PROPERTY(bool schedulerAllowed READ schedulerAllowed NOTIFY checksChanged)
     Q_PROPERTY(bool tuneAllowed READ tuneAllowed NOTIFY checksChanged)   // Myrddin's root helper is set up (prefetchers, huge pages)
     Q_PROPERTY(bool mangohudInstalled READ mangohudInstalled NOTIFY checksChanged)
@@ -107,6 +108,7 @@ public:
     QString displayChoice() const { return m_displayChoice; }
     QStringList schedulers() const { return m_schedulers; }
     QString tweaksPage() const { return QStringLiteral("https://github.com/Cadwaladr/Myrddin/blob/main/docs/advanced-performance-tweaking.md"); }
+    QString multipliersPage() const { return QStringLiteral("https://github.com/Cadwaladr/Myrddin/blob/main/docs/experimental-multipliers.md"); }
     bool schedulerAllowed() const { return m_schedAllowed; }
     bool tuneAllowed() const { return m_tuneAllowed; }
     bool mangohudInstalled() const { return m_mangohud; }

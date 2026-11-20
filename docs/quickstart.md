@@ -31,7 +31,7 @@ After that the window has four pages:
   that multiplier whatever the game's frame rate. With Auto the layer picks the multiplier as the
   game's own rate changes, 2× at the least and no more than the highest multiplier set in Options
   (4× unless you change it; Options' "Experimental: 5× to 8×" lets it go up to 8×, from the next
-  launch). "Performance" is Auto's: on, the game's own frames are never limited, which is the
+  launch: see [Experimental multipliers](experimental-multipliers.md)). "Performance" is Auto's: on, the game's own frames are never limited, which is the
   fastest response; off (the default), they are limited so that every refresh of the display gets
   a frame, a smoother picture with more latency. A change acts at once in a running game. The
   overlay is MangoHud, Myrddin's own panel or none, and what is chosen is drawn with frame

@@ -7,6 +7,9 @@ RowLayout {
     property string title: ""
     property string detail: ""
     property bool dimmed: false
+    // (an https page about the setting, opened in the browser by a quiet button under the detail)
+    property string link: ""
+    property string linkText: ""
     default property alias control: holder.data
     Layout.fillWidth: true
     spacing: 18
@@ -32,6 +35,14 @@ RowLayout {
             lineHeight: 1.25
             wrapMode: Text.WordWrap
             Layout.fillWidth: true
+        }
+        ActionButton {
+            visible: row.link !== ""
+            text: row.linkText
+            icon: Theme.iconLink
+            kind: "quiet"
+            Layout.topMargin: 2
+            onClicked: backend.openLink(row.link)
         }
     }
     Item {

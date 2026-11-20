@@ -39,8 +39,8 @@ through in the [quick start guide](docs/quickstart.md).
 ## Features
 
 - 2×, 3× or 4× frame generation from the game's own motion vectors and depth (5× to 8× as an
-  experimental setting): held at that multiplier, or following the game's frame rate up to it
-  (Auto). It can be changed while the game runs.
+  [experimental setting](docs/experimental-multipliers.md)): held at that multiplier, or
+  following the game's frame rate up to it (Auto). It can be changed while the game runs.
 - A sharp HUD: it is taken from the game's own HUD layer and put back over every generated
   frame. Markers, the compass and other HUD elements that move across the screen move at the
   shown rate.
@@ -84,6 +84,7 @@ inputs to DLSS. [Measurements](docs/measurements.md) has more sessions and where
 | [Commands and settings](docs/usage.md) | every command, `sc-turbo.conf`, what the layer does in detail |
 | [Limitations](docs/limitations.md) | requirements, known faults, the tested configuration |
 | [Optional extras](docs/optional.md) | MangoHud, the graphics memory limit, optional packages |
+| [Experimental multipliers](docs/experimental-multipliers.md) | 5× to 8×: when they help, what they cost, how to switch them on |
 | [Advanced performance tweaking](docs/advanced-performance-tweaking.md) | A CPU scheduler, the CPU's prefetchers and huge pages: what they gave, how to switch them |
 | [Troubleshooting](docs/troubleshooting.md) | a game that stands still, keys that do nothing, tearing |
 | [Measurements](docs/measurements.md) | frame rates per city, latency, what limits the game's own frame rate |

@@ -53,7 +53,7 @@
 # Experimental: multipliers from 5x to 8x ("fg 6", fg-mult 6; the window's Options, "Experimental:
 # 5x to 8x"), for places where the game's own rate falls below 30 frames a second. Room for that
 # many generated frames is made when the game starts, so it acts from the next launch. More
-# generated frames make a smoother picture, not a quicker one.
+# generated frames make a smoother picture, not a quicker one (docs/experimental-multipliers.md).
 #export SC_FG_EXPERIMENTAL=1
 
 # The key that steps the layer's own panel in the game ("sc-turbo fg N panel"), in place of
