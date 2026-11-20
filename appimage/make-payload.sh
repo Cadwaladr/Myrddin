@@ -2,7 +2,7 @@
 # Assembles appimage/out/payload/: the runtime tree the AppImage carries, laid out as sc-turbo
 # expects it beside itself (it finds everything relative to its own folder):
 #
-#   sc-turbo, sc-turbo.conf.example, LICENSE, README.md, THIRD-PARTY.md, VERSION
+#   sc-turbo, sc-turbo.conf.example, LICENSE, README.md, docs/, THIRD-PARTY.md, VERSION
 #   build/fg/libsc_fg.so, build/fg/sc_fg.json, build/libsc_probe.so, build/sc_probe.json, build/BUILDINFO
 #       (the portable layers from appimage/out/layer, made by build-layer.sh; never the project's
 #       own build/, which holds the owner's development builds)
@@ -47,6 +47,7 @@ rm -rf "$new"; mkdir -p "$new/build/fg" "$new/tools" "$new/licenses"
 
 cp -p "$project/sc-turbo" "$project/sc-turbo.conf.example" "$project/LICENSE" "$project/README.md" "$new/"
 cp -pr "$project/gui" "$new/gui"
+cp -pr "$project/docs" "$new/docs"   # the pages README.md links to
 for entry in "${TOOLS[@]}"; do cp -p "$project/tools/${entry%%|*}" "$new/tools/"; done
 cp -p "$layer/fg/libsc_fg.so" "$layer/fg/sc_fg.json" "$new/build/fg/"
 cp -p "$layer/libsc_probe.so" "$layer/sc_probe.json" "$layer/BUILDINFO" "$new/build/"
@@ -66,12 +67,17 @@ cat > "$new/THIRD-PARTY.md" <<'EOF'
 # Third-party code in Myrddin
 
 Myrddin is free software under the GNU General Public License, version 3 or later (`LICENSE`).
-The frame-generation layer, `build/fg/libsc_fg.so`, contains code and data from elsewhere:
+The frame generation from the game's motion vectors is Myrddin's own implementation. The technique
+itself, taking the motion vectors a game already makes and running FSR's frame interpolation on
+them, was found in a PS5 emulator that had it built in. What was first written for Lichii, an
+emulator by the same authors made to run Nintendo Switch 2 games, and carried over is in the
+second row. The frame-generation layer, `build/fg/libsc_fg.so`, contains this code and data from
+elsewhere:
 
 | Component | Where it is | Licence | Text |
 |---|---|---|---|
-| AMD FidelityFX SDK 1.1.4 (frame interpolation, optical flow), Copyright (C) 2024 Advanced Micro Devices, Inc., with changes that yield several generated frames per pair | linked into `libsc_fg.so` | MIT | `licenses/FidelityFX-SDK-MIT.txt` |
-| Linux build recipe of the SDK, its compatibility header and swapchain stub, from the Lichii project, Copyright 2026 Eden Emulator Project | linked into `libsc_fg.so` | GPL-3.0-or-later | `LICENSE` |
+| AMD FidelityFX SDK 1.1.4 (frame interpolation, optical flow), Copyright (C) 2024 Advanced Micro Devices, Inc., with our changes that yield several generated frames per pair | linked into `libsc_fg.so` | MIT | `licenses/FidelityFX-SDK-MIT.txt` |
+| Our Linux build recipe of the SDK, its compatibility header and swapchain stub, first written for Lichii; the files carry the notice of the project they were written in, Copyright 2026 Eden Emulator Project | linked into `libsc_fg.so` | GPL-3.0-or-later | `LICENSE` |
 | Adwaita Sans (the performance panel's letters, as a glyph atlas), Copyright the Inter Project Authors, Renzhi Li, Jamie Gravendeel, Florian Müllner | compiled into `libsc_fg.so` | SIL Open Font License 1.1 | `licenses/AdwaitaSans-OFL-1.1.txt` |
 | GNU C++ library (libstdc++) and GCC's runtime library (libgcc), Copyright Free Software Foundation, Inc. | linked statically into `libsc_fg.so` (and libgcc into `libsc_probe.so`) so that they need no C++ library of the system | GPL-3.0 with the GCC Runtime Library Exception 3.1 | `LICENSE`, `licenses/GCC-RUNTIME-LIBRARY-EXCEPTION-3.1.txt` |
 | Khronos Vulkan headers 1.4.341 | used when compiling (types and constants) | Apache-2.0 OR MIT | not required for compiled use |
@@ -87,7 +93,8 @@ A library of its own, not part of the layer above:
 `build/vram-limit/VERSION` names the Mesa release it was built from.
 
 Star Citizen is a trademark of Cloud Imperium Games; FidelityFX and FSR are AMD's; DLSS is
-NVIDIA's. Myrddin is an independent project: none of them is affiliated with it or endorses it.
+NVIDIA's; Nintendo Switch is Nintendo's; PS5 is Sony Interactive Entertainment's. Myrddin is an
+independent project: none of them is affiliated with it or endorses it.
 EOF
 
 rm -rf "$payload"; mv "$new" "$payload"

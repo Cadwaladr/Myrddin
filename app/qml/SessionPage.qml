@@ -37,7 +37,7 @@ PageView {
 
     Card {
         heading: "Reports"
-        note: "Each runs an sc-turbo command and shows what it prints. Most need the game to be running."
+        note: "Each runs an sc-turbo command and shows what it prints. Most need the game to be running. Session log shows the newest log of a session that ran with logs."
         Flow {
             Layout.fillWidth: true
             spacing: 10
@@ -46,7 +46,7 @@ PageView {
             ActionButton { text: "Session check"; enabled: !backend.toolBusy; onClicked: backend.runTool("Session check", ["check"]) }
             ActionButton { text: "Displays"; enabled: !backend.toolBusy; onClicked: backend.runTool("Displays", ["displays"]) }
             ActionButton { text: "Threads"; enabled: !backend.toolBusy; onClicked: backend.runTool("Threads", ["threads"]) }
-            ActionButton { text: "Disk and memory"; enabled: !backend.toolBusy; onClicked: backend.runTool("Disk and memory", ["iowatch", "report"]) }
+            ActionButton { text: "Session log"; icon: Theme.iconLog; enabled: !backend.toolBusy; onClicked: backend.readSessionLog() }
             ActionButton { text: "Where the layer stands"; enabled: !backend.toolBusy; onClicked: backend.runTool("Where the layer stands", ["fg-where"]) }
         }
         Rectangle {
@@ -74,7 +74,8 @@ PageView {
                     RotationAnimator on rotation { running: backend.toolBusy; from: 0; to: 360; duration: 900; loops: Animation.Infinite }
                 }
                 Item { Layout.fillWidth: true }
-                ActionButton { kind: "quiet"; icon: Theme.iconCopy; visible: backend.toolOutput !== ""; onClicked: backend.copy(backend.toolOutput) }
+                ActionButton { kind: "quiet"; icon: Theme.iconTrash; visible: backend.toolTitle.startsWith("Session log") && !backend.toolBusy; onClicked: backend.deleteSessionLog() }
+                ActionButton { kind: "quiet"; icon: Theme.iconCopy; visible: backend.toolOutput !== ""; onClicked: backend.toolTitle.startsWith("Session log") ? backend.copySessionLog() : backend.copy(backend.toolOutput) }
             }
             Flickable {
                 anchors.fill: parent

@@ -36,11 +36,15 @@ hasnt "$rt/calls.env" '^(APPDIR|APPIMAGE|LD_LIBRARY_PATH|QT_|QML|MYRDDIN_)' "not
 grep -q 'Frame generation x3' "$rt/logs/launch.out" 2>/dev/null && ok "sc-turbo's words are kept for the window" || bad "sc-turbo's words are kept for the window"
 grep -q '^multiplier=3' "$MYRDDIN_CONFIG_DIR/myrddin.conf" && ok "the multiplier is remembered" || bad "the multiplier is remembered"
 
-echo "2. off: the game as it is; the record switch"
+echo "2. off: the game as it is; \"Run with logs\""
 fresh
 window idle 2500 --test-eval 'backend.setMultiplier(1); backend.launch()' || bad "the window ran"
 sleep 0.5
 has "$rt/calls.log" "run" "\"run\" for Off"
+fresh
+window idle 2500 --test-eval 'backend.setMultiplier(1); backend.prefs.watch = true; backend.launch()' || bad "the window ran"
+sleep 0.5
+has "$rt/calls.log" "run watch" "Off with logs: \"run watch\""
 fresh
 window idle 2500 --test-eval 'backend.prefs.multiplier = 4; backend.prefs.watch = true; backend.conf.markers = false; backend.conf.fill = false; backend.launch()' || bad "the window ran"
 sleep 0.5
@@ -144,7 +148,64 @@ before=$(cat "$rt/VERSION")
 MYRDDIN_PAYLOAD="$pay" "$bin" displays > /dev/null 2>&1
 [ "$(cat "$rt/VERSION")" = "$before" ] && [ ! -e "$rt/tools/new-tool" ] && ok "a runtime that was named is never written over" || bad "a runtime that was named is never written over"
 
-echo "9. the first start finds the game"
+echo "9. the log of a session that ran with logs"
+fresh
+conf="$MYRDDIN_CONFIG_DIR/myrddin.conf"; mkdir -p "$MYRDDIN_CONFIG_DIR" "$rt/logs/io"
+pending() { printf '[General]\nwelcomed=true\nwatch=true\nlastLaunchLayer=true\nlogPending=true\nlogSince=%s\nlogCommand=myrddin fg 4 watch\n' "$1" > "$conf"; }
+printf 'Display: HDMI-A-1\nlog: %s/x/logs/fg\n' "$HOME" > "$rt/logs/launch.out"
+pending 0
+window idle 2500 || bad "the window ran"
+[ -z "$(ls "$rt/logs/sessions" 2>/dev/null)" ] && ok "no recording: no log is made" || bad "no recording: no log is made"
+grep -q '^logPending=false' "$conf" && ok "and nothing is left pending" || bad "and nothing is left pending"
+recording() { printf 'time,x\n1,2\n' > "$rt/logs/io/io-$1.csv"; : > "$rt/logs/io/io-$1.threads"; touch -d '-20 seconds' "$rt/logs/io/io-$1.csv"; }   # (finished a while ago)
+recording 1234
+pending 99999999999999
+window idle 2500 || bad "the window ran"
+[ -z "$(ls "$rt/logs/sessions" 2>/dev/null)" ] && ok "a recording from before the launch does not count" || bad "a recording from before the launch does not count"
+pending 0
+window running 2500 || bad "the window ran"
+[ -z "$(ls "$rt/logs/sessions" 2>/dev/null)" ] && ok "nothing is made while the game runs" || bad "nothing is made while the game runs"
+window idle 3000 || bad "the window ran"
+log=$(ls "$rt/logs/sessions"/session-*.log 2>/dev/null | head -1)
+[ -s "$log" ] && ok "the log is made when the game has closed" || bad "the log is made when the game has closed"
+grep -q '^Launched with: myrddin fg 4 watch$' "$log" && grep -q '^Display: HDMI-A-1$' "$log" && grep -q '^GPU memory: 10.0 GB' "$log" && grep -q 'x4    30.1' "$log" \
+    && ok "it holds the launch, the report and the frame rates" || bad "it holds the launch, the report and the frame rates"
+has "$rt/calls.log" "iowatch report $rt/logs/io/io-1234.csv" "the report is asked for this session's recording"
+hasnt "$log" "$HOME" "the home folder is not in it"
+grep -q "^logOffer=$log$" "$conf" && ok "it is offered (and still is after a restart)" || bad "it is offered (and still is after a restart)"
+window idle 2500 --test-eval 'backend.readSessionLog(); backend.copySessionLog(); backend.keepSessionLog()' || bad "the window ran (read, copy, keep)"
+[ -s "$log" ] && ! grep -q '^logOffer=' "$conf" && ok "kept: the file stays, the offer is gone" || bad "kept: the file stays, the offer is gone"
+[ -e "$rt/logs/io/io-1234.csv" ] && ok "keeping leaves the recording" || bad "keeping leaves the recording"
+sed -i 's/^logPending=.*/logPending=true/' "$conf"   # (as if the launcher had still been open)
+window idle 2500 || bad "the window ran"
+[ "$(ls "$rt/logs/sessions" | wc -l)" = 1 ] && grep -q '^logPending=false' "$conf" && ok "a run that has its log gets no second one, and the launch is settled" || bad "a run that has its log gets no second one, and the launch is settled"
+# the game closed, the RSI Launcher still open: the log is offered then, and a second run gets its own
+pending 0; rm -f "$rt/logs/sessions"/*; sed -i '/^logMadeFor=/d' "$conf"
+window launcher 3000 || bad "the window ran"
+[ "$(ls "$rt/logs/sessions" | wc -l)" = 1 ] && ok "the log is made while the launcher is still open" || bad "the log is made while the launcher is still open"
+grep -q '^logPending=true' "$conf" && ok "the launch stays open for another run of the game" || bad "the launch stays open for another run of the game"
+sleep 1.1; recording 5678; touch -d '-5 seconds' "$rt/logs/io/io-5678.csv"
+window launcher 3000 || bad "the window ran"
+[ "$(ls "$rt/logs/sessions" | wc -l)" = 2 ] && grep -q "^logRecording=$rt/logs/io/io-5678.csv$" "$conf" && ok "a second run from the launcher gets its own log" || bad "a second run from the launcher gets its own log"
+rm -f "$rt/logs/io/io-5678".*
+pending 0; rm -f "$rt/logs/sessions"/*; sed -i '/^logMadeFor=/d' "$conf"
+window idle 3000 || bad "the window ran"
+window idle 2500 --test-eval 'backend.deleteSessionLog()' || bad "the window ran (delete)"
+[ -z "$(ls "$rt/logs/sessions" 2>/dev/null)" ] && [ ! -e "$rt/logs/io/io-1234.csv" ] && [ ! -e "$rt/logs/io/io-1234.threads" ] && ok "deleted: the log and its recording are gone" || bad "deleted: the log and its recording are gone"
+! grep -q '^logOffer=' "$conf" && ok "and the offer with them" || bad "and the offer with them"
+
+echo "10. the desktop's colours"
+fresh
+printf '[Colors:Window]\nBackgroundNormal=250,240,230\nForegroundNormal=30,20,10\n[Colors:View]\nBackgroundNormal=255,255,255\n[Colors:Button]\nBackgroundNormal=240,230,220\n[Colors:Selection]\nBackgroundNormal=200,60,20\nForegroundNormal=255,255,255\n' > "$work/t/colors"
+mkdir -p "$MYRDDIN_CONFIG_DIR"; printf '[General]\nwelcomed=true\n' > "$MYRDDIN_CONFIG_DIR/myrddin.conf"   # (no first-start pages over the window)
+MYRDDIN_COLORS="$work/t/colors" window idle 2000 --test-eval 'backend.setMenuEntry(true)' || bad "the window ran"
+icon="$XDG_DATA_HOME/icons/hicolor/scalable/apps/io.github.cadwaladr.Myrddin.svg"
+grep -q 'fill="#faf0e6"' "$icon" 2>/dev/null && grep -q 'stroke="#c83c14"' "$icon" && grep -q 'fill="#1e140a"' "$icon" && ok "the menu icon is drawn in the scheme's colours" || bad "the menu icon is drawn in the scheme's colours"
+python3 "$here/pixel.py" "$work/last.png" -40 -100 250 240 230 && ok "the window is drawn in them (its background is the scheme's)" || bad "the window is drawn in them (its background is the scheme's)"
+window idle 2000 || bad "the window ran"
+grep -q 'fill="#faf0e6"' "$icon" && bad "another scheme at the next start redraws the menu icon" || ok "another scheme at the next start redraws the menu icon"
+
+echo "11. the first start finds the game"
 fresh
 window idle 2000 || bad "the window ran"
 has "$rt/sc-turbo.conf" "SC_PREFIX='$work/t/prefix'" "found through the LUG Helper's note"

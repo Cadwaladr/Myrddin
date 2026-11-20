@@ -4,7 +4,7 @@
 not the game: nothing is sent to the game and nothing in it is read.
 
     tools/sc-panel-key                    what is set up
-    tools/sc-panel-key install [KEYS]     set it up; KEYS like Ctrl+Shift+grave (the default: Ctrl+Shift+`)
+    tools/sc-panel-key install [KEYS]     set it up; KEYS like Ctrl+Shift+F10 (the default: Shift+7)
     tools/sc-panel-key remove             take it out again
 
 KDE Plasma: a command shortcut as System Settings > Shortcuts > "Add New > Command" makes one: a
@@ -134,7 +134,7 @@ def kde_main(what, keys):
         subprocess.run(["kbuildsycoca6"], capture_output=True)
         print("removed")
     elif what == "install":
-        mods, key = parse(keys or "Ctrl+Shift+grave")
+        mods, key = parse(keys or "Shift+7")
         codes = kde_codes(mods, key)
         if kde_call("allMainComponents", "") is None:
             sys.exit("Plasma's shortcut service does not answer (org.kde.kglobalaccel): nothing set up")
@@ -221,7 +221,7 @@ def main():
         write(new, text)
         print("removed")
     elif what == "install":
-        mods, key = parse(sys.argv[2] if len(sys.argv) > 2 else "Ctrl+Shift+grave")
+        mods, key = parse(sys.argv[2] if len(sys.argv) > 2 else "Shift+7")
         new = text if text is not None else "{\n}"
         for m, _, _ in reversed(ours(new)):
             new = new[: m.start()] + new[m.end() :]

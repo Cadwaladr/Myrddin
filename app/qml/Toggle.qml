@@ -26,7 +26,7 @@ Item {
         radius: 9
         y: 3
         x: root.checked ? parent.width - width - 3 : 3
-        color: root.checked ? "#06231f" : "#c9d1db"
+        color: root.checked ? Theme.onAccent : Theme.dim
         scale: area.pressed ? 0.88 : 1
         Behavior on x { NumberAnimation { duration: Theme.smooth; easing.type: Easing.OutBack; easing.overshoot: 1.4 } }
         Behavior on color { ColorAnimation { duration: Theme.smooth } }

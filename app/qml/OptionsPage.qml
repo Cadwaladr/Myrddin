@@ -84,7 +84,7 @@ PageView {
         }
         SettingRow {
             title: "Panel corner and key"
-            detail: "The key is Ctrl+Shift+` unless you choose another; it is set up on KDE Plasma and COSMIC."
+            detail: "The key is Shift+7 once it is set up, which works on KDE Plasma and COSMIC. While it is set up, the desktop keeps that key for the panel in every program. Another key: myrddin fg-panel-key install KEYS."
             dimmed: !backend.prefs.panel
             RowLayout {
                 spacing: 10
@@ -105,7 +105,7 @@ PageView {
         Divider {}
         SettingRow {
             title: "Move HUD markers"
-            detail: "World markers, the compass and flight displays are put where they are on their way in every generated frame. Off: they stay at the game's own rate."
+            detail: "On: target markers, the compass and a ship's flight display move in every frame that is shown, as smoothly as the rest of the picture. Off: they move only when the game draws a new frame of its own, in steps."
             Toggle { checked: backend.conf.markers; onToggled: (v) => backend.conf.markers = v }
         }
     }
@@ -115,17 +115,22 @@ PageView {
         note: "A sched_ext scheduler for as long as the game runs; the kernel's own comes back afterwards. Optional. On the test machine scx_lavd gave about 3 % more frames, which is within what runs differ by, and shorter slow frames."
         SettingRow {
             title: "While the game runs"
-            detail: backend.schedulerAllowed ? "" : "Not available on this system as it is: it needs scx-scheds, scx-tools and your own permission to switch without a password (README, CPU scheduler). Myrddin never asks for a password."
+            detail: backend.schedulerAllowed ? "" : "Not available on this system as it is: it needs scx-scheds, scx-tools and your own permission to switch without a password (docs/optional.md, CPU scheduler). Myrddin never asks for a password."
             Choice { implicitWidth: 240; model: page.schedModel(); value: backend.conf.scheduler; onPicked: (v) => backend.conf.scheduler = v }
         }
     }
 
     Card {
-        heading: "Recording"
+        heading: "Logs"
         SettingRow {
-            title: "Record disk and memory use"
-            detail: "The game's disk, memory and GPU-memory use, second by second, read from outside. Session shows the report."
+            title: "Run with logs"
+            detail: "Writes a log of each session: what the launch said, the frame rates, and what the game used of the disk, memory and graphics memory. It is read from outside the game. When the game closes, the window offers the log: read it, copy it or delete it."
             Toggle { checked: backend.prefs.watch; onToggled: (v) => backend.prefs.watch = v }
+        }
+        RowLayout {
+            Layout.fillWidth: true
+            Item { Layout.fillWidth: true }
+            ActionButton { text: "Open the log folder"; icon: Theme.iconFolder; onClicked: backend.openFolder("logs") }
         }
     }
 

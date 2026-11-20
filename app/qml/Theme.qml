@@ -2,22 +2,31 @@ pragma Singleton
 import QtQuick
 
 // Colours, sizes and timings of the window, and its icons (24 x 24, drawn as lines).
+// Every colour is the desktop's own or a blend of two of them (systemColors, src/systemcolors.h):
+// the window follows the colour scheme the system is set to, and changes with it.
 QtObject {
-    readonly property color bg: "#0a0d12"
-    readonly property color rail: "#0d1117"
-    readonly property color card: "#121821"
-    readonly property color cardHigh: "#18202b"
-    readonly property color field: "#0d1219"
-    readonly property color line: "#232c39"
-    readonly property color lineSoft: "#1a222d"
-    readonly property color text: "#e9edf3"
-    readonly property color dim: "#9aa5b4"
-    readonly property color faint: "#657080"
-    readonly property color accent: "#56e0c8"
-    readonly property color accent2: "#5aa2f7"
-    readonly property color good: "#4fd98a"
-    readonly property color warn: "#f2b84b"
-    readonly property color bad: "#f2716b"
+    function mix(a, b, t) { return Qt.rgba(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, 1) }
+    function faded(c, alpha) { return Qt.rgba(c.r, c.g, c.b, alpha) }
+
+    readonly property bool dark: systemColors.dark
+    readonly property color bg: systemColors.window
+    readonly property color text: systemColors.windowText
+    readonly property color card: systemColors.view
+    readonly property color cardHigh: systemColors.button
+    readonly property color accent: systemColors.highlight
+    readonly property color onAccent: systemColors.highlightText   // words and signs on the accent
+    readonly property color good: systemColors.positive
+    readonly property color warn: systemColors.neutral
+    readonly property color bad: systemColors.negative
+
+    readonly property color rail: mix(bg, card, 0.5)
+    readonly property color field: mix(card, bg, 0.55)
+    readonly property color line: mix(bg, text, 0.2)
+    readonly property color lineSoft: mix(bg, text, 0.11)
+    readonly property color dim: mix(text, bg, 0.3)
+    readonly property color faint: mix(text, bg, 0.52)
+    readonly property color accent2: mix(accent, text, 0.3)
+    readonly property color scrim: faded(mix(bg, dark ? "black" : "white", 0.4), 0.92)   // over the window, behind the first-start pages
 
     readonly property int radius: 14
     readonly property int radiusSmall: 9
@@ -48,4 +57,6 @@ QtObject {
     readonly property string iconStop: "M7 7h10v10H7z"
     readonly property string iconTerminal: "M4 5.5h16v13H4zM7.5 9.5l3 2.5-3 2.5M12.5 14.5H16"
     readonly property string iconSearch: "M10.5 4.5a6 6 0 1 0 0 12a6 6 0 0 0 0-12zM15 15l4.5 4.5"
+    readonly property string iconLog: "M6 3.5h8.5L18.5 7.5V20.5H6zM14 3.5V8h4.5M9 12h6.5M9 15.5h6.5"
+    readonly property string iconTrash: "M5 7h14M9.5 7V4.5h5V7M7 7l.8 12.5h8.4L17 7M10 10.5v6M14 10.5v6"
 }

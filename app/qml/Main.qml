@@ -38,8 +38,8 @@ ApplicationWindow {
             fillGradient: RadialGradient {
                 centerX: window.width * 0.78; centerY: -40; focalX: centerX; focalY: centerY
                 centerRadius: window.width * 0.62
-                GradientStop { position: 0; color: Qt.rgba(0.35, 0.64, 0.97, 0.13) }
-                GradientStop { position: 1; color: Qt.rgba(0.35, 0.64, 0.97, 0.0) }
+                GradientStop { position: 0; color: Theme.faded(Theme.accent2, 0.11) }
+                GradientStop { position: 1; color: Theme.faded(Theme.accent2, 0.0) }
             }
             PathRectangle { width: window.width; height: window.height }
         }
@@ -48,8 +48,8 @@ ApplicationWindow {
             fillGradient: RadialGradient {
                 centerX: 120; centerY: window.height + 60; focalX: centerX; focalY: centerY
                 centerRadius: window.width * 0.5
-                GradientStop { position: 0; color: Qt.rgba(0.34, 0.88, 0.78, 0.09) }
-                GradientStop { position: 1; color: Qt.rgba(0.34, 0.88, 0.78, 0.0) }
+                GradientStop { position: 0; color: Theme.faded(Theme.accent, 0.08) }
+                GradientStop { position: 1; color: Theme.faded(Theme.accent, 0.0) }
             }
             PathRectangle { width: window.width; height: window.height }
         }
@@ -169,6 +169,44 @@ ApplicationWindow {
         AboutPage { active: window.page === "about"; onGo: (name) => window.page = name }
     }
 
+    // the log of a session that ran with logs, once the game has closed: read, copy, delete or keep
+    Rectangle {
+        id: logOffer
+        // (out of the way while the log is being read on the Session page, which has the same choices)
+        readonly property bool up: backend.sessionLog !== "" && !(window.page === "session" && backend.toolTitle.startsWith("Session log"))
+        anchors.left: rail.right
+        anchors.right: parent.right
+        anchors.leftMargin: 36
+        anchors.rightMargin: 36
+        y: parent.height - (up ? height + 24 : 0)
+        height: 68
+        radius: Theme.radius
+        visible: opacity > 0.01
+        opacity: up ? 1 : 0
+        color: Theme.cardHigh
+        border.width: 1
+        border.color: Theme.accent
+        Behavior on y { NumberAnimation { duration: Theme.smooth; easing.type: Easing.OutCubic } }
+        Behavior on opacity { NumberAnimation { duration: Theme.smooth } }
+        RowLayout {
+            anchors.fill: parent
+            anchors.leftMargin: 18
+            anchors.rightMargin: 12
+            spacing: 10
+            Icon { path: Theme.iconLog; color: Theme.accent; size: 22 }
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 2
+                Text { text: "The log of your last session is ready"; color: Theme.text; font.pixelSize: 14; font.weight: Font.DemiBold }
+                Text { text: backend.sessionLogNote; color: Theme.dim; font.pixelSize: 12; elide: Text.ElideMiddle; Layout.fillWidth: true }
+            }
+            ActionButton { text: "Read"; onClicked: { backend.readSessionLog(); window.page = "session" } }
+            ActionButton { text: "Copy"; icon: Theme.iconCopy; onClicked: backend.copySessionLog() }
+            ActionButton { text: "Delete"; icon: Theme.iconTrash; onClicked: backend.deleteSessionLog() }
+            ActionButton { kind: "quiet"; text: "Keep"; onClicked: backend.keepSessionLog() }
+        }
+    }
+
     // a line that comes up and goes
     Rectangle {
         id: toast
@@ -176,7 +214,7 @@ ApplicationWindow {
         property bool up: false
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.horizontalCenterOffset: rail.width / 2
-        y: parent.height - (up ? 62 : 20)
+        y: parent.height - (up ? 62 : 20) - (logOffer.up ? logOffer.height + 14 : 0)
         opacity: up ? 1 : 0
         width: Math.min(toastText.implicitWidth + 36, parent.width - rail.width - 80)
         height: 38

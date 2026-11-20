@@ -37,5 +37,5 @@
 #SC_MANGOHUD=1
 
 # A sched_ext CPU scheduler while the game runs ("sc-turbo fg N sched=lavd" does it for one launch;
-# needs scx-scheds, scx-tools and the polkit rule of "tools/sc-sched rule", see the README).
+# needs scx-scheds, scx-tools and the polkit rule of "tools/sc-sched rule", see docs/optional.md).
 #SC_SCHED=lavd

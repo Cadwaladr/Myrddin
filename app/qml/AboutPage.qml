@@ -57,12 +57,12 @@ PageView {
             lineHeight: 1.35
             color: Theme.dim
             font.pixelSize: 13
-            text: "Myrddin is free software under the GNU General Public License, version 3 or later. The code, the tests and the documents were written by Claude, working in Claude Code; Cadwaladr directed the work, decided what it should do and tested it in the game."
+            text: "Myrddin is free software under the GNU General Public License, version 3 or later. The code, the tests and the documents were written by Claude, working in Claude Code; Cadwaladr directed the work, decided what it should do and tested it in the game. The frame generation from the game's motion vectors is our own. The technique itself was found in a PS5 emulator that had it built in; our changes to AMD's SDK and its Linux build were first written for Lichii, an emulator of ours made to run Nintendo Switch 2 games."
         }
         Repeater {
             model: [
-                { name: "AMD FidelityFX SDK 1.1.4", what: "frame interpolation and optical flow, changed to yield several generated frames per pair", licence: "MIT" },
-                { name: "Lichii", what: "the SDK's Linux build recipe and Vulkan test helpers", licence: "GPL-3.0-or-later" },
+                { name: "AMD FidelityFX SDK 1.1.4", what: "frame interpolation and optical flow, with our changes that yield several generated frames per pair", licence: "MIT" },
+                { name: "Lichii, our own", what: "the SDK's Linux build recipe and Vulkan test helpers, first written there", licence: "GPL-3.0-or-later" },
                 { name: "Adwaita Sans", what: "the letters of the panel in the game", licence: "SIL OFL 1.1" },
                 { name: "Inter", what: "the letters of this window", licence: "SIL OFL 1.1" },
                 { name: "Qt 6", what: "this window", licence: "LGPL-3.0" },
@@ -105,7 +105,7 @@ PageView {
             lineHeight: 1.35
             color: Theme.faint
             font.pixelSize: 12
-            text: "Star Citizen is a trademark of Cloud Imperium Games; FidelityFX and FSR are AMD's; DLSS is NVIDIA's; Claude and Claude Code are Anthropic's. Myrddin is an independent project: none of them is affiliated with it or endorses it. It owes its footing to the Star Citizen LUG, whose runners and Helper it builds on."
+            text: "Star Citizen is a trademark of Cloud Imperium Games; FidelityFX and FSR are AMD's; DLSS is NVIDIA's; Nintendo Switch is Nintendo's; PS5 is Sony Interactive Entertainment's; Claude and Claude Code are Anthropic's. Myrddin is an independent project: none of them is affiliated with it or endorses it. It owes its footing to the Star Citizen LUG, whose runners and Helper it builds on."
         }
     }
 }

@@ -33,7 +33,7 @@ Item {
     Rectangle {
         anchors.fill: parent
         radius: root.large ? height / 2 : Theme.radiusSmall
-        color: root.kind === "primary" ? "#ffffff" : Theme.cardHigh
+        color: root.kind === "primary" ? Theme.onAccent : Theme.cardHigh
         opacity: root.kind === "primary" ? (hover.hovered ? 0.14 : 0) : (root.kind === "quiet" ? (hover.hovered ? 1 : 0) : (hover.hovered ? 1 : 0.55))
         border.width: root.kind === "plain" ? 1 : 0
         border.color: root.activeFocus ? Theme.accent2 : Theme.line
@@ -48,19 +48,19 @@ Item {
             path: root.icon
             size: root.large ? 20 : 16
             filled: root.icon === Theme.iconPlay
-            color: root.kind === "primary" ? "#06201d" : Theme.text
+            color: root.kind === "primary" ? Theme.onAccent : Theme.text
         }
         Icon {
             visible: root.busy
             path: Theme.iconRefresh
             size: root.large ? 20 : 16
-            color: root.kind === "primary" ? "#06201d" : Theme.text
+            color: root.kind === "primary" ? Theme.onAccent : Theme.text
             RotationAnimator on rotation { running: root.busy; from: 0; to: 360; duration: 900; loops: Animation.Infinite }
         }
         Text {
             text: root.text
             visible: text !== ""
-            color: root.kind === "primary" ? "#06201d" : Theme.text
+            color: root.kind === "primary" ? Theme.onAccent : Theme.text
             font.pixelSize: root.large ? 17 : 13
             font.weight: root.kind === "primary" ? Font.Bold : Font.Medium
         }

@@ -9,6 +9,7 @@
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QLibrary>
+#include <QMimeData>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QSaveFile>
@@ -212,6 +213,14 @@ Backend::Backend(const QString& runtimeOverride, QObject* parent) : QObject(pare
         }
     }
 
+    {
+        QSettings stored(configFile(), QSettings::IniFormat);
+        m_logPending = stored.value(QStringLiteral("logPending"), false).toBool();
+        m_logSince = stored.value(QStringLiteral("logSince"), 0).toLongLong();
+        m_sessionLog = stored.value(QStringLiteral("logOffer")).toString();
+        if (!m_sessionLog.isEmpty() && !QFile::exists(m_sessionLog)) m_sessionLog.clear();
+    }
+
     connect(&m_poll, &QTimer::timeout, this, &Backend::poll);
     m_poll.start(1500);
     poll();
@@ -330,10 +339,11 @@ QString Backend::launchScriptInUse() const {
 
 QStringList Backend::launchWords() const {
     const int n = m_prefs.value(QStringLiteral("multiplier")).toInt();
-    if (n <= 1) return {QStringLiteral("run")};
+    const bool logs = m_prefs.value(QStringLiteral("watch")).toBool();   // "Run with logs"
+    if (n <= 1) return logs ? QStringList{QStringLiteral("run"), QStringLiteral("watch")} : QStringList{QStringLiteral("run")};
     QStringList words{QStringLiteral("fg"), QString::number(n)};
     if (m_prefs.value(QStringLiteral("panel")).toBool()) words << QStringLiteral("panel");
-    if (m_prefs.value(QStringLiteral("watch")).toBool()) words << QStringLiteral("watch");
+    if (logs) words << QStringLiteral("watch");
     return words;
 }
 
@@ -412,7 +422,15 @@ void Backend::launch() {
     m_startedAt = QDateTime::currentMSecsSinceEpoch();
     m_launchLogSize = -1;
     m_prefs.insert(QStringLiteral("lastLaunchLayer"), words.first() == QStringLiteral("fg"));
-    QSettings(configFile(), QSettings::IniFormat).setValue(QStringLiteral("lastLaunchLayer"), words.first() == QStringLiteral("fg"));
+    m_logPending = words.contains(QStringLiteral("watch"));
+    m_logSince = m_logPending ? m_startedAt : 0;
+    {
+        QSettings stored(configFile(), QSettings::IniFormat);
+        stored.setValue(QStringLiteral("lastLaunchLayer"), words.first() == QStringLiteral("fg"));
+        stored.setValue(QStringLiteral("logPending"), m_logPending);
+        stored.setValue(QStringLiteral("logSince"), m_logSince);
+        stored.setValue(QStringLiteral("logCommand"), QStringLiteral("myrddin ") + words.join(QLatin1Char(' ')));
+    }
     poll();
     if (m_prefs.value(QStringLiteral("closeAfterLaunch")).toBool()) QTimer::singleShot(2500, qApp, &QCoreApplication::quit);
 }
@@ -517,6 +535,10 @@ void Backend::poll() {
     m_generating = generating;
     if (changed) emit stateChanged();
     readLaunchLog();
+    // After a launch with logs: each time the game has closed there is a log to make (also for a game that
+    // closed while this window was shut). The RSI Launcher may stay open and start the game again, so the
+    // launch stays "pending" until the launcher has closed too.
+    if (m_logPending && !m_logBusy && (m_state == QStringLiteral("idle") || m_state == QStringLiteral("launcher"))) makeSessionLog(m_state == QStringLiteral("idle"));
 
     if (before != QStringLiteral("idle") && m_state == QStringLiteral("idle") && !m_runtimeNote.isEmpty()) {
         m_runtimeNote = installPayload(m_runtime, false);
@@ -588,6 +610,153 @@ void Backend::readLaunchLog() {
     m_launchLogSize = size;
     m_launchLog = readAll(info.absoluteFilePath(), 6000).trimmed();
     emit launchLogChanged();
+}
+
+// ---------------------------------------------------------------------------------------------
+// "Run with logs": one text file per session, made when the game has closed, from what sc-turbo said at
+// the launch, the recorder's report (the game's disk, memory and graphics memory use, read from outside)
+// and the layer's frame rates. The window then offers it: read, copy, delete or keep.
+
+QString Backend::tidyText(QString text) const {
+    // (a log is made to be passed on: no home folder and no login name in it)
+    text.replace(home(), QStringLiteral("~"));
+    const QString login = QFileInfo(home()).fileName();
+    if (login.size() > 1) text.replace(QLatin1Char('/') + login + QLatin1Char('/'), QStringLiteral("/USER/"));
+    return text;
+}
+
+// LAST: the launcher has closed as well, so nothing more can come of this launch.
+void Backend::makeSessionLog(bool last) {
+    const auto over = [this, last] {
+        m_logBusy = false;
+        if (!last) return;
+        m_logPending = false;
+        QSettings(configFile(), QSettings::IniFormat).setValue(QStringLiteral("logPending"), false);
+    };
+    // the newest recording of this launch (logs/io/io-PID.csv, one per run of the game); without one the
+    // game has not run, and there is no log
+    QString recording;
+    qint64 newest = 0;
+    const QFileInfoList found = QDir(m_runtime + QStringLiteral("/logs/io")).entryInfoList({QStringLiteral("io-*.csv")}, QDir::Files);
+    for (const QFileInfo& info : found) {
+        const qint64 changed = info.lastModified().toMSecsSinceEpoch();
+        if (changed >= m_logSince && (recording.isEmpty() || changed > newest)) {
+            recording = info.absoluteFilePath();
+            newest = changed;
+        }
+    }
+    const QString mark = recording + QLatin1Char('|') + QString::number(newest);
+    if (recording.isEmpty() || mark == QSettings(configFile(), QSettings::IniFormat).value(QStringLiteral("logMadeFor")).toString()) {
+        over();   // (nothing recorded, or that run's log is made already)
+        return;
+    }
+    if (QDateTime::currentMSecsSinceEpoch() - newest < 3000) return;   // (the recorder may still be writing its last lines: at the next look)
+    m_logBusy = true;
+    const bool layer = m_prefs.value(QStringLiteral("lastLaunchLayer")).toBool();
+    const auto write = [this, over, recording, mark](const QString& report, const QString& rates) {
+        QSettings stored(configFile(), QSettings::IniFormat);
+        stored.setValue(QStringLiteral("logMadeFor"), mark);
+        const QDateTime now = QDateTime::currentDateTime();
+        QString text = QStringLiteral("Myrddin session log\nSession ended: %1\nMyrddin %2 (runtime %3)\nLaunched with: %4\n")
+                           .arg(now.toString(QStringLiteral("yyyy-MM-dd HH:mm")), version(), runtimeVersion().section(QLatin1Char('\n'), 0, 0),
+                                stored.value(QStringLiteral("logCommand")).toString());
+        text += QStringLiteral("\n== What the launch said ==\n") + readAll(m_runtime + QStringLiteral("/logs/launch.out"), 20000).trimmed() + QLatin1Char('\n');
+        text += QStringLiteral("\n== The session: disk, memory and frame rates, place by place ==\n") + (report.isEmpty() ? QStringLiteral("(no report)") : report) + QLatin1Char('\n');
+        if (!rates.isEmpty()) text += QStringLiteral("\n== Frame rates, a line every ten seconds (the last hour) ==\n") + rates + QLatin1Char('\n');
+        const QString dir = m_runtime + QStringLiteral("/logs/sessions");
+        QDir().mkpath(dir);
+        const QString path = dir + QStringLiteral("/session-") + now.toString(QStringLiteral("yyyyMMdd-HHmmss")) + QStringLiteral(".log");
+        QSaveFile file(path);
+        if (file.open(QIODevice::WriteOnly) && file.write(tidyText(text).toUtf8()) >= 0 && file.commit()) {
+            m_sessionLog = path;
+            stored.setValue(QStringLiteral("logOffer"), path);
+            stored.setValue(QStringLiteral("logRecording"), recording);
+            emit sessionLogChanged();
+        }
+        over();
+    };
+    startAsync(m_runtime + QStringLiteral("/sc-turbo"), {QStringLiteral("iowatch"), QStringLiteral("report"), recording}, [this, write, layer](int, const QString& report) {
+        if (!layer) {
+            write(report, {});
+            return;
+        }
+        startAsync(m_runtime + QStringLiteral("/sc-turbo"), {QStringLiteral("fg-watch"), QStringLiteral("--last"), QStringLiteral("360")}, [write, report](int, const QString& rates) { write(report, rates); });
+    });
+}
+
+QString Backend::pickSessionLog() const {
+    if (!m_sessionLog.isEmpty() && QFile::exists(m_sessionLog)) return m_sessionLog;
+    const QFileInfoList kept = QDir(m_runtime + QStringLiteral("/logs/sessions")).entryInfoList({QStringLiteral("session-*.log")}, QDir::Files, QDir::Name);
+    return kept.isEmpty() ? QString() : kept.last().absoluteFilePath();
+}
+
+QString Backend::sessionLogNote() const {
+    if (m_sessionLog.isEmpty()) return {};
+    const QFileInfo info(m_sessionLog);
+    return QStringLiteral("%1, %2 kB, in %3").arg(info.fileName()).arg(qMax<qint64>(1, (info.size() + 512) / 1024)).arg(tidyPath(info.absolutePath()));
+}
+
+void Backend::readSessionLog() {
+    const QString path = pickSessionLog();
+    if (path.isEmpty()) {
+        emit said(QStringLiteral("There is no session log yet: switch on \"Run with logs\" before a launch"));
+        return;
+    }
+    m_toolBusy = false;
+    m_toolTitle = QStringLiteral("Session log: ") + QFileInfo(path).fileName();
+    m_toolOutput = readAll(path, 400000);
+    emit toolChanged();
+}
+
+void Backend::copySessionLog() {
+    const QString path = pickSessionLog();
+    auto* clipboard = QGuiApplication::clipboard();
+    if (path.isEmpty() || !clipboard) {
+        emit said(QStringLiteral("There is no session log to copy"));
+        return;
+    }
+    // as text for a message or a report, and as a file for a file manager or an attachment
+    auto* data = new QMimeData;
+    data->setText(readAll(path, 400000));
+    data->setUrls({QUrl::fromLocalFile(path)});
+    clipboard->setMimeData(data);
+    emit said(QStringLiteral("Copied: paste it as text, or as a file"));
+}
+
+void Backend::deleteSessionLog() {
+    const QString path = pickSessionLog();
+    if (path.isEmpty()) return;
+    QSettings stored(configFile(), QSettings::IniFormat);
+    const bool offered = path == m_sessionLog;
+    QFile::remove(path);
+    if (offered) {
+        // the recording the log was made from goes with it
+        const QString recording = stored.value(QStringLiteral("logRecording")).toString();
+        if (recording.startsWith(m_runtime + QStringLiteral("/logs/io/io-")) && recording.endsWith(QStringLiteral(".csv"))) {
+            QFile::remove(recording);
+            QFile::remove(recording.chopped(4) + QStringLiteral(".threads"));
+        }
+        stored.remove(QStringLiteral("logOffer"));
+        stored.remove(QStringLiteral("logRecording"));
+        m_sessionLog.clear();
+        emit sessionLogChanged();
+    }
+    if (m_toolTitle.startsWith(QStringLiteral("Session log"))) {
+        m_toolTitle.clear();
+        m_toolOutput.clear();
+        emit toolChanged();
+    }
+    emit said(QStringLiteral("The session's log is deleted"));
+}
+
+void Backend::keepSessionLog() {
+    if (m_sessionLog.isEmpty()) return;
+    QSettings stored(configFile(), QSettings::IniFormat);
+    stored.remove(QStringLiteral("logOffer"));
+    stored.remove(QStringLiteral("logRecording"));
+    m_sessionLog.clear();
+    emit sessionLogChanged();
+    emit said(QStringLiteral("Kept in the log folder"));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -725,7 +894,7 @@ void Backend::refreshChecks() {
             m_schedAllowed = code == 0;
             const QString wanted = m_conf.value(QStringLiteral("scheduler")).toString();
             if (!wanted.isEmpty() && !m_schedAllowed)
-                m_asyncChecks << check(QStringLiteral("sched"), QStringLiteral("CPU scheduler"), QStringLiteral("scx_%1 is chosen in Options, but switching schedulers is not set up here (it needs scx-scheds, scx-tools and a polkit rule: the README says how). The game runs with the stock scheduler.").arg(wanted), QStringLiteral("warn"), {}, QStringLiteral("options"));
+                m_asyncChecks << check(QStringLiteral("sched"), QStringLiteral("CPU scheduler"), QStringLiteral("scx_%1 is chosen in Options, but switching schedulers is not set up here (it needs scx-scheds, scx-tools and your own permission to switch without a password: docs/optional.md says how). The game runs with the stock scheduler.").arg(wanted), QStringLiteral("warn"), {}, QStringLiteral("options"));
             finishChecks();
         });
     }
@@ -802,6 +971,27 @@ static QString menuFile() { return xdgDir("XDG_DATA_HOME", QStringLiteral("/.loc
 static QString iconFile() { return xdgDir("XDG_DATA_HOME", QStringLiteral("/.local/share")) + QStringLiteral("/icons/hicolor/scalable/apps/") + QLatin1String(kAppId) + QStringLiteral(".svg"); }
 static QString binDir() { return qEnvironmentVariable("MYRDDIN_BIN_DIR", home() + QStringLiteral("/.local/bin")); }
 
+// The menu entry's icon: Myrddin's mark in the desktop's colours as they were at the window's last start
+// (a file in the icon folder cannot follow them by itself), or the picture built in when there are none.
+static void writeIcon(const QByteArray& svg) {
+    QByteArray wanted = svg;
+    if (wanted.isEmpty()) {
+        QFile builtIn(QStringLiteral(":/qt/qml/Myrddin/assets/icon.svg"));
+        if (builtIn.open(QIODevice::ReadOnly)) wanted = builtIn.readAll();
+    }
+    QFile now(iconFile());
+    if (now.open(QIODevice::ReadOnly) && now.readAll() == wanted) return;
+    now.close();
+    QDir().mkpath(QFileInfo(iconFile()).absolutePath());
+    QSaveFile file(iconFile());
+    if (file.open(QIODevice::WriteOnly) && file.write(wanted) >= 0) file.commit();
+}
+
+void Backend::setIconSvg(const QByteArray& svg) {
+    m_iconSvg = svg;
+    if (menuEntry()) writeIcon(m_iconSvg);
+}
+
 bool Backend::menuEntry() const { return QFile::exists(menuFile()); }
 bool Backend::cliLink() const { return QFileInfo(binDir() + QStringLiteral("/myrddin")).isSymLink(); }
 
@@ -814,10 +1004,7 @@ QString Backend::cliNote() const {
 void Backend::setMenuEntry(bool on) {
     if (on) {
         QDir().mkpath(QFileInfo(menuFile()).absolutePath());
-        QDir().mkpath(QFileInfo(iconFile()).absolutePath());
-        QFile::remove(iconFile());
-        QFile::copy(QStringLiteral(":/qt/qml/Myrddin/assets/icon.svg"), iconFile());
-        QFile::setPermissions(iconFile(), QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ReadGroup | QFileDevice::ReadOther);
+        writeIcon(m_iconSvg);
         QSaveFile file(menuFile());
         if (file.open(QIODevice::WriteOnly)) {
             QString exec = selfPath();

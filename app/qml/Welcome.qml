@@ -9,7 +9,7 @@ Rectangle {
     property int step: 0
     signal finished()
     anchors.fill: parent
-    color: Qt.rgba(0.02, 0.03, 0.05, 0.9)
+    color: Theme.scrim
     visible: opacity > 0.01
     opacity: shown ? 1 : 0
     Behavior on opacity { NumberAnimation { duration: Theme.slow; easing.type: Easing.OutCubic } }

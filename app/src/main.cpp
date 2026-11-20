@@ -9,6 +9,7 @@
 // Run from the AppImage, the runtime (sc-turbo, its tools, the layer) is first copied to
 // ~/.local/share/myrddin/runtime when it is missing or older there.
 #include "backend.h"
+#include "systemcolors.h"
 
 #include <QCommandLineParser>
 #include <QDir>
@@ -17,6 +18,7 @@
 #include <QGuiApplication>
 #include <QIcon>
 #include <QLoggingCategory>
+#include <QPixmap>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQmlExpression>
@@ -98,8 +100,19 @@ int main(int argc, char** argv) {
     }
 
     Backend backend(args.value(QStringLiteral("runtime")));
+    // The window, its mark and its icons are drawn in the desktop's own colours, and follow them.
+    SystemColors colors;
+    const auto wearColors = [&colors, &backend] {
+        const QByteArray mark = colors.iconSvg();
+        QPixmap picture;
+        if (picture.loadFromData(mark, "SVG")) QGuiApplication::setWindowIcon(QIcon(picture));
+        backend.setIconSvg(mark);
+    };
+    wearColors();
+    QObject::connect(&colors, &SystemColors::changed, &app, wearColors);
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("backend"), &backend);
+    engine.rootContext()->setContextProperty(QStringLiteral("systemColors"), &colors);
     engine.rootContext()->setContextProperty(QStringLiteral("startPage"), args.value(QStringLiteral("page")));
     engine.rootContext()->setContextProperty(QStringLiteral("picture"), args.isSet(QStringLiteral("screenshot")));
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app, [] { QCoreApplication::exit(2); }, Qt::QueuedConnection);

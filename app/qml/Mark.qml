@@ -13,8 +13,8 @@ Item {
         anchors.fill: parent
         radius: width * 0.23
         gradient: Gradient {
-            GradientStop { position: 0; color: "#1b2330" }
-            GradientStop { position: 1; color: "#0c1016" }
+            GradientStop { position: 0; color: Theme.cardHigh }
+            GradientStop { position: 1; color: Theme.card }
         }
         border.width: 1
         border.color: Theme.line

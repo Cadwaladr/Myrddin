@@ -38,6 +38,9 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantList baseHistory READ baseHistory NOTIFY statsChanged)
     Q_PROPERTY(QVariantList shownHistory READ shownHistory NOTIFY statsChanged)
     Q_PROPERTY(QString launchLog READ launchLog NOTIFY launchLogChanged)
+    // the log of a session that ran with logs, while the user has not said what to do with it ("": none)
+    Q_PROPERTY(QString sessionLog READ sessionLog NOTIFY sessionLogChanged)
+    Q_PROPERTY(QString sessionLogNote READ sessionLogNote NOTIFY sessionLogChanged)
     // the system
     Q_PROPERTY(QVariantList checks READ checks NOTIFY checksChanged)
     Q_PROPERTY(bool ready READ ready NOTIFY checksChanged)
@@ -86,6 +89,9 @@ public:
     QVariantList baseHistory() const { return m_baseHistory; }
     QVariantList shownHistory() const { return m_shownHistory; }
     QString launchLog() const { return m_launchLog; }
+    QString sessionLog() const { return m_sessionLog; }
+    QString sessionLogNote() const;
+    void setIconSvg(const QByteArray& svg);   // Myrddin's mark in the desktop's colours: what the menu entry's icon is written from
     QVariantList checks() const { return m_checks; }
     bool ready() const { return m_blocker.isEmpty(); }
     QString blocker() const { return m_blocker; }
@@ -109,6 +115,10 @@ public:
     Q_INVOKABLE void liveSwitch(const QString& command, bool on);   // fg-hud, fg-cap, fg-scd, fg-layer
     Q_INVOKABLE void panel(const QString& word);      // next | off | 1 | 2 | 3 | tl | tr | bl | br
     Q_INVOKABLE void runTool(const QString& title, const QStringList& words);
+    Q_INVOKABLE void readSessionLog();     // the offered log, or the newest kept one, shown where the reports are
+    Q_INVOKABLE void copySessionLog();     // onto the clipboard, as text and as a file
+    Q_INVOKABLE void deleteSessionLog();   // the log and the recording it was made from
+    Q_INVOKABLE void keepSessionLog();     // it stays in the log folder; the offer goes
     Q_INVOKABLE void refreshChecks();
     Q_INVOKABLE QString detectPrefix() const;         // "" when nothing is found
     Q_INVOKABLE bool looksLikePrefix(const QString& dir) const;
@@ -126,6 +136,7 @@ signals:
     void stateChanged();
     void statsChanged();
     void launchLogChanged();
+    void sessionLogChanged();
     void checksChanged();
     void integrationChanged();
     void toolChanged();
@@ -138,6 +149,9 @@ private:
     void poll();
     void readStats(bool gameUp);
     void readLaunchLog();
+    void makeSessionLog(bool last);
+    QString pickSessionLog() const;
+    QString tidyText(QString text) const;
     QStringList launchWords() const;
     bool scTurbo(const QStringList& words, QString* output = nullptr, int timeoutMs = 4000) const;
     void startAsync(const QString& program, const QStringList& words, std::function<void(int, const QString&)> done);
@@ -164,6 +178,11 @@ private:
     QVariantList m_baseHistory, m_shownHistory;
     QString m_launchLog;
     qint64 m_launchLogSize = -1;
+    QString m_sessionLog;          // a session's log that waits for the user's answer
+    bool m_logPending = false;     // a launch with logs whose log is still to be made (kept across a restart of the window)
+    bool m_logBusy = false;
+    qint64 m_logSince = 0;         // when that launch was (ms since the epoch): only a recording made after it counts
+    QByteArray m_iconSvg;
     QVariantList m_checks;
     QVariantList m_asyncChecks;
     QString m_blocker;

@@ -34,8 +34,8 @@ Item {
             strokeColor: "transparent"
             fillGradient: LinearGradient {
                 x1: 0; y1: 0; x2: 0; y2: root.height
-                GradientStop { position: 0; color: Qt.rgba(0.34, 0.88, 0.78, 0.22) }
-                GradientStop { position: 1; color: Qt.rgba(0.34, 0.88, 0.78, 0.0) }
+                GradientStop { position: 0; color: Theme.faded(Theme.accent, 0.22) }
+                GradientStop { position: 1; color: Theme.faded(Theme.accent, 0.0) }
             }
             PathPolyline { path: root.closed(root.shown) }
         }

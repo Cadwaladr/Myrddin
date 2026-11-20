@@ -47,7 +47,7 @@ Item {
                 Text {
                     anchors.centerIn: parent
                     text: option.modelData
-                    color: option.index === root.index ? "#06201d" : (hover.hovered ? Theme.text : Theme.dim)
+                    color: option.index === root.index ? Theme.onAccent : (hover.hovered ? Theme.text : Theme.dim)
                     font.pixelSize: root.large ? 17 : 13
                     font.weight: option.index === root.index ? Font.Bold : Font.Medium
                     Behavior on color { ColorAnimation { duration: Theme.quick } }

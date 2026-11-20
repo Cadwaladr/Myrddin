@@ -31,6 +31,7 @@ fg-panel) echo "panel: shown rate (${2:-tl})" ;;
 fg-watch) printf '%s\n' "  time  mult  game  shown  p50   p99" "  10 s  x4    30.1  119.8  33.2  41.0" "  20 s  x4    30.4  120.0  32.9  39.6" ;;
 latency)  printf '%s\n' "x4: game frame to display 41.5 ms (the game's frame 33.1, generation 4.2, wait for the display 4.2)" ;;
 check)    printf '%s\n' "== ntsync ==" "in use by the game (pid 1234)" ;;
+iowatch)  printf '%s\n' "io-1234.csv: 46 minutes" "GPU memory: 10.0 GB at the most" "(asked with: $*; home: $HOME/Games)" ;;
 "")       echo "usage"; exit 1 ;;
 *)        echo "$1: done" ;;
 esac

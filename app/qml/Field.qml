@@ -9,7 +9,7 @@ TextField {
     color: Theme.text
     placeholderTextColor: Theme.faint
     selectionColor: Theme.accent2
-    selectedTextColor: "#ffffff"
+    selectedTextColor: Theme.onAccent
     font.pixelSize: 13
     leftPadding: 12
     rightPadding: 12

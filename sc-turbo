@@ -29,7 +29,8 @@
 #   sc-turbo gui [install|remove]   the launcher window: the game's icon (a click launches it) and - Nx +
 #                      below it for the multiplier, also while the game runs (gui/games.ini lists the
 #                      games). install / remove: its entry in the desktop's application menu.
-#   sc-turbo run       launch the game as it is, with none of this project's layers (SC_SCHED applies)
+#   sc-turbo run [watch] [sched=NAME]   launch the game as it is, with none of this project's layers (SC_SCHED applies;
+#                      "watch" records as with fg)
 #   sc-turbo latency [PID]   where the time goes between a frame of the game and the display, per
 #                      multiplier (default: the newest session; the display's part needs a runner whose
 #                      vkd3d-proton asks the driver for it, which the LUG experimental ones do).
@@ -49,7 +50,7 @@
 #                      -> 2 that and the game's own ("BASE"), with the multiplier -> 3 both and a graph of
 #                      the time between shown frames (even pacing is a flat line) -> off. tl tr bl br: the
 #                      corner it sits in. It stays as it was left, also for the next launch.
-#   sc-turbo fg-panel-key [install [KEYS] | remove]   the desktop shortcut for that (default Ctrl+Shift+`;
+#   sc-turbo fg-panel-key [install [KEYS] | remove]   the desktop shortcut for that (default Shift+7;
 #                      KEYS like Ctrl+Shift+F10). Set up on KDE Plasma and COSMIC; elsewhere it says what to bind by hand.
 #   sc-turbo fg-params name=value ...   tune the HUD detection while the game runs
 #                      (bias ratio motion up down level grow), or switch parts of the frame
@@ -400,7 +401,7 @@ fg)
     if [ "${io_watch:-0}" = 1 ]; then
         mkdir -p "$here/logs/io"
         nohup "$here/tools/sc-iowatch" > "$here/logs/io/watch.out" 2>&1 &
-        echo "Recording the game's disk and memory use (afterwards: sc-turbo iowatch report)"
+        echo "Running with logs: the game's disk and memory use is noted from outside (afterwards: sc-turbo iowatch report)"
     fi
     start_sched
     exec "$launch"
@@ -408,9 +409,21 @@ fg)
 run)
     # The game as it is, with none of this project's layers (the launcher window's 1x).
     need_launch
+    for word in "${@:2}"; do
+        case "$word" in
+        watch) io_watch=1 ;;   # the recording of "sc-turbo iowatch", from outside the game
+        sched=*) sc_sched="${word#sched=}" ;;
+        *) echo "run: \"$word\" is not known (watch, sched=NAME)"; exit 1 ;;
+        esac
+    done
     desktop_notes
     display_settings
     export WINE_SCHED_LOG=0
+    if [ "${io_watch:-0}" = 1 ]; then
+        mkdir -p "$here/logs/io"
+        nohup "$here/tools/sc-iowatch" > "$here/logs/io/watch.out" 2>&1 &
+        echo "Running with logs: the game's disk and memory use is noted from outside (afterwards: sc-turbo iowatch report)"
+    fi
     start_sched
     exec "$launch"
     ;;

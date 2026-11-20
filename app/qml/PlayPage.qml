@@ -192,12 +192,12 @@ PageView {
             }
             SettingRow {
                 title: "Move HUD markers"
-                detail: "Markers, the compass and flight displays are carried along in generated frames."
+                detail: "Markers, the compass and flight displays move in every shown frame, not in steps."
                 Toggle { checked: backend.conf.markers; onToggled: (v) => backend.conf.markers = v }
             }
             SettingRow {
-                title: "Record disk and memory"
-                detail: "Second by second, from outside the game, for a report afterwards."
+                title: "Run with logs"
+                detail: "Keeps a log of the session. When the game closes you can read it, copy it or delete it."
                 Toggle { checked: backend.prefs.watch; onToggled: (v) => backend.prefs.watch = v }
             }
         }
