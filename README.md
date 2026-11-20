@@ -110,7 +110,7 @@ This is the only configuration Myrddin has run on.
 | CPU | Intel Core i5-13600K (6 P-cores with SMT, 8 E-cores) |
 | Memory | 64 GB DDR4 in two kits (2 × 16 GB rated 3200, 2 × 16 GB rated 2666), at 2666 MT/s since 2026-11-19, 2133 before |
 | Wine runner | the Star Citizen LUG's, unchanged: `lug-wine-tkg-experimental-wayland-git-11.22-1` and `-11.20-2` (Wine 11.22 and 11.20, Wayland driver) |
-| Game | Star Citizen Alpha 4.10 on the LIVE servers, build 13165946 (version 4.10.200.58746), Vulkan renderer, DLSS |
+| Game | Star Citizen Alpha 4.10 on the LIVE servers, Vulkan renderer, DLSS: build 13220821 (version 4.10.201.48085) since the patch of 2026-11-19; before it build 13165946 (version 4.10.200.58746), on which the figures here were measured |
 | Display | 2560×1440 at 143.99 Hz and at 120 Hz, no variable refresh |
 
 ## Requirements and limitations
@@ -118,8 +118,9 @@ This is the only configuration Myrddin has run on.
 - An NVIDIA GPU. Frame generation reads what the game gives DLSS through NVIDIA-only Vulkan
   extensions (`VK_NVX_image_view_handle`, `VK_NVX_binary_import`), so DLSS must be the upscaler
   selected in the game. Under Wine that needs NVAPI (`nvapi64.dll` from dxvk-nvapi) and the
-  driver's NGX libraries in the prefix, and the LUG Helper can set both up. AMD and Intel GPUs
-  are not supported. A fallback without the game's vectors exists (`SC_FG_FALLBACK=1`) and has
+  driver's NGX libraries in the prefix: the LUG Helper installs the first, the LUG's runners link
+  in the second, and `sc-turbo fg` says before the launch when either is missing. AMD and Intel
+  GPUs are not supported. A fallback without the game's vectors exists (`SC_FG_FALLBACK=1`) and has
   never been tested.
 - Linux, with the game running under Wine. The layer works on the host side of Wine and relies
   on Wine passing the game's Vulkan calls through to the host. The game has only been played
@@ -264,6 +265,28 @@ default the LUG Helper's `sc-launch.sh` in `~/Games/star-citizen`. If your game 
 else, name its folder on the AppImage's Setup page or set `SC_PREFIX` (see
 [Settings](#settings)). In the game, select DLSS as the upscaler.
 
+Your launch script is never changed. At every launch `sc-turbo` writes a copy of it to
+`logs/launch/` and starts that copy, with its own settings placed just before the line that
+starts the game: whatever `SC_LAUNCH_SET` and `SC_RUNNER` name (see [Settings](#settings)), and
+the NVIDIA settings of the LUG wiki's
+[Nvidia page](https://wiki.starcitizen-lug.org/Troubleshooting/nvidia), each only where your
+script or your environment has not set it:
+
+- The driver's shader cache as the LUG's script has it: on, 10 GiB, not cleaned at start.
+- "DLSS 4": NVIDIA's updater, which fetches the current DLSS from NVIDIA into the prefix, and
+  dxvk-nvapi's override that makes the game use it, with its newest preset, in place of the DLSS
+  the game came with. That is for the picture, not for the frame rate.
+  `SC_DLSS_OVERRIDE=0` leaves it out.
+- A limit on the graphics memory the game is told about, the wiki's remedy for frame drops when
+  the card's memory runs out: 9216 MiB on a 12 GB card, 8192 on 10, 6144 on 8, 4096 on 6, 2048
+  on 4, and larger cards are left alone. It works through Mesa's Vulkan layer
+  `VK_LAYER_MESA_vram_report_limit` (package `vulkan-mesa-layers` or similar). Fedora has no
+  package for it, and `tools/build-vram-layer.sh` builds it into `build/vram-limit` there.
+  `SC_VRAM_LIMIT=off` leaves it out.
+
+A script that finds its files from its own location is started as it is, and so is any script
+with `SC_LAUNCH_COPY=0`.
+
 ### From a terminal
 
 These do what the windows do:
@@ -309,50 +332,211 @@ cp sc-turbo.conf.example sc-turbo.conf
 
 - `SC_PREFIX`: the Wine prefix the game is installed in (default `~/Games/star-citizen`)
 - `SC_LAUNCH`: the script that starts the game (default `sc-launch.sh` in the prefix)
+- `SC_LAUNCH_SET="NAME=value NAME=value"`: environment settings of your own for the game, placed
+  in the copy of the launch script, where they take precedence over the script's
+- `SC_RUNNER`: the folder of another Wine runner to start the game with (the one holding
+  `bin/wine`)
+- `SC_NVIDIA_FLAGS=0`: leave every NVIDIA setting out of the copy
+- `SC_DLSS_OVERRIDE=0`: leave the DLSS 4 settings out
+- `SC_DLSS_INDICATOR=1`: DLSS's own indicator in the game for one launch (its version and
+  preset); the launch after it switches it off again. It is a check, to be read while standing
+  still: with frame generation the text smears when the picture moves
+- `SC_VRAM_LIMIT=off`, or a number of MiB: no limit on the graphics memory the game is told
+  about, or a limit of your own
+- `SC_LAUNCH_COPY=0`: start the launch script itself, with nothing placed
 - `SC_MONITOR`, `SC_FG_TARGET`: the display the game should use and its refresh rate, where the
   desktop cannot be asked
 - `SC_MANGOHUD=1`: MangoHud at every launch with frame generation
 - `SC_SCHED=lavd`: a sched_ext scheduler at every launch
 - `SC_FG_MARKERS=0`: never move HUD elements
 
-### A different CPU scheduler (optional)
+## CPU scheduler (optional)
 
-`sched=NAME` runs a sched_ext scheduler from the [scx](https://github.com/sched-ext/scx) project
-while the game runs, and the stock scheduler again after it:
+Myrddin can run the game under a different CPU scheduler and put the kernel's own back
+afterwards. This is optional. Everything else works without it, it is off until you ask for it,
+and Myrddin neither installs anything for it nor ever asks for a password.
+
+### What it is
+
+The CPU scheduler is the part of the kernel that decides which thread runs on which core, and for
+how long. Linux's own is called EEVDF. Since Linux 6.12 the kernel can also take a scheduler as a
+small program that is loaded while the system runs and removed again without a reboot: that
+mechanism is sched_ext, and the [scx](https://github.com/sched-ext/scx) project publishes
+schedulers for it. Myrddin has been tested with `scx_lavd`, which was written with games in mind:
+it works out which threads others are waiting for and lets those run first. Star Citizen runs
+close to two hundred threads and keeps some fourteen cores busy on the test machine, so the order
+they run in is not a detail.
+
+### What Myrddin does by itself
+
+Once you have chosen a scheduler (in the window: Options, CPU scheduler; from a terminal:
+`sched=lavd` on the command line, or `SC_SCHED=lavd` in `sc-turbo.conf` for every launch), each
+launch goes like this:
+
+1. `sc-turbo` asks the system whether your user may switch schedulers without a password. If not,
+   it says so and starts the game with the kernel's own scheduler. No dialog appears.
+2. If so, it starts the scheduler, in `scx_loader`'s "gaming" mode, and then the game.
+3. A small watcher waits for the game, for 30 minutes at most. When the game has ended, it puts
+   the kernel's own scheduler back. While the RSI Launcher stays open it waits ten minutes first,
+   because a game started again from the launcher's own button does not come through `sc-turbo`.
+4. If something else changed the scheduler in the meantime, the watcher leaves it alone, and only
+   the newest launch's watcher acts.
+
+`logs/sched.out` says what was done and when. Two things hold whatever Myrddin does: a sched_ext
+scheduler that misbehaves is removed by the kernel itself, which goes back to its own, and
+nothing Myrddin starts outlasts a reboot.
 
 ```sh
-./sc-turbo fg 3 sched=lavd           # scx_lavd in scx_loader's "gaming" mode
+./sc-turbo fg 3 sched=lavd           # scx_lavd for this launch
 ./sc-turbo fg 3 sched=bpfland:gaming # another scheduler, or another of its modes
+./sc-turbo fg 3 sched=stock          # the kernel's own for this launch, whatever sc-turbo.conf says
 ./sc-turbo run                       # SC_SCHED applies here too
 ```
 
-`SC_SCHED=lavd` in `sc-turbo.conf` does it at every launch, and `sched=stock` skips it once.
-When the game has ended the stock scheduler comes back (`logs/sched.out` says when). While the
-RSI Launcher stays open it waits ten minutes first, because a game started again from the
-launcher's own button keeps the scheduler too. If a sched_ext scheduler misbehaves, the kernel
-throws it out and goes back to the stock one by itself.
+### What we measured
 
-Whether it helps is not settled. In one comparison in a city (frame generation off, the two
-switched back and forth in one session, 25 seconds each, four rounds, run twice), scx_lavd gave about
-3 % more of the game's own frames and a 99th-percentile frame time 2 to 7 ms shorter. In a later
-run in Orison it gave 25.4 frames a second against 25.9 and 23.6 for the stock scheduler, within
-the drift. The tester found it more responsive in play.
+All on the machine under [Tested configuration](#tested-configuration), with frame generation
+off, the two schedulers switched back and forth inside one session.
 
-It needs a kernel with sched_ext (Linux 6.12 or later; Fedora's has it), `scx-scheds` and
-`scx-tools` (on Fedora 44 from the Terra repository), and switching without a password.
-`scx_loader` asks for an administrator's password every time, and a dialog over the game will
-not do. This polkit rule lets your own user, in your own active local session, start and stop
-sched_ext schedulers and nothing else:
+| | Kernel's own | scx_lavd | |
+|---|---|---|---|
+| City, on foot, run 1: frames a second | 21.6 | 22.6 | +4.6 % |
+| 99th-percentile frame time | 77.4 ms | 70.7 ms | |
+| City, on foot, run 2 (order reversed): frames a second | 22.9 | 23.3 | +1.9 % |
+| 99th-percentile frame time | 61.3 ms | 59.4 ms | |
+| Orison, one spot, a later session: frames a second | 23.6 and 25.9 | 25.4 | within the drift |
+
+In the two city runs (25 seconds a side, four rounds each) scx_lavd was ahead in seven of eight
+pairs, by 3.3 % on average. Stretches of the same scheduler differed by 5 to 10 % in those runs,
+so the frame rate alone does not prove a gain. The slow frames were shorter in both runs, and the
+tester found the game more responsive with it and has played with it since: in the table under
+[Frame rates and latency](#frame-rates-and-latency) the rows dated 2026-11-19 were measured with
+scx_lavd, those dated 2026-11-18 with the kernel's own.
+`scx_bpfland` was tried once: 3.9 % more frames in that run, and a longest frame of 168 ms against
+129 ms.
+
+In short: a small gain at best, mostly in how even the frames are. Try it if you are curious, and
+leave it out without missing anything.
+
+### Setting it up
+
+It needs a kernel with sched_ext (Linux 6.12 or later; Fedora's has it) and the packages
+`scx-scheds` and `scx-tools` (on Fedora 44 from the Terra repository). It also needs your user to
+be allowed to switch schedulers without a password: `scx_loader`, the service that loads them,
+asks for an administrator's password at every switch otherwise, and a password dialog over a
+starting game will not do. Myrddin does not arrange that for you. If you want the option, you
+allow it once yourself, with a polkit rule that lets your own user, in your own active local
+session, start and stop sched_ext schedulers and nothing else:
 
 ```sh
-tools/sc-sched rule > /tmp/sc-sched.rules
+tools/sc-sched rule > /tmp/sc-sched.rules      # prints the rule; read it
 sudo install -m 644 /tmp/sc-sched.rules /etc/polkit-1/rules.d/49-sc-sched.rules
 ```
 
-Removing that file undoes it. Without the rule, `sched=` says so at launch and the game runs
-with the stock scheduler. `tools/sc-sched state` shows what runs, `tools/sc-sched set stock`
-stops a sched_ext scheduler by hand, and `tools/sc-ab-sched.sh lavd` compares one with the stock
-scheduler in a running game (hold a steady view for about four minutes).
+Removing that file undoes it. Without the rule the option does nothing: `sc-turbo` says so at
+launch and the game runs with the kernel's own scheduler.
+
+`tools/sc-sched state` shows what runs, `tools/sc-sched set stock` stops a sched_ext scheduler by
+hand, and `tools/sc-ab-sched.sh lavd` compares one with the kernel's own in a running game (hold
+a steady view for about four minutes).
+
+## Hardware prefetchers (optional)
+
+On the test machine the game ran 4 to 7 % faster with the CPU's hardware prefetchers switched
+off. This is optional, and everything else works without it. Switching them needs root, so
+Myrddin does not do it: this section says what we measured and how you can try it yourself.
+
+### What they are
+
+A prefetcher is a part of the CPU that watches which memory a program reads and fetches what it
+expects to be read next, before the program asks for it. A program that goes through memory in
+order gains a great deal from that. A program that jumps about in memory gains little, and what
+was fetched in vain still takes its share of the memory's bandwidth and pushes other data out of
+the caches. Star Citizen is limited by memory on the test machine (see [The game's own frame
+rate](#the-games-own-frame-rate)), which is why we tried it. Intel's CPUs have a register,
+`0x1A4`, in which every prefetcher has a bit that switches it off. Some BIOS set-ups show the
+same switches, under names such as "Hardware Prefetcher" and "Adjacent Cache Line Prefetch".
+
+### What Myrddin does by itself
+
+Nothing. Writing that register needs root, and Myrddin never asks for a password. `sc-turbo`, the
+window and the AppImage neither read the register nor change it.
+
+### What we measured
+
+On the machine under [Tested configuration](#tested-configuration), on 2026-11-19 with game build
+13220821, frame generation off, standing still. All prefetchers were switched off and on again
+inside one running session: ten seconds off, ten seconds on, twelve rounds at each spot. Every
+ten seconds off are compared with the ten seconds on before and after them.
+
+| | Prefetchers on | All off | | Rounds ahead |
+|---|---|---|---|---|
+| Orison, one spot: frames a second | 30.0 | 31.3 | +4.5 % | 12 of 12 |
+| Median and 99th-percentile frame time | 33.2 and 40.7 ms | 32.4 and 40.7 ms | | |
+| A second, slower spot: frames a second | 26.7 | 28.5 | +7.4 % | 11 of 12 |
+| Median and 99th-percentile frame time | 36.3 and 65.4 ms | 33.7 and 61.3 ms | | |
+
+Compared in the same way with itself, "on" came out at +0.05 % and -0.25 %. The gain is small,
+and it was there in 23 of 24 rounds. What these figures do not tell:
+
+- Which prefetchers matter. Only all of them off together showed a gain. In a first pass of
+  three rounds each, the adjacent-line prefetcher alone (-0.3 %), the two of the second-level
+  cache alone (-1.9 %) and the two of the first-level cache alone (+0.3 %) changed nothing that
+  stands out from a spread of 4 %. The fifth, which Intel calls AMP, was not tried alone. So we
+  cannot say whether the switches a BIOS offers are enough.
+- How large the gain is at the Orison spot. With the prefetchers on, the game stood at 30.0
+  frames a second there in most ten-second stretches. We have not found what holds it at that
+  figure, and the gain may be cut short by it.
+- What it does to loading times and to other programs. Programs that read memory in order
+  (copying, compressing, compiling) usually get slower without prefetchers. We have measured
+  neither, so treat this as a setting for the time you play, not one to keep for good.
+- Anything about other machines. This is one CPU with memory at 2666 MT/s. With another CPU or
+  faster memory the result may differ, in either direction.
+
+With frame generation the gain shows only where the game runs below the rate the layer holds it
+at (the display's rate divided by the multiplier: 30 at 4× on 120 Hz). The kernel's preemption
+model was tried in the same way, "full" instead of "lazy": +0.8 %, which is nothing.
+
+In short: a few per cent where the game is slowest, bought with a setting that may slow other
+programs down. Try it if you are curious, and leave it out without missing much.
+
+### Trying it
+
+The values below are for Intel's Core CPUs of the 12th to 14th generation (Alder Lake and Raptor
+Lake), which is what we tested. Other Intel CPUs use the same register with other bits, and AMD's
+use other registers, which we have not looked at: there, leave it alone or look in the BIOS. You
+need the package `msr-tools` (its two commands `rdmsr` and `wrmsr`) and a kernel that lets root
+write such registers. With Secure Boot most kernels refuse: `cat /sys/kernel/security/lockdown`
+must show `[none]`.
+
+```sh
+sudo modprobe msr                 # the kernel's access to such registers (Fedora has it built in)
+sudo rdmsr -a 0x1a4               # what is set now, one line per CPU: normally 0 everywhere. Note it
+cat /sys/devices/cpu_core/cpus    # the numbers of your P-cores' CPUs: 0-11 on the test machine
+cat /sys/devices/cpu_atom/cpus    # those of your E-cores: 12-19 on the test machine
+
+# all off: 2f on the P-cores, 2d on the E-cores (they have one prefetcher fewer). Use your numbers
+for c in $(seq 0 11);  do sudo wrmsr -p $c 0x1a4 0x2f; done
+for c in $(seq 12 19); do sudo wrmsr -p $c 0x1a4 0x2d; done
+
+# all on again (if rdmsr showed something other than 0 before, write that value instead)
+sudo wrmsr -a 0x1a4 0
+```
+
+On a CPU of those generations without E-cores the two `cat` commands find nothing, and one line
+does it: `sudo wrmsr -a 0x1a4 0x2f`.
+
+It takes effect at once and can be switched while the game runs. It is a setting of the CPU, the
+same one a BIOS switch sets, and touches nothing of the game. A reboot puts everything back; we
+have not checked whether a suspend does. At the first such write the kernel puts a note in its
+log and marks itself "tainted" (flag S) until the next boot. That mark is there for people who
+read kernel bug reports and changes nothing else.
+
+We wrote the register with our own measuring tool, not with `wrmsr`: the values are the ones
+tested, the two commands above are the standard way to write them. To repeat the measurement,
+read `tools/base-ab-root.py` (the part that needs root: it switches on request and puts
+everything back when it ends) and `tools/base-ab.py` (which reads the layer's frame-rate lines
+and asks for the switches in time with them); both say at their top how they are run.
 
 ## Troubleshooting
 
@@ -427,7 +611,9 @@ minutes. The same test, run for an hour at 2666, found none.
 
 Placing the game's threads on P-cores or E-cores by kind, tried with a patched runner, lost 4 to
 6 % against leaving every thread free (2026-11-14, about 19 frames a second, generation off).
-For the CPU schedulers, see [above](#a-different-cpu-scheduler-optional).
+For the CPU schedulers, see [CPU scheduler](#cpu-scheduler-optional). Switching the CPU's
+hardware prefetchers off gave 4 to 7 % at two spots: see
+[Hardware prefetchers](#hardware-prefetchers-optional).
 
 Still open: transparent huge pages, switched on for the whole system, covered only 27 to 48 % of
 the game's memory, took 2 to 3 points off the page walks and moved the frame rate by less than
@@ -467,6 +653,7 @@ are listed below.
 | Adwaita Sans, a variation of Inter, drawn into `fg/hud_font.h` for the panel | SIL Open Font License 1.1 (copyright notices and licence text in `third_party/adwaita-sans/LICENSE`) |
 | Inter, the font of the AppImage's window (`app/assets/InterVariable.ttf`) | SIL Open Font License 1.1, Copyright (c) 2016 The Inter Project Authors (`app/assets/Inter-LICENSE.txt`) |
 | Qt 6, which the AppImage's window is built on (linked, not in this repository) | LGPL-3.0 |
+| Mesa's Vulkan layer `VK_LAYER_MESA_vram_report_limit`, built unchanged by `tools/build-vram-layer.sh` (not in this repository; an AppImage carries it) | MIT, Copyright 2017 Google, 2019 Red Hat, 2024 Igalia S.L. |
 
 An AppImage also carries Qt itself, ICU and a number of system libraries. Their licence texts
 are inside it under `usr/share/licenses/myrddin`, with a list of every part, its version and

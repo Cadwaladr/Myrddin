@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""The launch script Myrddin starts: a copy of the user's own, with this project's settings placed
+just before the line that starts the game. The user's script is only read, never changed.
+
+    tools/sc-launch-copy ORIGINAL COPY [--runner BIN_DIR] [--default NAME=VALUE]... [--set NAME=VALUE]...
+                         [--append NAME=ITEM]... [--append-path NAME=DIR]...
+
+COPY is written anew each time (sc-turbo calls this at every launch, so a change the LUG Helper or
+the user makes to ORIGINAL carries over). In it:
+
+  --default NAME=VALUE   NAME gets VALUE unless the script or the environment has set it already
+  --set NAME=VALUE       NAME gets VALUE whatever the script set
+  --append NAME=ITEM     ITEM is added to the comma-separated list in NAME, unless it is in it already
+  --append-path NAME=DIR the same for a list separated by colons
+  --runner BIN_DIR       the Wine runner: every line "export wine_path=..." (or "wine_path=...") that
+                         starts at the left margin names BIN_DIR instead; if the script has none, the
+                         variable is set with the other settings
+
+The settings go before the last line that names "RSI Launcher.exe" (the start of a command that is
+continued over several lines counts as one). A script without such a line gets them at its top, after
+the comments it starts with; what the script sets later then wins over them, and that is said.
+
+Exit 0: COPY is there and passes "bash -n". Exit 2: no copy can be made of this file (it is not a
+shell script, or it finds its files from its own location, which a copy elsewhere would break), and the
+reason is printed: the caller then starts ORIGINAL as it is. Exit 1: a mistake in the arguments.
+"""
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def refuse(text):
+    print(f"sc-launch-copy: {text}")
+    sys.exit(2)
+
+
+def pairs(items, what):
+    out = []
+    for item in items:
+        name, eq, value = item.partition("=")
+        if not eq or not NAME.match(name):
+            print(f"sc-launch-copy: {what} wants NAME=VALUE, got {item!r}")
+            sys.exit(1)
+        out.append((name, value))
+    return out
+
+
+def quoted(value):
+    """In double quotes where that is safe (the form the LUG's script has, which sc-turbo reads), else as the shell needs it."""
+    return f'"{value}"' if not re.search(r'["$`\\\n]', value) else shlex.quote(value)
+
+
+def code(line):
+    """The line without a trailing comment (roughly: a # at the start or after white space)."""
+    return re.sub(r"(^|\s)#.*", "", line)
+
+
+def main():
+    args = sys.argv[1:]
+    opts = {"--runner": [], "--default": [], "--set": [], "--append": [], "--append-path": []}
+    plain = []
+    while args:
+        a = args.pop(0)
+        if a in opts:
+            if not args:
+                print(__doc__)
+                return 1
+            opts[a].append(args.pop(0))
+        elif a.startswith("--"):
+            print(__doc__)
+            return 1
+        else:
+            plain.append(a)
+    if len(plain) != 2:
+        print(__doc__)
+        return 1
+    original, copy = plain
+    defaults, forced = pairs(opts["--default"], "--default"), pairs(opts["--set"], "--set")
+    added = [(n, v, ",") for n, v in pairs(opts["--append"], "--append")]
+    added += [(n, v, ":") for n, v in pairs(opts["--append-path"], "--append-path")]
+    runner = opts["--runner"][-1] if opts["--runner"] else None
+
+    try:
+        with open(original, encoding="utf-8", errors="surrogateescape") as f:
+            lines = f.read().split("\n")
+    except OSError as err:
+        refuse(f"cannot read {original}: {err.strerror}")
+    if os.path.realpath(original) == os.path.realpath(copy):
+        print("sc-launch-copy: the copy would be the original itself")
+        return 1
+    if not re.match(r"#!.*\b(bash|sh)\b", lines[0]):
+        refuse(f"{original} is not a shell script (first line: {lines[0][:60]!r})")
+    for n, line in enumerate(lines, 1):
+        if re.search(r"\$0\b|\$\{0\}|BASH_SOURCE", code(line)):
+            refuse(f"{original} finds things from its own location (line {n}); a copy elsewhere would not")
+
+    # the runner
+    runner_lines = 0
+    if runner:
+        for i, line in enumerate(lines):
+            m = re.match(r"(export\s+)?wine_path=", line)
+            if m:
+                lines[i] = f"{m.group(1) or ''}wine_path={quoted(runner)}"
+                runner_lines += 1
+
+    # where the settings go
+    at = None
+    for i in range(len(lines) - 1, -1, -1):
+        if re.search(r"RSI Launcher\.exe", code(lines[i]), re.I):
+            at = i
+            break
+    where = "before the line that starts the game"
+    if at is None:
+        at = 1
+        while at < len(lines) and (lines[at].startswith("#") or not lines[at].strip()):
+            at += 1
+        where = "at the top (no line with \"RSI Launcher.exe\" found): what the script sets itself wins"
+    else:
+        while at > 0 and code(lines[at - 1]).rstrip().endswith("\\"):
+            at -= 1
+
+    block = [
+        "",
+        "############################################################################",
+        "# Placed by Myrddin (sc-turbo) for this launch. This file is a copy, written anew at every",
+        f"# launch; your own script is {original} and is never changed.",
+        "############################################################################",
+    ]
+    for name, value in defaults:
+        block.append(f'[ -n "${{{name}+set}}" ] || export {name}={shlex.quote(value)}')
+    for name, value in forced:
+        block.append(f"export {name}={shlex.quote(value)}")
+    for name, value, sep in added:
+        item = shlex.quote(value)
+        block.append(f'case "{sep}${{{name}:-}}{sep}" in *{sep}{item}{sep}*) ;; '
+                     f'*) export {name}="${{{name}:+${name}{sep}}}"{item} ;; esac')
+    if runner and not runner_lines:
+        block.append(f"export wine_path={quoted(runner)}")
+    block += ["############################################################################", ""]
+    lines[at:at] = block
+
+    os.makedirs(os.path.dirname(os.path.abspath(copy)), exist_ok=True)
+    tmp = copy + ".new"
+    with open(tmp, "w", encoding="utf-8", errors="surrogateescape") as f:
+        f.write("\n".join(lines))
+    os.chmod(tmp, 0o755)
+    check = subprocess.run(["bash", "-n", tmp], capture_output=True, text=True)
+    if check.returncode != 0:
+        os.unlink(tmp)
+        refuse(f"the copy of {original} does not parse: {check.stderr.strip()[:200]}")
+    os.replace(tmp, copy)
+    print(f"launch script: a copy of {original} with {len(defaults) + len(forced) + len(added)} setting(s) placed {where}"
+          + (f"; runner {runner}" if runner else ""))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

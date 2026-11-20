@@ -115,16 +115,124 @@ here="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
 # or the same names in the environment, which win.
 #   SC_PREFIX  the Wine prefix Star Citizen is installed in (default: ~/Games/star-citizen)
 #   SC_LAUNCH  the script that starts the game through Wine (default: sc-launch.sh in the prefix)
+#   The launch script itself is never changed. The game is started from a copy of it, written anew at
+#   every launch to logs/launch/, with this project's settings placed before the line that starts the
+#   game (tools/sc-launch-copy). What is placed:
+#   What is placed for NVIDIA is what the LUG's wiki gives (Troubleshooting > Nvidia), each setting
+#   only where the script or the environment has not set it:
+#   SC_NVIDIA_FLAGS=0  leaves all of it out: the three groups below and the driver's shader cache
+#                      settings of the LUG's script (on, 10 GiB, not cleaned at start)
+#   SC_DLSS_OVERRIDE=0 leaves out "DLSS 4": NVIDIA's updater for DLSS (it fetches the current DLSS
+#                      from NVIDIA into the prefix) and dxvk-nvapi's override that makes the game use
+#                      it, with its newest preset, in place of the DLSS the game came with
+#   SC_DLSS_INDICATOR=1  DLSS's own indicator in the game for this launch (its version and preset);
+#                      the launch after it switches the indicator off again. dxvk-nvapi keeps this
+#                      one in the prefix's registry, which is why it is never placed unasked.
+#                      A check, read while standing still: generated frames smear the text in motion.
+#   SC_VRAM_LIMIT      auto (the default), off, or a number of MiB: how much memory the game is told
+#                      the graphics card has, through Mesa's layer VK_LAYER_MESA_vram_report_limit.
+#                      auto takes the wiki's table (12 GB: 9216, 10: 8192, 8: 6144, 6: 4096, 4: 2048)
+#                      and leaves larger cards alone. The layer is looked for on the system and in
+#                      build/vram-limit; without it nothing is placed.
+#   SC_LAUNCH_SET      "NAME=value NAME=value": environment settings that win over the script's own
+#   SC_RUNNER          the folder of another Wine runner (the one that holds bin/wine), for this launch
+#   SC_LAUNCH_COPY=0   starts the launch script itself, with nothing placed
 env_prefix="${SC_PREFIX:-}"; env_launch="${SC_LAUNCH:-}"; env_hud="${SC_MANGOHUD:-}"
+env_nvidia="${SC_NVIDIA_FLAGS:-}"; env_set="${SC_LAUNCH_SET:-}"; env_runner="${SC_RUNNER:-}"; env_copy="${SC_LAUNCH_COPY:-}"
+env_dlss="${SC_DLSS_OVERRIDE:-}"; env_ind="${SC_DLSS_INDICATOR:-}"; env_vram="${SC_VRAM_LIMIT:-}"
 [ -f "$here/sc-turbo.conf" ] && . "$here/sc-turbo.conf"
+SC_NVIDIA_FLAGS="${env_nvidia:-${SC_NVIDIA_FLAGS:-1}}"; SC_LAUNCH_SET="${env_set:-${SC_LAUNCH_SET:-}}"
+SC_RUNNER="${env_runner:-${SC_RUNNER:-}}"; SC_LAUNCH_COPY="${env_copy:-${SC_LAUNCH_COPY:-1}}"
+SC_DLSS_OVERRIDE="${env_dlss:-${SC_DLSS_OVERRIDE:-1}}"; SC_DLSS_INDICATOR="${env_ind:-${SC_DLSS_INDICATOR:-}}"
+SC_VRAM_LIMIT="${env_vram:-${SC_VRAM_LIMIT:-auto}}"
 SC_MANGOHUD="${env_hud:-${SC_MANGOHUD:-0}}"
 SC_PREFIX="${env_prefix:-${SC_PREFIX:-$HOME/Games/star-citizen}}"
 launch="${env_launch:-${SC_LAUNCH:-$SC_PREFIX/sc-launch.sh}}"
 need_launch() {
-    [ -x "$launch" ] && return 0
-    echo "no launch script at $launch"
-    echo "set SC_PREFIX or SC_LAUNCH in $here/sc-turbo.conf (see sc-turbo.conf.example)"
-    exit 1
+    if [ ! -x "$launch" ]; then
+        echo "no launch script at $launch"
+        echo "set SC_PREFIX or SC_LAUNCH in $here/sc-turbo.conf (see sc-turbo.conf.example)"
+        exit 1
+    fi
+    own_launch
+}
+# The LUG wiki's remedy for graphics memory running out on NVIDIA cards ("Severe frame drops"): the
+# game is told the card has less memory than it has, and so leaves room for everything else on the
+# card (the desktop, DLSS, this project's layer). Adds to args[] of own_launch. Says what it did.
+vram_limit() {
+    local total dev gb mib dir found="" data="${XDG_DATA_HOME:-$HOME/.local/share}"
+    case "$SC_VRAM_LIMIT" in off|0) return 0 ;; esac
+    IFS=', ' read -r total dev < <(nvidia-smi --query-gpu=memory.total,pci.device_id --format=csv,noheader,nounits 2>/dev/null | head -1)
+    case "$total$dev" in ''|*[!0-9A-Fa-fx]*) return 0 ;; esac   # no NVIDIA card that can be asked
+    [ "${#dev}" = 10 ] || return 0                            # 0xDDDDVVVV: device, then vendor
+    case "$SC_VRAM_LIMIT" in
+    auto)
+        gb=$(( (total + 512) / 1024 ))
+        case "$gb" in 12) mib=9216 ;; 10|11) mib=8192 ;; 8|9) mib=6144 ;; 6|7) mib=4096 ;; 4|5) mib=2048 ;; *) return 0 ;; esac ;;
+    *[!0-9]*) echo "SC_VRAM_LIMIT is auto, off or a number of MiB, not \"$SC_VRAM_LIMIT\""; exit 1 ;;
+    *) mib="$SC_VRAM_LIMIT" ;;
+    esac
+    for dir in /usr/share/vulkan/explicit_layer.d /usr/share/vulkan/implicit_layer.d /usr/local/share/vulkan/explicit_layer.d \
+               /etc/vulkan/explicit_layer.d "$data/vulkan/explicit_layer.d" "$data/vulkan/implicit_layer.d" "$here/build/vram-limit"; do
+        grep -qs VK_LAYER_MESA_vram_report_limit "$dir"/*.json && { found="$dir"; break; }
+    done
+    if [ -z "$found" ]; then
+        echo "NOTE: the graphics memory limit is not set: Mesa's layer VK_LAYER_MESA_vram_report_limit is not"
+        echo "  installed (package vulkan-mesa-layers or similar, or tools/build-vram-layer.sh; SC_VRAM_LIMIT=off"
+        echo "  ends this note)."
+        return 0
+    fi
+    dev="$(printf '%s' "$dev" | tr 'A-F' 'a-f')"
+    args+=(--append VK_LOADER_LAYERS_ENABLE=VK_LAYER_MESA_vram_report_limit
+           --default "VK_VRAM_REPORT_LIMIT_HEAP_SIZE=$mib" --default "VK_VRAM_REPORT_LIMIT_DEVICE_ID=0x${dev:6:4}:0x${dev:2:4}")
+    [ "$found" = "$here/build/vram-limit" ] && args+=(--append-path "VK_ADD_LAYER_PATH=$found")
+    echo "Graphics memory: the game is told $mib MiB of $total (SC_VRAM_LIMIT=off leaves it alone)"
+}
+# From here on "$launch" is this project's copy of the user's launch script (see the top of this part).
+# A script no copy can be made of (not a shell script, or one that looks for its files from its own
+# place) is started as it is; what sc-turbo exports reaches it all the same.
+own_launch() {
+    [ "$SC_LAUNCH_COPY" = 0 ] && return 0
+    local copy word args=()
+    copy="$here/logs/launch/$(basename "$launch")"
+    if [ "$SC_NVIDIA_FLAGS" != 0 ]; then
+        args+=(--default __GL_SHADER_DISK_CACHE=1 --default __GL_SHADER_DISK_CACHE_SIZE=10737418240
+               --default __GL_SHADER_DISK_CACHE_SKIP_CLEANUP=1)
+        if [ "$SC_DLSS_OVERRIDE" != 0 ]; then
+            args+=(--default PROTON_ENABLE_NGX_UPDATER=1
+                   --default DXVK_NVAPI_DRS_NGX_DLSS_SR_OVERRIDE=on
+                   --default DXVK_NVAPI_DRS_NGX_DLSS_RR_OVERRIDE=on
+                   --default DXVK_NVAPI_DRS_NGX_DLSS_FG_OVERRIDE=on
+                   --default DXVK_NVAPI_DRS_NGX_DLSS_SR_OVERRIDE_RENDER_PRESET_SELECTION=render_preset_latest
+                   --default DXVK_NVAPI_DRS_NGX_DLSS_RR_OVERRIDE_RENDER_PRESET_SELECTION=render_preset_latest)
+        fi
+        vram_limit
+    fi
+    # DLSS's indicator: on when asked for; the launch after that takes it off again (the wiki's steps 5 and 6)
+    if [ "$SC_DLSS_INDICATOR" = 1 ]; then
+        args+=(--default "DXVK_NVAPI_SET_NGX_DEBUG_OPTIONS=DLSSIndicator=1024,DLSSGIndicator=2")
+        mkdir -p "$here/logs/launch"; : > "$here/logs/launch/dlss-indicator-on"
+        # DLSS draws the indicator into the scene itself, before the HUD. Generated frames move it
+        # along with what is behind it, and that is left so: it is a check, read while standing still.
+        echo "DLSS's indicator is on for this launch: its version and preset, in a corner of the game's picture"
+        echo "  (a check, to be read while standing still: with frame generation the text smears when the picture moves)"
+    elif [ "$SC_DLSS_INDICATOR" = 0 ] || [ -e "$here/logs/launch/dlss-indicator-on" ]; then
+        args+=(--default "DXVK_NVAPI_SET_NGX_DEBUG_OPTIONS=DLSSIndicator=1,DLSSGIndicator=1")
+        rm -f "$here/logs/launch/dlss-indicator-on"
+    fi
+    for word in $SC_LAUNCH_SET; do args+=(--set "$word"); done
+    if [ -n "$SC_RUNNER" ]; then
+        [ -x "$SC_RUNNER/bin/wine" ] || { echo "SC_RUNNER: no Wine at $SC_RUNNER/bin/wine"; exit 1; }
+        args+=(--runner "$SC_RUNNER/bin")
+    fi
+    if "$here/tools/sc-launch-copy" "$launch" "$copy" ${args[@]+"${args[@]}"}; then
+        launch="$copy"
+    elif [ -n "$SC_RUNNER" ]; then
+        echo "SC_RUNNER is set and no copy of the launch script could be made: not starting"
+        exit 1
+    else
+        echo "the launch script is started as it is: $launch"
+    fi
 }
 # Said before a launch with frame generation, when the launch script names a runner without
 # vkd3d-proton (its d3d12core.dll is then Wine's own, some 50 KB against 5 MB and more). With
@@ -139,6 +247,21 @@ runner_note() {
     [ "$(stat -c %s "$dll")" -lt 1000000 ] || return 0
     echo "NOTE: the runner $(basename "${bin%/bin}") has no vkd3d-proton, and frame generation needs it:"
     echo "  the game will not get generated frames. The LUG's experimental runners have it."
+}
+# Said before a launch with frame generation, when the prefix lacks what DLSS needs under Wine: NVAPI
+# (nvapi64.dll of dxvk-nvapi, which the LUG Helper installs) and the NVIDIA driver's NGX libraries
+# (nvngx.dll and _nvngx.dll, which the LUG's runners link into the prefix from the driver's own "wine"
+# folder). No launch setting stands in for them: without them the game offers no DLSS, and frame
+# generation has nothing to read. Nothing is put into the prefix from here.
+dlss_note() {
+    local sys="$SC_PREFIX/drive_c/windows/system32" miss=""
+    [ -d "$sys" ] || return 0
+    [ -e "$sys/nvapi64.dll" ] || miss="nvapi64.dll (dxvk-nvapi: the LUG Helper installs it)"
+    [ -e "$sys/nvngx.dll" ] && [ -e "$sys/_nvngx.dll" ] ||
+        miss="${miss:+$miss, }nvngx.dll and _nvngx.dll (the NVIDIA driver's NGX libraries: a LUG runner links them in)"
+    [ -n "$miss" ] || return 0
+    echo "NOTE: the prefix has no $miss."
+    echo "  DLSS needs them, and without DLSS selected in the game there are no generated frames."
 }
 # Said before a launch: desktop settings known to get in the game's way.
 # KDE's Plasma Keyboard (the on-screen keyboard service) offers accented letters when a physical
@@ -272,6 +395,7 @@ fg)
     desktop_notes
     display_settings
     runner_note
+    dlss_note
     echo "Frame generation x$SC_FG_MULT; log: $here/logs/fg"
     if [ "${io_watch:-0}" = 1 ]; then
         mkdir -p "$here/logs/io"

@@ -112,10 +112,10 @@ PageView {
 
     Card {
         heading: "CPU scheduler"
-        note: "A sched_ext scheduler for as long as the game runs; the kernel's own comes back afterwards. On the test machine scx_lavd measured the same as the kernel's own."
+        note: "A sched_ext scheduler for as long as the game runs; the kernel's own comes back afterwards. Optional. On the test machine scx_lavd gave about 3 % more frames, which is within what runs differ by, and shorter slow frames."
         SettingRow {
             title: "While the game runs"
-            detail: backend.schedulerAllowed ? "" : "Switching is not set up on this system: it needs scx-scheds, scx-tools and a polkit rule (the README says how)."
+            detail: backend.schedulerAllowed ? "" : "Not available on this system as it is: it needs scx-scheds, scx-tools and your own permission to switch without a password (README, CPU scheduler). Myrddin never asks for a password."
             Choice { implicitWidth: 240; model: page.schedModel(); value: backend.conf.scheduler; onPicked: (v) => backend.conf.scheduler = v }
         }
     }

@@ -7,6 +7,26 @@
 # The script that starts the game through Wine. Default: the LUG Helper's sc-launch.sh in the prefix.
 #SC_LAUNCH="$SC_PREFIX/sc-launch.sh"
 
+# That script is never changed: every launch starts a copy of it (logs/launch/) with this project's
+# settings placed before the line that starts the game. Among them are the NVIDIA settings of the
+# LUG wiki's Nvidia page, each only where the script or the environment has not set it: the driver's
+# shader cache (on, 10 GiB, not cleaned at start), "DLSS 4" (NVIDIA's updater and the override that
+# makes the game use the current DLSS with its newest preset), and a limit on the graphics memory
+# the game is told about (12 GB card: 9216 MiB, 10: 8192, 8: 6144, 6: 4096, 4: 2048).
+# To leave all of them out:
+#SC_NVIDIA_FLAGS=0
+# To leave out DLSS 4 only (the game then uses the DLSS it came with):
+#SC_DLSS_OVERRIDE=0
+# No memory limit, or one of your own in MiB:
+#SC_VRAM_LIMIT=off
+#SC_VRAM_LIMIT=10240
+# Environment settings of your own for the game, which win over the script's (no spaces in a value):
+#SC_LAUNCH_SET="NAME=value OTHER=value"
+# Another Wine runner for the game: the folder that holds bin/wine.
+#SC_RUNNER="$SC_PREFIX/runners/NAME"
+# To start the launch script itself, with nothing placed:
+#SC_LAUNCH_COPY=0
+
 # The display the game runs on and its refresh rate are asked of the desktop at every launch
 # (KDE Plasma, COSMIC: "sc-turbo displays"). To name them instead:
 #SC_MONITOR=HDMI-A-1
