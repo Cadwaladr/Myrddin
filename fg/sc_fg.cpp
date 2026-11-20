@@ -3600,10 +3600,17 @@ float g_hud_parameters[8] = {EnvFloat("SC_FG_HUD_BIAS", 0.004f),  EnvFloat("SC_F
                              EnvFloat("SC_FG_HUD_LEVEL", 0.6f),  EnvFloat("SC_FG_HUD_GROW", 6.0f)};
 
 void ReadParameters() {
-    char path[600];
+    // The file is taken under a name of this process's own before it is read: a new one that
+    // sc-turbo puts in place meanwhile is left for the next look, instead of being removed unread.
+    char path[600], taken[620];
     std::snprintf(path, sizeof path, "%s/PARAMS", Dir());
-    FILE* file = std::fopen(path, "r");
+    std::snprintf(taken, sizeof taken, "%s.layer-%d", path, static_cast<int>(getpid()));
+    if (std::rename(path, taken) != 0) {
+        return;
+    }
+    FILE* file = std::fopen(taken, "r");
     if (!file) {
+        unlink(taken);
         return;
     }
     static const char* const names[8] = {"bias", "ratio", "motion", "", "up", "down", "level", "grow"};
@@ -3629,7 +3636,7 @@ void ReadParameters() {
         }
     }
     std::fclose(file);
-    unlink(path);
+    unlink(taken);
     Log("fg: frame chain %s, frames without a HUD capture %s, wait for generated frames %s, chain shift by hand %d, "
         "vector check %.0f, limiter gate %s, guard %s, generated frames first %s, multiplier %s, probes %s, "
         "frames wait for the GPU %s, moving HUD content %s, pictures in the HUD %s, frames without a capture keep the HUD apart %s, "

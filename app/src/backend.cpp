@@ -23,10 +23,11 @@
 #include <cstdio>
 #include <functional>
 
+#include <unistd.h>
+
 namespace {
 
 const char* kGame = "StarCitizen.exe";
-const char* kLauncher = "RSI Launcher.ex";   // the kernel keeps 15 letters of a process's name
 const char* kAppId = "io.github.cadwaladr.Myrddin";
 
 QString home() { return QDir::homePath(); }
@@ -103,6 +104,42 @@ bool Backend::processUp(const char* comm) {
         if (entry.isEmpty() || !entry.at(0).isDigit()) continue;
         QFile file(QStringLiteral("/proc/") + entry + QStringLiteral("/comm"));
         if (file.open(QIODevice::ReadOnly) && file.readLine().trimmed() == wanted) return true;
+    }
+    return false;
+}
+
+// The RSI Launcher renames its processes once it runs (the main one is "CrBrowserMain", its page
+// "CrRendererMain"), so its name is no sign of it: a window opened while the launcher was already open
+// saw none, and offered no Stop. It is found the way sc-turbo's "stop" and "kill" find a session
+// (prefix_processes): this user's processes whose program is one of Wine's, here those whose command
+// line names the launcher, and, for a prefix, only those whose environment names that prefix: what
+// Stop and Kill reach. Only what a process was started with is read.
+bool Backend::launcherOpen(const QString& prefix) {
+    // (a folder as sc-turbo's "realpath -m" gives it: links followed where it exists, tidied where not)
+    const auto real = [](const QString& path) {
+        const QString canonical = QFileInfo(path).canonicalFilePath();
+        return canonical.isEmpty() ? QDir::cleanPath(QDir(path).absolutePath()) : canonical;
+    };
+    const QString want = prefix.isEmpty() ? QString() : real(prefix);
+    const uint me = ::getuid();
+    const QStringList entries = QDir(QStringLiteral("/proc")).entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QString& entry : entries) {
+        if (entry.isEmpty() || !entry.at(0).isDigit()) continue;
+        const QString dir = QStringLiteral("/proc/") + entry;
+        if (QFileInfo(dir).ownerId() != me) continue;
+        QString exe = QFile::symLinkTarget(dir + QStringLiteral("/exe"));
+        if (exe.endsWith(QStringLiteral(" (deleted)"))) exe.chop(10);
+        if (!QFileInfo(exe).fileName().startsWith(QStringLiteral("wine"))) continue;
+        QFile cmdline(dir + QStringLiteral("/cmdline"));
+        if (!cmdline.open(QIODevice::ReadOnly) || !cmdline.readAll().replace('\0', ' ').toLower().contains("rsi launcher.exe")) continue;
+        if (want.isEmpty()) return true;
+        QFile environment(dir + QStringLiteral("/environ"));
+        if (!environment.open(QIODevice::ReadOnly)) continue;
+        for (const QByteArray& variable : environment.readAll().split('\0'))
+            if (variable.startsWith("WINEPREFIX=")) {
+                if (real(QFile::decodeName(variable.mid(11))) == want) return true;
+                break;
+            }
     }
     return false;
 }
@@ -184,7 +221,7 @@ QProcessEnvironment Backend::childEnvironment() {
 
 Backend::Backend(const QString& runtimeOverride, QObject* parent) : QObject(parent), m_runtime(resolveRuntime(runtimeOverride)) {
     m_fake = qEnvironmentVariable("MYRDDIN_FAKE");
-    if (runtimeOverride.isEmpty()) m_runtimeNote = installPayload(m_runtime, processUp(kGame) || processUp(kLauncher));
+    if (runtimeOverride.isEmpty()) m_runtimeNote = installPayload(m_runtime, processUp(kGame) || launcherOpen({}));
 
     static const QStringList known = {QStringLiteral("lavd"),  QStringLiteral("bpfland"), QStringLiteral("flash"), QStringLiteral("cosmos"),
                                       QStringLiteral("rusty"), QStringLiteral("p2dq"),    QStringLiteral("cake"),  QStringLiteral("beerland")};
@@ -585,7 +622,11 @@ void Backend::stop() {
         if (!output.isEmpty()) emit said(output.section(QLatin1Char('\n'), -1));
         poll();
     });
-    QTimer::singleShot(2000, this, [this] {
+    // (the wait belongs to this Stop: one that ended, followed by a launch and another Stop within
+    // the two seconds, must not offer "Kill" early for the new one)
+    const int round = ++m_stopRound;
+    QTimer::singleShot(2000, this, [this, round] {
+        if (round != m_stopRound) return;
         poll();
         if (!m_stopping || m_canKill) return;
         m_canKill = true;
@@ -642,7 +683,9 @@ void Backend::poll() {
         launcherUp = gameUp || m_fake == QStringLiteral("launcher");
     } else {
         gameUp = processUp(kGame);
-        launcherUp = gameUp || processUp(kLauncher);
+        // (the prefix sc-turbo acts on: its default where none is set)
+        const QString prefix = m_conf.value(QStringLiteral("prefix")).toString().trimmed();
+        launcherUp = gameUp || launcherOpen(prefix.isEmpty() ? home() + QStringLiteral("/Games/star-citizen") : prefix);
     }
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     if (gameUp) m_state = QStringLiteral("running");
@@ -1029,7 +1072,10 @@ void Backend::refreshChecks() {
             static const QRegularExpression technique(QStringLiteral(R"re(<Attr\s+name="UpscalingTechnique"\s+value="([^"]*)")re"));
             const auto match = technique.match(readAll(newest.absoluteFilePath()));
             const QString channel = newest.absoluteFilePath().mid(games.size() + 1).section(QLatin1Char('/'), 0, 0);
-            if (match.hasMatch() && match.captured(1) == QStringLiteral("2"))
+            // (a file that names no upscaler at all says nothing either way: not known, not a fault)
+            if (!match.hasMatch())
+                list << check(QStringLiteral("dlss"), title, QStringLiteral("Not known: the game's settings (%1) do not name an upscaler yet. Set it to DLSS in the game (Options > Graphics > Upscaling Technique).").arg(channel) + why, QStringLiteral("info"));
+            else if (match.captured(1) == QStringLiteral("2"))
                 list << check(QStringLiteral("dlss"), title, QStringLiteral("The game's upscaler is set to DLSS (%1)").arg(channel), QStringLiteral("ok"));
             else
                 list << check(QStringLiteral("dlss"), title, QStringLiteral("The game's upscaler is not set to DLSS (%1): no frames are generated until it is. In the game: Options > Graphics > Upscaling Technique.").arg(channel) + why, QStringLiteral("warn"));

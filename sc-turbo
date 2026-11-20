@@ -350,7 +350,9 @@ dlss_note() {
         [ -f "$file" ] || continue
         if [ -z "$newest" ] || [ "$file" -nt "$newest" ]; then newest="$file"; fi
     done
-    if [ -n "$newest" ] && ! grep -q '<Attr name="UpscalingTechnique" value="2"' "$newest"; then
+    # (a file that names no upscaler at all says nothing either way: no note then)
+    if [ -n "$newest" ] && grep -Eq '<Attr[[:space:]]+name="UpscalingTechnique"[[:space:]]' "$newest" &&
+        ! grep -Eq '<Attr[[:space:]]+name="UpscalingTechnique"[[:space:]]+value="2"' "$newest"; then
         echo "NOTE: the game's upscaler is not set to DLSS: no frames are generated until it is"
         echo "  (in the game: Options > Graphics > Upscaling Technique)."
     fi
@@ -451,7 +453,7 @@ probe|capture)
 fg)
     [ -f "$here/build/fg/libsc_fg.so" ] || { echo "build/fg/libsc_fg.so is missing (./build.sh install)"; exit 1; }
     need_launch
-    mkdir -p "$here/logs/fg"; rm -f "$here/logs/fg/OFF" "$here/logs/fg/DUMP" "$here/logs/fg/MULT" "$here/logs/fg/HUDOFF" "$here/logs/fg/HUDLAYEROFF" "$here/logs/fg/HUDSCAN" "$here/logs/fg/TRACE" "$here/logs/fg/LAYER" "$here/logs/fg/SCDON" "$here/logs/fg/NOCAP" "$here/logs/fg/EVENTS" "$here/logs/fg/PARAMS"
+    mkdir -p "$here/logs/fg"; rm -f "$here/logs/fg/OFF" "$here/logs/fg/DUMP" "$here/logs/fg/MULT" "$here/logs/fg/HUDOFF" "$here/logs/fg/HUDLAYEROFF" "$here/logs/fg/HUDSCAN" "$here/logs/fg/TRACE" "$here/logs/fg/LAYER" "$here/logs/fg/SCDON" "$here/logs/fg/NOCAP" "$here/logs/fg/EVENTS" "$here/logs/fg/PARAMS" "$here"/logs/fg/PARAMS.layer-*
     # (the number is optional: "sc-turbo fg hud" is x2 with MangoHud)
     case "${2:-}" in ''|*[!0-9]*) fg_mult=2; fg_words=("${@:2}") ;; *) fg_mult="$2"; fg_words=("${@:3}") ;; esac
     export SC_FG=1 SC_FG_DIR="$here/logs/fg" SC_FG_MULT="$fg_mult"
@@ -625,9 +627,12 @@ stop|kill)
         # shellcheck disable=SC2046
         kill -TERM $(of other) 2>/dev/null
         for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do [ "$(left server)" = 0 ] && break; sleep 0.1; done
-        # (Wine's server last: it saves the registry when it is asked to end)
-        # shellcheck disable=SC2046
-        [ -n "$(of server)" ] && kill -TERM $(of server) 2>/dev/null
+        # (Wine's server last: it saves the registry when it is asked to end. It is looked for again
+        # here: it may have ended by itself once the others were gone, and a number from the first
+        # look is then no longer its own.)
+        server="$(prefix_processes | awk '$1 == "server" { print $2 }')"
+        # shellcheck disable=SC2086
+        [ -n "$server" ] && kill -TERM $server 2>/dev/null
         for _ in 1 2 3 4 5; do [ "$(left)" = 0 ] && break; sleep 0.1; done
     fi
     still="$(left)"

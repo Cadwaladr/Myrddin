@@ -284,6 +284,9 @@ if [ -x "$here/sc-turbo" ] && grep -q 'sc-launch-copy' "$here/sc-turbo"; then
     sed -i 's/value="0"/value="2"/' "$profile/attributes.xml"
     turbo ./sc-turbo fg 4
     ! grep -q "upscaler is not set" "$work/turbo.txt"; check $? "DLSS there: nothing is said"
+    sed -i '/UpscalingTechnique/d' "$profile/attributes.xml"
+    turbo ./sc-turbo fg 4
+    ! grep -q "upscaler is not set" "$work/turbo.txt"; check $? "no upscaler named in the settings: nothing is said (not known)"
     rm -rf "$work/prefix/drive_c"
 
     echo "11. stop and kill: Wine's processes of this prefix, and nothing else"

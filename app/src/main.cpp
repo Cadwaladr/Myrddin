@@ -42,7 +42,7 @@ namespace {
 int passThrough(int argc, char** argv) {
     QCoreApplication core(argc, argv);
     const QString runtime = Backend::resolveRuntime({});
-    const QString note = Backend::installPayload(runtime, Backend::processUp("StarCitizen.exe") || Backend::processUp("RSI Launcher.ex"));
+    const QString note = Backend::installPayload(runtime, Backend::processUp("StarCitizen.exe") || Backend::launcherOpen({}));
     if (!note.isEmpty()) std::fprintf(stderr, "myrddin: %s\n", qPrintable(note));
     const QByteArray program = QFile::encodeName(runtime + QStringLiteral("/sc-turbo"));
     if (::access(program.constData(), X_OK) != 0) {

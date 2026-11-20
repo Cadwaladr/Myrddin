@@ -316,8 +316,8 @@ window idle 2500 --test-eval "if ($level === \"warn\") backend.panel(\"tr\"); if
 has "$rt/calls.log" "fg-panel tr" "another upscaler: a warning"
 has "$rt/calls.log" "fg-panel br" "which does not stand in the way of a launch"
 sed -i '/UpscalingTechnique/d' "$attr"; : > "$rt/calls.log"
-window idle 2500 --test-eval "if ($level === \"warn\") backend.panel(\"tr\")" || bad "the window ran"
-has "$rt/calls.log" "fg-panel tr" "no upscaler named in the settings: a warning"
+window idle 2500 --test-eval "if ($level === \"info\" && $detail.indexOf(\"(LIVE)\") > 0) backend.panel(\"tr\")" || bad "the window ran"
+has "$rt/calls.log" "fg-panel tr" "no upscaler named in the settings: said as not known, not as a fault"
 mkdir -p "$games/PTU/user/client/0/Profiles/default"
 printf '<Attributes Version="1">\n <Attr name="UpscalingTechnique" value="2"/>\n</Attributes>\n' > "$games/PTU/user/client/0/Profiles/default/attributes.xml"
 touch -d '-1 hour' "$attr"; : > "$rt/calls.log"
@@ -383,6 +383,35 @@ window idle 2500 --test-eval 'backend.panel(backend.prefs.watch ? "tr" : "tl"); 
 has "$rt/calls.log" "fg-panel tl" "a switch that was left off is off after a restart (\"Run with logs\")"
 has "$rt/calls.log" "fg-panel bl" "and so is the panel as the overlay"
 has "$rt/calls.log" "fg-panel 1" "the highest multiplier comes back as a number"
+
+echo "18. an RSI Launcher that was open before the window, under the name it gives itself"
+# A stand-in for the launcher's main process: Wine's program (a copy of bash under a Wine name), the
+# launcher's command line, a prefix in its environment, and the name Chromium gives its main thread.
+# The window looks for processes for real here (no MYRDDIN_FAKE).
+mkdir -p "$work/winebin"; cp "$(command -v bash)" "$work/winebin/wine64-preloader"
+launcher_like() {   # PREFIX [PROGRAM]: one runs, its pid in $fl
+    WINEPREFIX="$1" bash -c 'exec -a "$0" "$1" -c "echo CrBrowserMain > /proc/\$\$/comm; sleep 30; :"' \
+        'C:\Program Files\Roberts Space Industries\RSI Launcher\RSI Launcher.exe' "${2:-$work/winebin/wine64-preloader}" > /dev/null 2>&1 &
+    fl=$!
+    for _ in $(seq 50); do [ "$(cat /proc/$fl/comm 2>/dev/null)" = CrBrowserMain ] && break; sleep 0.1; done
+}
+gone() { pkill -P "$fl" 2>/dev/null; kill "$fl" 2>/dev/null; wait "$fl" 2>/dev/null; }
+fresh; : > "$rt/calls.log"
+launcher_like "$work/t/prefix/"
+window "" 2500 --page play --test-eval '@900 if (backend.state === "launcher") backend.panel("tl")' --test-eval '@1200 backend.stop()' || bad "the window ran"
+gone
+has "$rt/calls.log" "fg-panel tl" "the launcher of the game's prefix, renamed: the window sees it open"
+has "$rt/calls.log" "stop" "and Stop reaches it (sc-turbo stop)"
+fresh; : > "$rt/calls.log"
+launcher_like "$work/other-prefix"
+window "" 2500 --test-eval '@900 if (backend.state === "idle") backend.panel("bl")' || bad "the window ran"
+gone
+has "$rt/calls.log" "fg-panel bl" "one of another prefix is not this session (Stop would not reach it)"
+fresh; : > "$rt/calls.log"
+launcher_like "$work/t/prefix" "$(command -v bash)"
+window "" 2500 --test-eval '@900 if (backend.state === "idle") backend.panel("br")' || bad "the window ran"
+gone
+has "$rt/calls.log" "fg-panel br" "a program that is not Wine's, with the launcher in its command line, is not the launcher"
 
 echo
 [ $fails = 0 ] && echo "all checks passed" || echo "$fails check(s) FAILED"

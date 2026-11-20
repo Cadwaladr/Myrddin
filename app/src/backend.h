@@ -67,6 +67,7 @@ public:
     static QString resolveRuntime(const QString& runtimeOverride);
     static QString installPayload(const QString& runtime, bool gameUp);   // returns a note, empty when all is well
     static bool processUp(const char* comm);
+    static bool launcherOpen(const QString& prefix);   // the RSI Launcher of that prefix runs ("": of any prefix)
     static QProcessEnvironment childEnvironment();
 
     QString version() const;
@@ -184,6 +185,7 @@ private:
     bool m_generating = false;
     bool m_stopping = false;
     bool m_canKill = false;
+    int m_stopRound = 0;           // which Stop the two-second wait for "Kill" belongs to
     int m_liveMult = 0;
     double m_base = 0, m_shown = 0, m_p50 = 0, m_p99 = 0;
     bool m_statsFresh = false;
