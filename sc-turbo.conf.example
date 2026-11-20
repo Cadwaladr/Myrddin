@@ -54,6 +54,12 @@
 # inside the game, on any desktop; the game gets the key as well, so pick one it does not use.
 #SC_FG_PANEL_KEY=Ctrl+F9
 
+# The CPU's hardware prefetchers off and huge pages on while the game runs, back as they were after
+# it (the window's Options). Needs Myrddin's root helper, which you set up yourself once
+# (docs/advanced-performance-tweaking.md); without it nothing is switched and the launch says so.
+#SC_PREFETCH=off
+#SC_THP=on
+
 # A sched_ext CPU scheduler while the game runs ("sc-turbo fg N sched=lavd" does it for one launch;
-# needs scx-scheds, scx-tools and the polkit rule of "tools/sc-sched rule", see docs/optional.md).
+# needs scx-scheds, scx-tools and the polkit rule of "tools/sc-sched rule", see docs/advanced-performance-tweaking.md).
 #SC_SCHED=lavd

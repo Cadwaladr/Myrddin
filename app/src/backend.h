@@ -50,8 +50,10 @@ class Backend : public QObject {
     Q_PROPERTY(bool checking READ checking NOTIFY checksChanged)
     Q_PROPERTY(QStringList displays READ displays NOTIFY checksChanged)
     Q_PROPERTY(QString displayChoice READ displayChoice NOTIFY checksChanged)
-    Q_PROPERTY(QStringList schedulers READ schedulers CONSTANT)
+    Q_PROPERTY(QStringList schedulers READ schedulers CONSTANT)   // offered in Options: lavd and bpfland always, others where installed
+    Q_PROPERTY(QString tweaksPage READ tweaksPage CONSTANT)        // the page "Advanced performance tweaking" on GitHub
     Q_PROPERTY(bool schedulerAllowed READ schedulerAllowed NOTIFY checksChanged)
+    Q_PROPERTY(bool tuneAllowed READ tuneAllowed NOTIFY checksChanged)   // Myrddin's root helper is set up (prefetchers, huge pages)
     Q_PROPERTY(bool mangohudInstalled READ mangohudInstalled NOTIFY checksChanged)
     Q_PROPERTY(bool menuEntry READ menuEntry NOTIFY integrationChanged)
     Q_PROPERTY(bool cliLink READ cliLink NOTIFY integrationChanged)
@@ -104,7 +106,9 @@ public:
     QStringList displays() const { return m_displays; }
     QString displayChoice() const { return m_displayChoice; }
     QStringList schedulers() const { return m_schedulers; }
+    QString tweaksPage() const { return QStringLiteral("https://github.com/Cadwaladr/Myrddin/blob/main/docs/advanced-performance-tweaking.md"); }
     bool schedulerAllowed() const { return m_schedAllowed; }
+    bool tuneAllowed() const { return m_tuneAllowed; }
     bool mangohudInstalled() const { return m_mangohud; }
     bool menuEntry() const;
     bool cliLink() const;
@@ -117,7 +121,7 @@ public:
     // Each of these is kept for the next launch and, where a game runs with the layer, sent to it at once.
     Q_INVOKABLE void setMode(const QString& mode);    // off | 2 | 3 | 4 (the multiplier, held there) | auto (the layer picks, up to the limit)
     Q_INVOKABLE void setLimit(int n);                 // the highest multiplier Auto may pick (2 to 4)
-    Q_INVOKABLE void setOption(const QString& name, bool on);   // markers | keepHud | gapfill | pictures | boost | performance
+    Q_INVOKABLE void setOption(const QString& name, bool on);   // markers | keepHud | gapfill | pictures | boost | performance | prefetchOff | hugePages
     Q_INVOKABLE void setOverlay(const QString& which);          // off | mangohud | panel: what is drawn over the game (at the next launch)
     Q_INVOKABLE void panel(const QString& word);      // next | off | 1 | 2 | 3 | tl | tr | bl | br
     Q_INVOKABLE QString keyName(int nativeScanCode, int modifiers) const;   // "Shift+7" for a key press; "" for one the panel cannot use
@@ -138,6 +142,7 @@ public:
     Q_INVOKABLE void setMenuEntry(bool on);
     Q_INVOKABLE void setCliLink(bool on);
     Q_INVOKABLE void openFolder(const QString& which);   // logs | runtime | prefix | licences
+    Q_INVOKABLE void openLink(const QString& url);       // a web page in the desktop's browser (https only)
     Q_INVOKABLE void copy(const QString& text);
     Q_INVOKABLE QString tidyPath(const QString& path) const;   // file:// off, ~ for the home folder
     Q_INVOKABLE QString fullPath(const QString& path) const;
@@ -208,6 +213,7 @@ private:
     QString m_displayChoice;
     QStringList m_schedulers;
     bool m_schedAllowed = false;
+    bool m_tuneAllowed = false;
     bool m_mangohud = false;
     bool m_toolBusy = false;
     QString m_toolTitle, m_toolOutput;

@@ -223,8 +223,11 @@ Backend::Backend(const QString& runtimeOverride, QObject* parent) : QObject(pare
     m_fake = qEnvironmentVariable("MYRDDIN_FAKE");
     if (runtimeOverride.isEmpty()) m_runtimeNote = installPayload(m_runtime, processUp(kGame) || launcherOpen({}));
 
-    static const QStringList known = {QStringLiteral("lavd"),  QStringLiteral("bpfland"), QStringLiteral("flash"), QStringLiteral("cosmos"),
-                                      QStringLiteral("rusty"), QStringLiteral("p2dq"),    QStringLiteral("cake"),  QStringLiteral("beerland")};
+    // The schedulers Options offers: the two tried on the test machine whether they are installed or not
+    // (a switch can be set before its tweak is: the launch says when it cannot act), then any other that is.
+    m_schedulers = {QStringLiteral("lavd"), QStringLiteral("bpfland")};
+    static const QStringList known = {QStringLiteral("flash"), QStringLiteral("cosmos"), QStringLiteral("rusty"),
+                                      QStringLiteral("p2dq"),  QStringLiteral("cake"),   QStringLiteral("beerland")};
     for (const QString& name : known)
         if (!QStandardPaths::findExecutable(QStringLiteral("scx_") + name).isEmpty()) m_schedulers << name;
 
@@ -298,7 +301,8 @@ QString Backend::selfPath() const {
 
 void Backend::loadConf() {
     QString prefix, launch, monitor, target, sched;
-    bool mangohud = false, markers = true, keepHud = true, gapfill = true, pictures = true, boost = false, performance = true;
+    bool mangohud = false, markers = true, keepHud = true, gapfill = true, pictures = true, boost = false, performance = true,
+         prefetchOff = false, hugePages = false;
     QString panelKey = QStringLiteral("Shift+7");
     m_confKept.clear();
     static const QRegularExpression assignment(QStringLiteral(R"(^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$)"));
@@ -321,6 +325,8 @@ void Backend::loadConf() {
         else if (name == QStringLiteral("SC_FG_PICTURES")) pictures = confValue(value, prefix) != QStringLiteral("0");
         else if (name == QStringLiteral("SC_FG_BOOST")) boost = confValue(value, prefix) == QStringLiteral("1");
         else if (name == QStringLiteral("SC_FG_FILL")) performance = confValue(value, prefix) != QStringLiteral("1");
+        else if (name == QStringLiteral("SC_PREFETCH")) prefetchOff = confValue(value, prefix) == QStringLiteral("off");
+        else if (name == QStringLiteral("SC_THP")) hugePages = confValue(value, prefix) == QStringLiteral("on");
         else if (name == QStringLiteral("SC_FG_PANEL_KEY")) {
             panel_key::Combo combo;   // (one the panel does not know: the default stays)
             if (panel_key::Parse(confValue(value, prefix).toUtf8().constData(), combo)) panelKey = QString::fromUtf8(combo.text);
@@ -340,6 +346,8 @@ void Backend::loadConf() {
     m_conf.insert(QStringLiteral("pictures"), pictures);
     m_conf.insert(QStringLiteral("boost"), boost);
     m_conf.insert(QStringLiteral("performance"), performance);
+    m_conf.insert(QStringLiteral("prefetchOff"), prefetchOff);
+    m_conf.insert(QStringLiteral("hugePages"), hugePages);
     m_conf.insert(QStringLiteral("panelKey"), panelKey);
 }
 
@@ -361,6 +369,9 @@ void Backend::saveConf() {
     // ("Performance" off: the game's frames are limited so that the display is filled evenly)
     if (!m_conf.value(QStringLiteral("performance")).toBool()) out << QStringLiteral("SC_FG_FILL=1");
     if (text("panelKey") != QStringLiteral("Shift+7") && !text("panelKey").isEmpty()) out << QStringLiteral("SC_FG_PANEL_KEY=") + shellQuoted(text("panelKey"));
+    // (switched by Myrddin's root helper for the time the game runs, where a user has set it up)
+    if (m_conf.value(QStringLiteral("prefetchOff")).toBool()) out << QStringLiteral("SC_PREFETCH=off");
+    if (m_conf.value(QStringLiteral("hugePages")).toBool()) out << QStringLiteral("SC_THP=on");
     // (the layer reads these from the environment itself, so they are exported from the settings file)
     if (!m_conf.value(QStringLiteral("gapfill")).toBool()) out << QStringLiteral("export SC_FG_GAPFILL=0");
     if (!m_conf.value(QStringLiteral("pictures")).toBool()) out << QStringLiteral("export SC_FG_PICTURES=0");
@@ -554,6 +565,13 @@ void Backend::setLimit(int n) {
 
 // A switch of Options: written to sc-turbo.conf for the next launch, and sent to a running game.
 void Backend::setOption(const QString& name, bool on) {
+    // the prefetchers and huge pages: for the next launch (sc-turbo switches them when it starts the game)
+    if (name == QStringLiteral("prefetchOff") || name == QStringLiteral("hugePages")) {
+        m_conf.insert(name, on);
+        m_saveLater.start();
+        if (m_state != QStringLiteral("idle")) emit said(QStringLiteral("From the next launch"));
+        return;
+    }
     static const QStringList params = {QStringLiteral("markers"), QStringLiteral("gapfill"), QStringLiteral("pictures"), QStringLiteral("boost")};
     if (name != QStringLiteral("keepHud") && name != QStringLiteral("performance") && !params.contains(name)) return;
     m_conf.insert(name, on);
@@ -1112,7 +1130,15 @@ void Backend::refreshChecks() {
             m_schedAllowed = code == 0;
             const QString wanted = m_conf.value(QStringLiteral("scheduler")).toString();
             if (!wanted.isEmpty() && !m_schedAllowed)
-                m_asyncChecks << check(QStringLiteral("sched"), QStringLiteral("CPU scheduler"), QStringLiteral("scx_%1 is chosen in Options, but switching schedulers is not set up here (it needs scx-scheds, scx-tools and your own permission to switch without a password: docs/optional.md says how). The game runs with the stock scheduler.").arg(wanted), QStringLiteral("warn"), {}, QStringLiteral("options"));
+                m_asyncChecks << check(QStringLiteral("sched"), QStringLiteral("CPU scheduler"), QStringLiteral("scx_%1 is chosen in Options, but it is not set up on this computer: it needs scx-scheds, scx-tools and a polkit rule. The game runs with the kernel's own scheduler. Options, Advanced performance tweaks, links to how it is set up.").arg(wanted), QStringLiteral("warn"), {}, QStringLiteral("options"));
+            finishChecks();
+        });
+        ++m_pendingChecks;
+        startAsync(m_runtime + QStringLiteral("/tools/sc-tune"), {QStringLiteral("allowed")}, [this, round](int code, const QString&) {
+            if (round != m_checkRound) return;
+            m_tuneAllowed = code == 0;
+            if ((m_conf.value(QStringLiteral("prefetchOff")).toBool() || m_conf.value(QStringLiteral("hugePages")).toBool()) && !m_tuneAllowed)
+                m_asyncChecks << check(QStringLiteral("tune"), QStringLiteral("Prefetchers and huge pages"), QStringLiteral("Switched on in Options, but Myrddin's root helper is not set up on this computer, so a launch leaves the computer as it is. Options, Advanced performance tweaks, links to how it is set up."), QStringLiteral("warn"), {}, QStringLiteral("options"));
             finishChecks();
         });
     }
@@ -1144,7 +1170,7 @@ void Backend::finishChecks() {
     if (m_pendingChecks > 0) return;
     // in a fixed order, whatever order the answers came in
     QVariantList merged = m_checks;
-    for (const char* key : {"display", "sched", "kde-diacritics", "kde-tearing"})
+    for (const char* key : {"display", "sched", "tune", "kde-diacritics", "kde-tearing"})
         for (const QVariant& item : std::as_const(m_asyncChecks))
             if (item.toMap().value(QStringLiteral("key")).toString() == QLatin1String(key)) {
                 // before the closing reminder about the game's own setting
@@ -1270,6 +1296,16 @@ void Backend::openFolder(const QString& which) {
     QProcess process;
     process.setProgram(QStringLiteral("xdg-open"));
     process.setArguments({dir});
+    process.setProcessEnvironment(childEnvironment());
+    process.startDetached();
+}
+
+void Backend::openLink(const QString& url) {
+    const QUrl link(url, QUrl::StrictMode);
+    if (!link.isValid() || link.scheme() != QStringLiteral("https") || link.host().isEmpty()) return;
+    QProcess process;
+    process.setProgram(QStringLiteral("xdg-open"));
+    process.setArguments({link.toString(QUrl::FullyEncoded)});
     process.setProcessEnvironment(childEnvironment());
     process.startDetached();
 }

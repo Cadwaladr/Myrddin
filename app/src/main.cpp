@@ -11,6 +11,7 @@
 // Run from the AppImage, the runtime (sc-turbo, its tools, the layer) is first copied to
 // ~/.local/share/myrddin/runtime when it is missing or older there.
 #include "backend.h"
+#include "gameconsole.h"
 #include "systemcolors.h"
 #include "testpointer.h"
 
@@ -88,7 +89,7 @@ int main(int argc, char** argv) {
     args.addVersionOption();
     args.addOption({QStringLiteral("runtime"), QStringLiteral("Use the sc-turbo in DIR."), QStringLiteral("DIR")});
     args.addOption({QStringLiteral("screenshot"), QStringLiteral("Save a picture of the window to FILE and leave."), QStringLiteral("FILE")});
-    args.addOption({QStringLiteral("page"), QStringLiteral("The page to show at the start (play, setup, options, session, about, welcome)."), QStringLiteral("NAME")});
+    args.addOption({QStringLiteral("page"), QStringLiteral("The page to show at the start (play, console, setup, options, about, welcome)."), QStringLiteral("NAME")});
     args.addOption({QStringLiteral("settle"), QStringLiteral("Milliseconds to wait before the picture is taken."), QStringLiteral("MS"), QStringLiteral("1500")});
     args.addOption({QStringLiteral("size"), QStringLiteral("The window's size for the picture."), QStringLiteral("WxH")});
     args.addOption({QStringLiteral("test-eval"), QStringLiteral("For tests: run this QML expression half a second after the start (backend.launch())."), QStringLiteral("CODE")});
@@ -114,8 +115,10 @@ int main(int argc, char** argv) {
     };
     wearColors();
     QObject::connect(&colors, &SystemColors::changed, &app, wearColors);
+    GameConsole gameConsole(&backend);   // the Console page: the game's process and its logs, read from outside
     QQmlApplicationEngine engine;
     engine.rootContext()->setContextProperty(QStringLiteral("backend"), &backend);
+    engine.rootContext()->setContextProperty(QStringLiteral("gameConsole"), &gameConsole);
     engine.rootContext()->setContextProperty(QStringLiteral("systemColors"), &colors);
     engine.rootContext()->setContextProperty(QStringLiteral("startPage"), args.value(QStringLiteral("page")));
     engine.rootContext()->setContextProperty(QStringLiteral("picture"), args.isSet(QStringLiteral("screenshot")));

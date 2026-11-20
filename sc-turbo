@@ -27,6 +27,10 @@
 #                      Launcher is open, for a game started again from it); SC_SCHED=NAME in sc-turbo.conf: always,
 #                      sched=stock: not this time. Needs scx-scheds, scx-tools and switching without a
 #                      password (tools/sc-sched rule); otherwise the game runs with the stock one.
+#                      SC_PREFETCH=off and SC_THP=on in sc-turbo.conf: the CPU's hardware prefetchers off and
+#                      huge pages on for as long as the game runs, back as they were after it (tools/sc-tune
+#                      follow). Needs Myrddin's root helper, set up by hand (docs/advanced-performance-tweaking.md); without it
+#                      nothing is switched and the launch says so.
 #                      "old": the build before the last one, kept in build/fg-prev; "older": the one
 #                      before that, build/fg-prev2; "next": the newest build, which ./build.sh
 #                      leaves in build/fg-next before it is validated and installed: for a diagnosis)
@@ -410,12 +414,29 @@ start_sched() {
     [ -n "$s" ] && [ "$s" != stock ] || return 0
     name="${s%%:*}"; mode=gaming; [ "$s" != "$name" ] && mode="${s#*:}"
     if ! "$here/tools/sc-sched" allowed; then
-        echo "CPU scheduler $name: not here (needs scx-scheds, scx-tools and switching without a password: tools/sc-sched rule); the stock one"
+        echo "CPU scheduler $name: not here (needs scx-scheds, scx-tools and switching without a password: docs/advanced-performance-tweaking.md); the stock one"
         return 0
     fi
     mkdir -p "$here/logs"
     nohup "$here/tools/sc-sched" follow "$name" "$mode" >> "$here/logs/sched.out" 2>&1 &
     echo "CPU scheduler: scx_$name ($mode) while the game runs, the stock one after it (log: logs/sched.out)"
+}
+# The CPU's hardware prefetchers off and huge pages on while the game runs (tools/sc-tune follow):
+# SC_PREFETCH=off and SC_THP=on in sc-turbo.conf. Needs Myrddin's root helper, which a user sets up by
+# hand (docs/advanced-performance-tweaking.md); nothing is switched without it, and nothing asks for a password.
+start_tune() {
+    local what=() said=()
+    [ "${SC_PREFETCH:-on}" = off ] && { what+=(prefetch); said+=("the CPU's prefetchers off"); }
+    [ "${SC_THP:-off}" = on ] && { what+=(thp); said+=("huge pages on"); }
+    [ ${#what[@]} -gt 0 ] || return 0
+    local text="${said[0]}"; [ ${#said[@]} -gt 1 ] && text="$text and ${said[1]}"
+    if ! "$here/tools/sc-tune" allowed; then
+        echo "NOTE: $text: not done, Myrddin's root helper is not set up here (docs/advanced-performance-tweaking.md)"
+        return 0
+    fi
+    mkdir -p "$here/logs"
+    nohup "$here/tools/sc-tune" follow "${what[@]}" >> "$here/logs/tune.out" 2>&1 &
+    echo "While the game runs: $text; as before after it (log: logs/tune.out)"
 }
 logs="$here/logs/probe"
 
@@ -539,6 +560,7 @@ fg)
         echo "Running with logs: the game's disk and memory use is noted from outside (afterwards: sc-turbo iowatch report)"
     fi
     start_sched
+    start_tune
     launch_now
     ;;
 run)
@@ -560,6 +582,7 @@ run)
         echo "Running with logs: the game's disk and memory use is noted from outside (afterwards: sc-turbo iowatch report)"
     fi
     start_sched
+    start_tune
     launch_now
     ;;
 gui)

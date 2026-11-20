@@ -237,6 +237,17 @@ if [ -x "$here/sc-turbo" ] && grep -q 'sc-launch-copy' "$here/sc-turbo"; then
     echo 'SC_FG_FILL=1' >> "$t/sc-turbo.conf"
     turbo ./sc-turbo fg 4
     called "SC_FG_FILL=1" && grep -q "fills the display evenly (SC_FG_FILL=1)" "$work/turbo.txt"; check $? "SC_FG_FILL=1 in sc-turbo.conf: it does, and that is said"
+    # the prefetchers and huge pages through Myrddin's root helper: a stand-in that says whether it is set up
+    printf '#!/usr/bin/env bash\ncase "$1" in allowed) exit "${TUNE_OK:-1}" ;; follow) shift; echo "$*" > "%s/tune-follow" ;; esac\n' "$work" > "$t/tools/sc-tune"
+    chmod +x "$t/tools/sc-tune"; printf 'SC_PREFETCH=off\nSC_THP=on\n' >> "$t/sc-turbo.conf"
+    turbo env TUNE_OK=0 ./sc-turbo fg 4; sleep 0.3
+    [ "$(cat "$work/tune-follow" 2>/dev/null)" = "prefetch thp" ] && grep -q "While the game runs: the CPU's prefetchers off and huge pages on" "$work/turbo.txt"; check $? "SC_PREFETCH=off and SC_THP=on: one follower for both, and that is said"
+    rm -f "$work/tune-follow"
+    turbo ./sc-turbo run; sleep 0.3
+    [ ! -e "$work/tune-follow" ] && grep -q "NOTE: the CPU's prefetchers off and huge pages on: not done, Myrddin's root helper is not set up" "$work/turbo.txt" && called "runner=stock"; check $? "without the helper (\"run\" too): nothing is switched, that is said, the game starts"
+    sed -i '/SC_PREFETCH/d; /SC_THP/d' "$t/sc-turbo.conf"
+    turbo env TUNE_OK=0 ./sc-turbo fg 4; sleep 0.3
+    [ ! -e "$work/tune-follow" ] && ! grep -q "prefetchers" "$work/turbo.txt"; check $? "neither set: no follower, nothing said"
     turbo ./sc-turbo fg 3 fixed
     called "SC_FG_FILL=1" && ! grep -q "fills the display" "$work/turbo.txt"; check $? "with a multiplier that is held nothing is said about it"
     sed -i '/SC_FG_FILL/d' "$t/sc-turbo.conf"

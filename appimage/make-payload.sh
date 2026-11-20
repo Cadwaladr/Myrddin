@@ -27,6 +27,8 @@ TOOLS=(
     "sc-monitor|sc-turbo: the display's name and rate at every launch (display_settings), and \"sc-turbo displays\""
     "sc-launch-copy|sc-turbo: the copy of the launch script that every launch starts (own_launch)"
     "sc-sched|sc-turbo: \"sched=NAME\" / SC_SCHED at launch (allowed, follow); \"tools/sc-sched rule\" is named in the usage and sc-turbo.conf.example"
+    "sc-tune|sc-turbo: SC_PREFETCH=off / SC_THP=on at launch (allowed, follow); its head tells how a user sets up the root helper"
+    "sc-tune-root|not run by sc-turbo: the root helper a user installs by hand (docs/advanced-performance-tweaking.md), run as root by its systemd unit"
     "sc-iowatch|sc-turbo: \"fg N watch\" starts it in the background, \"sc-turbo iowatch [report]\""
     "fg-where.py|sc-turbo: \"fg-where\""
     "fg-watch.py|sc-turbo: \"fg-watch\""

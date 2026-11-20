@@ -19,7 +19,7 @@ Measured on the test machine in the game's cities, on foot, with hangars and fli
 
 The two days differ in more than the date. On 2026-11-18 the test machine's memory ran at 2133
 MT/s and the kernel's own CPU scheduler was in use; since 2026-11-19 the memory runs at 2666 and
-the rows were measured with scx_lavd (see [CPU scheduler](optional.md#cpu-scheduler-optional)).
+the rows were measured with scx_lavd (see [A sched_ext CPU scheduler](advanced-performance-tweaking.md#a-sched_ext-cpu-scheduler)).
 
 Rates differ from session to session by more than most settings do. In two sessions earlier on
 2026-11-18, Orison typically ran at 39 and showed 118.
@@ -59,9 +59,9 @@ Wine 2 to 3 %, and the CPU stayed below its power limit (90 to 94 W of 125 W).
 
 Placing the game's threads on P-cores or E-cores by kind, tried with a patched runner, lost 4 to
 6 % against leaving every thread free (2026-11-14, about 19 frames a second, generation off).
-For the CPU schedulers, see [CPU scheduler](optional.md#cpu-scheduler-optional). Switching the CPU's
+For the CPU schedulers, see [A sched_ext CPU scheduler](advanced-performance-tweaking.md#a-sched_ext-cpu-scheduler). Switching the CPU's
 hardware prefetchers off gave 4 to 7 % at two spots: see
-[Hardware prefetchers](optional.md#hardware-prefetchers-optional).
+[The CPU's hardware prefetchers](advanced-performance-tweaking.md#the-cpus-hardware-prefetchers).
 
 Still open: transparent huge pages, switched on for the whole system, covered only 27 to 48 % of
 the game's memory, took 2 to 3 points off the page walks and moved the frame rate by less than

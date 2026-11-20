@@ -37,7 +37,9 @@ iowatch)  printf '%s\n' "io-1234.csv: 46 minutes" "GPU memory: 10.0 GB at the mo
 esac
 SC
 printf '#!/usr/bin/env bash\n[ "$1" = allowed ] && exit 0\necho stock\n' > "$rt/tools/sc-sched"
-chmod +x "$rt/sc-turbo" "$rt/tools/sc-sched"
+# Myrddin's root helper set up (TUNE_ALLOWED=0 in the environment of a test: not set up)
+printf '#!/usr/bin/env bash\n[ "$1" = allowed ] && exit "$(( ${TUNE_ALLOWED:-1} == 0 ))"\necho "prefetch=as-booted thp=as-booted"\n' > "$rt/tools/sc-tune"
+chmod +x "$rt/sc-turbo" "$rt/tools/sc-sched" "$rt/tools/sc-tune"
 : > "$rt/build/fg/libsc_fg.so"; echo '{}' > "$rt/build/fg/sc_fg.json"
 printf 'v0.1-test\n2026-11-19 UTC\n' > "$rt/VERSION"
 # the game's own settings file, with DLSS as its upscaler (the system check reads that one value)

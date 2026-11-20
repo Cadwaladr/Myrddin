@@ -413,6 +413,59 @@ window "" 2500 --test-eval '@900 if (backend.state === "idle") backend.panel("br
 gone
 has "$rt/calls.log" "fg-panel br" "a program that is not Wine's, with the launcher in its command line, is not the launcher"
 
+echo "19. the advanced performance tweaks: switches that work whether the tweak is set up or not"
+fresh; : > "$rt/calls.log"
+TUNE_ALLOWED=0 window idle 2500 --test-eval 'backend.setOption("prefetchOff", true); backend.setOption("hugePages", true)' || bad "the window ran"
+sleep 0.5
+has "$rt/sc-turbo.conf" "SC_PREFETCH=off" "prefetchers off can be switched on where the root helper is not set up, and is kept in sc-turbo.conf"
+has "$rt/sc-turbo.conf" "SC_THP=on" "huge pages too"
+window idle 2500 --test-eval '@1500 if (backend.conf.prefetchOff && backend.conf.hugePages && backend.tuneAllowed) backend.panel("tl")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel tl" "both read back, and the helper is seen as set up"
+TUNE_ALLOWED=0 window idle 2500 --test-eval '@1500 if (!backend.tuneAllowed && backend.checks.some((c) => c.key === "tune" && c.level === "warn")) backend.panel("bl")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel bl" "without the helper: a warning in the system check that says so"
+window idle 2500 --test-eval 'backend.setOption("prefetchOff", false); backend.setOption("hugePages", false)' || bad "the window ran"
+sleep 0.5
+hasnt "$rt/sc-turbo.conf" 'SC_PREFETCH|SC_THP' "switched off: gone from sc-turbo.conf"
+# no sched_ext scheduler installed (a window that finds no program at all): lavd and bpfland are offered all the same
+mkdir -p "$work/nothing"; printf '#!/bin/sh\nPATH=%s exec "%s" "$@"\n' "$work/nothing" "$bin" > "$work/window-bare"; chmod +x "$work/window-bare"
+bin="$work/window-bare" window idle 1800 --test-eval '@600 console.warn("offered: " + backend.schedulers.join(","))' --test-eval '@700 backend.conf.scheduler = "lavd"' || bad "the window ran"
+grep -qE 'offered: lavd,bpfland$' "$work/last.err" && ok "no scheduler installed: scx_lavd and scx_bpfland are offered" || bad "no scheduler installed: scx_lavd and scx_bpfland are offered ($(grep -o 'offered: .*' "$work/last.err"))"
+sleep 0.5
+has "$rt/sc-turbo.conf" "SC_SCHED=lavd" "and one can be chosen, kept for the launch"
+window idle 1800 --test-eval '@600 console.warn("offered: " + backend.schedulers.join(","))' || bad "the window ran"
+grep -o 'offered: .*' "$work/last.err" | grep -qE '^offered: lavd,bpfland(,[a-z0-9]+)*$' && ! grep -o 'offered: .*' "$work/last.err" | tr ',' '\n' | sort | uniq -d | grep -q . \
+    && ok "with schedulers installed: the two first, the others after them, none twice" || bad "with schedulers installed ($(grep -o 'offered: .*' "$work/last.err"))"
+# the card's link: the page on GitHub, in the desktop's browser, and nothing but an https address
+mkdir -p "$work/opener"; printf '#!/bin/sh\necho "xdg-open $*" >> "%s/calls.log"\n' "$rt" > "$work/opener/xdg-open"; chmod +x "$work/opener/xdg-open"
+: > "$rt/calls.log"
+PATH="$work/opener:$PATH" window idle 1800 --page options \
+    --test-eval '@600 (function find(o) { if (!o) return null; if (o.text === "Advanced performance tweaking on GitHub" && typeof o.clicked === "function") return o; for (var i = 0; i < o.children.length; i++) { var r = find(o.children[i]); if (r) return r } return null })(window.contentItem).clicked()' \
+    --test-eval '@700 backend.openLink("file:///etc/passwd"); backend.openLink("http://example.com/"); backend.openLink("javascript:alert(1)")' || bad "the window ran"
+sleep 0.5
+has "$rt/calls.log" "xdg-open https://github.com/Cadwaladr/Myrddin/blob/main/docs/advanced-performance-tweaking.md" "the card's link opens Advanced performance tweaking on GitHub"
+hasnt "$rt/calls.log" 'xdg-open (file|http:|javascript)' "nothing but an https address is opened"
+
+echo "20. the Console: the game's process and its logs"
+fresh; mkdir -p "$rt/logs/fg"
+printf '     1.0 fg: ready for 2560x1440\n    10.0 STAT x4 real=24.0/s generated=72.0/s shown=96.0/s untouched=0 | game frame ms mean=41.0 p50=40.0 | hook ms=1.0 hud=9\n' > "$rt/logs/fg/fg-123.log"
+printf 'Frame generation x4; log: here\n' > "$rt/logs/launch.out"
+gl="$work/t/prefix/drive_c/Program Files/Roberts Space Industries/StarCitizen/LIVE"; mkdir -p "$gl"
+printf '<2026-11-20T10:33:00.000Z> [Notice] a line of the game log\n' > "$gl/Game.log"
+: > "$rt/calls.log"
+window running 2600 --page console \
+    --test-eval '@700 if (gameConsole.active && gameConsole.info.up && gameConsole.info.threads === 191 && gameConsole.text.indexOf("STAT x4 real=24.0/s") >= 0 && gameConsole.text.indexOf("hook ms") < 0) backend.panel("tl")' \
+    --test-eval '@900 gameConsole.setSource("game")' --test-eval '@1400 if (gameConsole.text.indexOf("a line of the game log") >= 0) backend.panel("tr")' \
+    --test-eval '@1600 gameConsole.setSource("launch")' --test-eval '@2100 if (gameConsole.text.indexOf("Frame generation x4") >= 0) backend.panel("bl")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel tl" "the layer's log, its ten-second lines cut to what matters, and the game's process"
+has "$rt/calls.log" "fg-panel tr" "the game's own Game.log"
+has "$rt/calls.log" "fg-panel bl" "what the last launch said"
+printf '    20.0 STAT x3 real=30.0/s generated=60.0/s shown=90.0/s untouched=0 | game frame ms mean=33.0\n' >> "$rt/logs/fg/fg-123.log"; : > "$rt/calls.log"
+window running 2600 --page console --test-eval '@700 backend.panel(gameConsole.text.indexOf("x3 real=30.0") >= 0 ? "1" : "2")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel 1" "what the layer writes later is there too"
+: > "$rt/calls.log"
+window idle 2500 --page play --test-eval '@700 backend.panel(gameConsole.active ? "tr" : "br")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel br" "another page shown: the Console reads nothing"
+
 echo
 [ $fails = 0 ] && echo "all checks passed" || echo "$fails check(s) FAILED"
 exit $fails

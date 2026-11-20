@@ -83,7 +83,8 @@ inputs to DLSS. [Measurements](docs/measurements.md) has more sessions and where
 | [Quick start guide](docs/quickstart.md) | the first launch, the launcher window's pages, the first commands |
 | [Commands and settings](docs/usage.md) | every command, `sc-turbo.conf`, what the layer does in detail |
 | [Limitations](docs/limitations.md) | requirements, known faults, the tested configuration |
-| [Optional extras](docs/optional.md) | MangoHud, a CPU scheduler, the hardware prefetchers |
+| [Optional extras](docs/optional.md) | MangoHud, the graphics memory limit, optional packages |
+| [Advanced performance tweaking](docs/advanced-performance-tweaking.md) | A CPU scheduler, the CPU's prefetchers and huge pages: what they gave, how to switch them |
 | [Troubleshooting](docs/troubleshooting.md) | a game that stands still, keys that do nothing, tearing |
 | [Measurements](docs/measurements.md) | frame rates per city, latency, what limits the game's own frame rate |
 | [Third-party code](docs/third-party.md) | where the approach came from, every component and its licence |

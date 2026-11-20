@@ -13,9 +13,10 @@ ApplicationWindow {
     title: "Myrddin"
     color: Theme.bg
 
-    property string page: ["play", "setup", "options", "about"].indexOf(startPage) >= 0 ? startPage : "play"
+    property string page: ["play", "console", "setup", "options", "about"].indexOf(startPage) >= 0 ? startPage : "play"
     readonly property var pages: [
         { key: "play", label: "Play", icon: Theme.iconPlay },
+        { key: "console", label: "Console", icon: Theme.iconTerminal },
         { key: "setup", label: "Setup", icon: Theme.iconSetup },
         { key: "options", label: "Options", icon: Theme.iconOptions },
         { key: "about", label: "About", icon: Theme.iconAbout }
@@ -161,6 +162,7 @@ ApplicationWindow {
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         PlayPage { active: window.page === "play"; onGo: (name) => window.page = name }
+        ConsolePage { active: window.page === "console"; onGo: (name) => window.page = name }
         SetupPage { active: window.page === "setup"; onGo: (name) => window.page = name }
         OptionsPage { active: window.page === "options"; onGo: (name) => window.page = name }
         AboutPage { active: window.page === "about"; onGo: (name) => window.page = name }

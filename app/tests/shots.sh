@@ -60,5 +60,7 @@ SETTLE=1900 shot play-stopping launcher play --test-eval '@700 pointer.click(930
 SETTLE=3600 shot play-kill launcher play --test-eval '@700 pointer.click(930, 215)'
 printf '[General]\nwelcomed=true\nmode=auto\npanel=true\n' > "$MYRDDIN_CONFIG_DIR/myrddin.conf"
 shot options-key idle options --size 1080x1000
+shot console-running running console
+shot console-idle idle console
 ls -la "$out"/*.png | awk '{print $5, $9}'
 rm -rf "$work"

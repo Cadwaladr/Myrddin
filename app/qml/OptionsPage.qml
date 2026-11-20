@@ -32,7 +32,7 @@ PageView {
         var list = [{ text: "The kernel's own", value: "" }]
         for (var i = 0; i < backend.schedulers.length; i++) list.push({ text: "scx_" + backend.schedulers[i], value: backend.schedulers[i] })
         var mine = backend.conf.scheduler
-        if (mine !== "" && !list.some((e) => e.value === mine)) list.push({ text: "scx_" + mine + " (not installed)", value: mine })
+        if (mine !== "" && !list.some((e) => e.value === mine)) list.push({ text: "scx_" + mine, value: mine })
         return list
     }
 
@@ -138,16 +138,37 @@ PageView {
     Card {
         heading: "Performance"
         SettingRow {
+            title: "Hold the GPU's speed up"
+            detail: "Generated frames are ready sooner when the game leaves the GPU half idle. Off unless you switch it on."
+            Toggle { checked: backend.conf.boost; onToggled: (v) => backend.setOption("boost", v) }
+        }
+    }
+
+    Card {
+        heading: "Advanced performance tweaks"
+        note: "These switches work once the matching tweak has been set up on this computer, which needs root once; Myrddin never asks for a password. Until then a launch leaves the computer as it is. Each takes effect at the next launch and is undone when the game has closed."
+        ActionButton {
+            text: "Advanced performance tweaking on GitHub"
+            icon: Theme.iconLink
+            onClicked: backend.openLink(backend.tweaksPage)
+        }
+        Divider {}
+        SettingRow {
             title: "CPU scheduler"
-            detail: "A sched_ext scheduler for as long as the game runs; the kernel's own comes back afterwards. Optional. On the test machine scx_lavd gave about 3 % more frames, which is within what runs differ by, and shorter slow frames."
-                  + (backend.schedulerAllowed ? "" : " Not available on this system as it is: it needs scx-scheds, scx-tools and your own permission to switch without a password (docs/optional.md, CPU scheduler). Myrddin never asks for a password.")
+            detail: "A sched_ext scheduler for as long as the game runs; the kernel's own comes back afterwards. On the test machine scx_lavd gave about 3 % more frames, which is within what runs differ by, and shorter slow frames."
             Choice { implicitWidth: 240; model: page.schedModel(); value: backend.conf.scheduler; onPicked: (v) => backend.conf.scheduler = v }
         }
         Divider {}
         SettingRow {
-            title: "Hold the GPU's speed up"
-            detail: "Generated frames are ready sooner when the game leaves the GPU half idle. Off unless you switch it on."
-            Toggle { checked: backend.conf.boost; onToggled: (v) => backend.setOption("boost", v) }
+            title: "CPU prefetchers off while playing"
+            detail: "The CPU stops fetching memory it only guesses will be read, which leaves more of the memory's time to what the game asks for. On the test machine the game ran 4 to 7 % faster at two busy spots. For Intel Core CPUs of the 12th to 14th generation."
+            Toggle { checked: backend.conf.prefetchOff; onToggled: (v) => backend.setOption("prefetchOff", v) }
+        }
+        Divider {}
+        SettingRow {
+            title: "Huge pages while playing"
+            detail: "The game's memory goes into pages of 2 MiB instead of 4 KiB, so the CPU spends less time finding its way in it. On the test machine about half of the game's memory got there; the frame rate stayed within what runs differ by, and no hitches were seen."
+            Toggle { checked: backend.conf.hugePages; onToggled: (v) => backend.setOption("hugePages", v) }
         }
     }
 

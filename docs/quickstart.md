@@ -89,6 +89,8 @@ ones worth knowing.
 ## Where to go from here
 
 - [Commands and settings](usage.md): MangoHud, the layer's own panel, a session's log, `sc-turbo.conf`.
-- [Optional extras](optional.md): what is not needed and may still help, with what we measured.
+- [Optional extras](optional.md): what is not needed and may still help.
+- [Advanced performance tweaking](advanced-performance-tweaking.md): a CPU scheduler, the CPU's
+  prefetchers and huge pages: what each gave, how Myrddin switches them, and how to by hand.
 - [Limitations](limitations.md) and [Troubleshooting](troubleshooting.md) when something is not
   as this page says.

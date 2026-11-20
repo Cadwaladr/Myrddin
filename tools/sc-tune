@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# Two settings of the machine for the time the game runs, switched from outside it without a password once
+# a small root helper is set up by hand (docs/advanced-performance-tweaking.md): the CPU's hardware
+# prefetchers off, and transparent huge pages for all memory. Nothing in the game is touched; both go back
+# as they were when the game has ended, and both are gone at the next boot anyway.
+#
+#   tools/sc-tune state                 what is set now ("prefetch=off thp=on ...", as the helper left it)
+#   tools/sc-tune allowed [prefetch|thp]   whether the helper is set up here (exit 0)
+#   tools/sc-tune set prefetch off|on   the prefetchers off, or back as they were
+#   tools/sc-tune set thp on|off        huge pages for all memory, or the kernel's settings back
+#   tools/sc-tune follow [prefetch] [thp]   what sc-turbo's SC_PREFETCH=off and SC_THP=on do: set now, and put
+#                                       back once the game has come and gone: 30 minutes for it to start; when
+#                                       it ends, as long as the RSI Launcher runs, 10 minutes for it to come
+#                                       back. Only the newest launch's follower acts (logs/tune.follow).
+#   tools/sc-tune unit | rule           print the systemd unit and the polkit rule of the helper; set it up with
+#                                         tools/sc-tune unit > /tmp/myrddin-tune@.service
+#                                         tools/sc-tune rule > /tmp/49-myrddin-tune.rules
+#                                         sudo install -D -o root -g root -m 755 tools/sc-tune-root /usr/local/libexec/myrddin/sc-tune-root
+#                                         sudo install -o root -g root -m 644 /tmp/myrddin-tune@.service /etc/systemd/system/
+#                                         sudo install -o root -g root -m 644 /tmp/49-myrddin-tune.rules /etc/polkit-1/rules.d/
+#                                         sudo systemctl daemon-reload
+#                                       and remove those three files (then daemon-reload) to undo it.
+#
+# The helper is tools/sc-tune-root, run by systemd as the unit myrddin-tune@ACTION.service, and the rule
+# lets this user, in their own active local session, start exactly those units. "set" asks systemd with
+# --no-ask-password, so where the rule is not there it fails and nothing asks for one.
+set -u
+here="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+helper=/usr/local/libexec/myrddin/sc-tune-root
+unit_file=/etc/systemd/system/myrddin-tune@.service
+rule_file=/etc/polkit-1/rules.d/49-myrddin-tune.rules
+run="${MYRDDIN_TUNE_RUN:-/run/myrddin-tune}"
+thp_now() { local v; v="$(cat /sys/kernel/mm/transparent_hugepage/enabled 2>/dev/null)"; v="${v#*[}"; echo "${v%%]*}"; }
+state() { local s; s="$(cat "$run/state" 2>/dev/null)"; echo "${s:-prefetch=as-booted thp=as-booted (the helper has not run since the boot)} (huge pages now: $(thp_now))"; }
+action() { systemctl --no-ask-password start "myrddin-tune@$1.service"; }
+case "${1:-state}" in
+state) state ;;
+allowed)
+    # (polkit tells a user nothing about one unit: only root may ask with the unit named. So this says
+    # whether the helper and its unit were put in place; the rule came with them, and where it did not,
+    # "set" fails without asking for a password.)
+    case "${2:-prefetch}" in prefetch|thp) ;; *) echo "allowed [prefetch|thp]"; exit 2 ;; esac
+    [ -x "$helper" ] && [ -e "$unit_file" ] ;;
+set)
+    case "${2:-} ${3:-}" in
+    "prefetch off") a=prefetch-off ;; "prefetch on") a=prefetch-on ;;
+    "thp on") a=thp-on ;; "thp off") a=thp-off ;;
+    *) echo "set prefetch off|on, set thp on|off"; exit 2 ;;
+    esac
+    action "$a" || { echo "the root helper could not be started (see the head of tools/sc-tune to set it up)"; exit 1; }
+    state ;;
+follow)
+    shift; want=("$@"); [ ${#want[@]} -gt 0 ] || { echo "follow [prefetch] [thp]"; exit 2; }
+    comm="${SC_COMM:-StarCitizen.exe}"
+    owner="$here/logs/tune.follow"; mkdir -p "$here/logs"; echo $$ > "$owner"
+    stamp() { sed "s/^/$(date '+%F %T') [$$] /"; }
+    game() { pgrep -x "${comm:0:15}" >/dev/null; }
+    launcher() { pgrep -f '[R]SI Launcher\.exe' >/dev/null; }
+    ours() { [ "$(cat "$owner" 2>/dev/null)" = $$ ]; }
+    done_list=()
+    for w in "${want[@]}"; do
+        case "$w" in prefetch) on=off ;; thp) on=on ;; *) echo "not known: $w" | stamp; continue ;; esac
+        if out="$("$0" set "$w" "$on" 2>&1)"; then done_list+=("$w"); fi
+        echo "$out" | stamp
+    done
+    [ ${#done_list[@]} -gt 0 ] || { rm -f "$owner"; exit 1; }
+    echo "until $comm has come and gone" | stamp
+    for i in $(seq 900); do game && break; ours || break; sleep 2; done
+    while ours; do
+        game || break
+        echo "$comm runs" | stamp
+        while game && ours; do sleep 2; done
+        ours || break
+        echo "$comm has ended; waiting for it to come back while the RSI Launcher runs" | stamp
+        for i in $(seq 300); do game && break; launcher || break; ours || break; sleep 2; done
+    done
+    if ! ours; then echo "a newer launch follows these settings now: left to it" | stamp; exit 0; fi
+    for w in "${done_list[@]}"; do
+        case "$w" in prefetch) back=on ;; thp) back=off ;; esac
+        "$0" set "$w" "$back" 2>&1 | stamp
+    done
+    rm -f "$owner" ;;
+unit)
+    cat <<EOF
+# Myrddin's root helper (tools/sc-tune): one fixed action a start, as root.
+[Unit]
+Description=Myrddin: %i (CPU prefetchers or huge pages, for the time the game runs)
+
+[Service]
+Type=oneshot
+ExecStart=$helper %i
+NoNewPrivileges=yes
+ProtectHome=yes
+PrivateTmp=yes
+EOF
+    ;;
+rule)
+    cat <<EOF
+// Lets $(id -un) start Myrddin's root helper (prefetchers off/on, huge pages on/off) without a password,
+// from their own active local session (tools/sc-tune). Remove this file to undo it.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" && action.lookup("verb") == "start" &&
+        /^myrddin-tune@(prefetch-off|prefetch-on|thp-on|thp-off)\.service\$/.test(action.lookup("unit")) &&
+        subject.user == "$(id -un)" && subject.local && subject.active)
+        return polkit.Result.YES;
+});
+EOF
+    ;;
+*) sed -n '2,/^set -u/p' "$0" | sed '$d'; exit 1 ;;
+esac

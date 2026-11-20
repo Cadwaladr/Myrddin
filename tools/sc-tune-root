@@ -1,0 +1,175 @@
+#!/usr/bin/python3 -I
+# Myrddin's root helper for two settings of the machine that help Star Citizen in busy places. It is run
+# by systemd as root (the unit myrddin-tune@ACTION.service that tools/sc-tune writes out), never by hand
+# through sudo, and it takes nothing but one of four fixed words:
+#
+#   prefetch-off   the CPU's hardware prefetchers off (MSR 0x1A4 on every CPU; Intel Alder Lake and
+#                  Raptor Lake only). On the test machine the game ran 4 to 7 % faster in cities.
+#   prefetch-on    the register back as it was before prefetch-off
+#   thp-on         transparent huge pages for all memory, the kernel's collector at a moderate pace, so that
+#                  the game's memory (which Wine never asks to be put in huge pages) is packed into them
+#   thp-off        those settings back as they were before thp-on
+#
+# What it changed is kept in /run/myrddin-tune (gone at the next boot, like the settings themselves), and a
+# line of state there that anyone may read says what is set. Nothing of any program is read or written.
+# MYRDDIN_TUNE_FAKE=DIR (tests): the registers and settings are files in DIR, and DIR/run is /run/myrddin-tune.
+import glob, json, os, re, subprocess, sys, time
+
+FAKE = os.environ.get("MYRDDIN_TUNE_FAKE", "")
+RUN = os.path.join(FAKE, "run") if FAKE else "/run/myrddin-tune"
+THP = os.path.join(FAKE, "thp") if FAKE else "/sys/kernel/mm/transparent_hugepage"
+SYS = os.path.join(FAKE, "sys") if FAKE else "/sys/devices"
+MSR = 0x1A4
+# A set bit switches that prefetcher off (Intel SDM vol. 4): 0 L2 streamer, 1 L2 adjacent line (P-cores
+# only), 2 L1 next line, 3 L1 IP stride, 5 L2 AMP. No other bit of the register is touched.
+OFF_BITS = {"P": 0x2F, "E": 0x2D}
+MODELS = {0x97, 0x9A, 0xB7, 0xBA, 0xBF}   # Alder Lake S/P, Raptor Lake S/P/S-refresh
+THP_ON = [("enabled", "always"),
+          ("defrag", "defer+madvise"),            # a fault takes a free huge page; packing is left to the collector
+          ("khugepaged/max_ptes_none", "64"),     # blocks with at most 64 of 512 pages never touched (no waste)
+          ("khugepaged/pages_to_scan", "32768"),  # 128 MiB looked at a second
+          ("khugepaged/scan_sleep_millisecs", "1000"),
+          ("khugepaged/alloc_sleep_millisecs", "5000")]
+
+
+def say(text):
+    print(text, flush=True)
+
+
+def cpulist(text):
+    out = []
+    for part in text.strip().split(","):
+        if part:
+            a, _, b = part.partition("-")
+            out.extend(range(int(a), int(b or a) + 1))
+    return out
+
+
+def read(path):
+    with open(path) as f:
+        return f.read().strip()
+
+
+def write(path, text):
+    with open(path, "w") as f:
+        f.write(text)
+
+
+def current(name):
+    value = read(os.path.join(THP, name))
+    match = re.search(r"\[([^\]]+)\]", value)
+    return match[1] if match else value
+
+
+def state():
+    """What is set now, as this helper left it: one line anyone may read."""
+    parts = ["prefetch=" + ("off" if os.path.exists(os.path.join(RUN, "prefetch-before.json")) else "as-booted"),
+             "thp=" + ("on" if os.path.exists(os.path.join(RUN, "thp-before.json")) else "as-booted")]
+    write(os.path.join(RUN, "state"), " ".join(parts) + " " + time.strftime("%Y-%m-%dT%H:%M:%S") + "\n")
+    os.chmod(os.path.join(RUN, "state"), 0o644)
+
+
+class Prefetch:
+    def __init__(self):
+        cpus = cpulist(read(os.path.join(SYS, "system/cpu/online")))
+        try:
+            ecores = set(cpulist(read(os.path.join(SYS, "cpu_atom/cpus"))))
+        except OSError:
+            ecores = set()
+        self.kind = {c: ("E" if c in ecores else "P") for c in cpus}
+
+    def path(self, cpu):
+        return os.path.join(FAKE, f"msr-{cpu}") if FAKE else f"/dev/cpu/{cpu}/msr"
+
+    def why_not(self):
+        info = read(os.path.join(FAKE, "cpuinfo") if FAKE else "/proc/cpuinfo")
+        vendor = re.search(r"vendor_id\s*:\s*(\S+)", info)
+        family = re.search(r"cpu family\s*:\s*(\d+)", info)
+        model = re.search(r"^model\s*:\s*(\d+)", info, re.M)
+        if not (vendor and vendor[1] == "GenuineIntel" and family and family[1] == "6" and model and int(model[1]) in MODELS):
+            return "the prefetcher bits of this CPU are not known (Intel Alder Lake and Raptor Lake only)"
+        if not FAKE and not glob.glob("/dev/cpu/*/msr"):
+            subprocess.run(["/usr/sbin/modprobe", "msr"], check=False)
+            if not glob.glob("/dev/cpu/*/msr"):
+                return "the kernel's msr driver could not be loaded"
+        return None
+
+    def rd(self, cpu):
+        fd = os.open(self.path(cpu), os.O_RDONLY)
+        try:
+            return int.from_bytes(os.pread(fd, 8, MSR), "little")
+        finally:
+            os.close(fd)
+
+    def wr(self, cpu, value):
+        fd = os.open(self.path(cpu), os.O_WRONLY)
+        try:
+            os.pwrite(fd, value.to_bytes(8, "little"), MSR)
+        finally:
+            os.close(fd)
+
+
+def prefetch(off):
+    saved = os.path.join(RUN, "prefetch-before.json")
+    p = Prefetch()
+    why = p.why_not()
+    if why:
+        say("prefetchers left as they are: " + why)
+        return 1
+    if off:
+        if not os.path.exists(saved):   # (a second "off" keeps what was there before the first)
+            write(saved, json.dumps({str(c): p.rd(c) for c in p.kind}))
+        for c, k in p.kind.items():
+            p.wr(c, p.rd(c) | OFF_BITS[k])
+        say("prefetchers off: " + ", ".join(f"{k}-cores MSR 0x1A4 |= {OFF_BITS[k]:#x}" for k in sorted(set(p.kind.values()))))
+    else:
+        if not os.path.exists(saved):
+            say("prefetchers: nothing to put back")
+            return 0
+        before = {int(c): v for c, v in json.loads(read(saved)).items()}
+        for c, v in before.items():
+            if c in p.kind:
+                # (only the prefetcher bits go back; anything else in the register stays as it is now)
+                bits = OFF_BITS[p.kind[c]]
+                p.wr(c, (p.rd(c) & ~bits) | (v & bits))
+        os.remove(saved)
+        say("prefetchers back as they were")
+    return 0
+
+
+def thp(on):
+    saved = os.path.join(RUN, "thp-before.json")
+    if on:
+        if not os.path.exists(saved):
+            write(saved, json.dumps({name: current(name) for name, _ in THP_ON}))
+        for name, value in THP_ON:
+            write(os.path.join(THP, name), value)
+        say("huge pages on: " + ", ".join(f"{n}={v}" for n, v in THP_ON))
+    else:
+        if not os.path.exists(saved):
+            say("huge pages: nothing to put back")
+            return 0
+        for name, value in json.loads(read(saved)).items():
+            if any(name == n for n, _ in THP_ON):
+                write(os.path.join(THP, name), value)
+        os.remove(saved)
+        say("huge pages back as they were")
+    return 0
+
+
+def main():
+    actions = {"prefetch-off": lambda: prefetch(True), "prefetch-on": lambda: prefetch(False),
+               "thp-on": lambda: thp(True), "thp-off": lambda: thp(False)}
+    if len(sys.argv) != 2 or sys.argv[1] not in actions:
+        say("usage: sc-tune-root " + "|".join(actions))
+        return 2
+    if not FAKE and os.geteuid() != 0:
+        say("sc-tune-root runs as root, from its systemd unit (tools/sc-tune)")
+        return 2
+    os.makedirs(RUN, mode=0o755, exist_ok=True)
+    code = actions[sys.argv[1]]()
+    state()
+    return code
+
+
+sys.exit(main())

@@ -57,5 +57,6 @@ QtObject {
     readonly property string iconTerminal: "M4 5.5h16v13H4zM7.5 9.5l3 2.5-3 2.5M12.5 14.5H16"
     readonly property string iconSearch: "M10.5 4.5a6 6 0 1 0 0 12a6 6 0 0 0 0-12zM15 15l4.5 4.5"
     readonly property string iconLog: "M6 3.5h8.5L18.5 7.5V20.5H6zM14 3.5V8h4.5M9 12h6.5M9 15.5h6.5"
+    readonly property string iconLink: "M13.5 4.5h6v6M19.5 4.5l-8.5 8.5M18 14v4a1.5 1.5 0 0 1-1.5 1.5h-10A1.5 1.5 0 0 1 5 18V8a1.5 1.5 0 0 1 1.5-1.5h4"
     readonly property string iconTrash: "M5 7h14M9.5 7V4.5h5V7M7 7l.8 12.5h8.4L17 7M10 10.5v6M14 10.5v6"
 }

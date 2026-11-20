@@ -98,6 +98,7 @@ cp sc-turbo.conf.example sc-turbo.conf
   has the keyboard, so nothing is set up on the desktop; the game gets the key as well, so pick
   one it does not use
 - `SC_SCHED=lavd`: a sched_ext scheduler at every launch
+- `SC_PREFETCH=off`, `SC_THP=on`: the CPU's prefetchers off and huge pages on while the game runs
 - `SC_FG_MARKERS=0`: never move HUD elements
 - `SC_FG_KEEP_HUD=0`: the HUD is not kept apart from what is generated (`sc-turbo fg-hud on`
   switches that on in the running game)
@@ -113,7 +114,8 @@ cp sc-turbo.conf.example sc-turbo.conf
 The launcher window writes the same file: what its Options page sets is there under these names,
 and lines it does not know are kept as they are.
 
-What `SC_SCHED` and `SC_MANGOHUD` need is on the page [Optional extras](optional.md).
+What `SC_SCHED`, `SC_PREFETCH` and `SC_THP` need is on the page [Advanced performance
+tweaking](advanced-performance-tweaking.md), what `SC_MANGOHUD` needs on [Optional extras](optional.md).
 
 ## What the layer does
 

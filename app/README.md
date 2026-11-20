@@ -18,8 +18,9 @@ image's mount. `logs/` and `sc-turbo.conf` there are kept. The window's own choi
 `~/.config/myrddin/myrddin.conf`.
 
 - `src/backend.*`: everything the pages need from the system
+- `src/gameconsole.*`: the Console page: the game's process and its logs, read from outside it
 - `src/main.cpp`: the command line, and the window
-- `qml/`: the pages (Play, Setup, Options, Session, About, the first-start welcome) and their parts;
+- `qml/`: the pages (Play, Console, Setup, Options, About, the first-start welcome) and their parts;
   `Theme.qml` holds the colours, sizes, timings and icons
 - `assets/`: the icon and the Inter font (SIL OFL 1.1, `Inter-LICENSE.txt`)
 - `packaging/`: desktop entry, AppStream data, icon
