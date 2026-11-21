@@ -72,6 +72,25 @@ def tweaks():
             "prefetchers": next((w.split("=")[1] for w in state if w.startswith("prefetch=")), "as booted")}
 
 
+def game_state():
+    """How long the game has run and its memory, from /proc (status and meminfo; no smaps, nothing attached):
+    to see later whether samples late in a long session differ. The huge pages are the whole system's
+    (AnonHugePages), set against the game's own memory: an upper bound, near the truth once the game
+    holds most of the memory, above 100 in its first minutes."""
+    pid = subprocess.run(["pgrep", "-x", "StarCitizen.exe"], capture_output=True, text=True).stdout.split()
+    if not pid:
+        return {}
+    pid = pid[0]
+    seconds = subprocess.run(["ps", "-o", "etimes=", "-p", pid], capture_output=True, text=True).stdout.strip()
+    kb = lambda text, key: int(re.search(rf"^{key}:\s+(\d+)", text, re.M)[1]) if re.search(rf"^{key}:\s+(\d+)", text, re.M) else 0
+    status, meminfo = open(f"/proc/{pid}/status").read(), open("/proc/meminfo").read()
+    anon, huge = kb(status, "RssAnon"), kb(meminfo, "AnonHugePages")
+    return {"game_minutes": round(int(seconds) / 60.0, 1) if seconds.isdigit() else None,
+            "game_anon_gb": round(anon / 1048576, 1), "huge_pages_share": round(100.0 * huge / anon) if anon else None,
+            "available_gb": round(kb(meminfo, "MemAvailable") / 1048576, 1),
+            "swap_used_gb": round((kb(meminfo, "SwapTotal") - kb(meminfo, "SwapFree")) / 1048576, 1)}
+
+
 def game_up():
     return subprocess.run(["pgrep", "-x", "StarCitizen.exe"], capture_output=True).returncode == 0
 
@@ -163,7 +182,7 @@ def record(runtime, path, x, seconds, settle, args, place):
                       "session": int(re.search(r"fg-(\d+)\.log", path)[1]), "x": most, "seconds": 10 * len(part),
                       "mixed": any(w["x"] != most for w in part),
                       "place": place[0], "place_raw": place[1], "armistice_zone": place[2], "note": args.note,
-                      "tweaks": tweaks()}
+                      "tweaks": tweaks(), "game": game_state()}
             sample.update(summary(part))
             return sample
         time.sleep(1.0)
