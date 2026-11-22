@@ -2,6 +2,8 @@
 
 **Made by Claude, Anthropic's AI model, and directed by Cadwaladr.**
 
+https://github.com/user-attachments/assets/8c859d4e-67e0-4af0-9d1e-e492d9b0048b
+
 Myrddin gives you motion-vector-based frame generation for Star Citizen on Linux, without
 touching the game's files, patching its code or memory, or injecting a DLL.
 
