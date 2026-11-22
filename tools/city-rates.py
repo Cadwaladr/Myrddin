@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Frame rates per city, the table in the README, from the layer's logs and the game's own log:
 
-    tools/city-rates.py [PID ...]     (sessions, logs/fg/fg-PID.log; default: the last three)
+    tools/city-rates.py [PID | FILE ...]   (sessions: logs/fg/fg-PID.log, or a layer log anywhere, such
+                                          as the AppImage's in ~/.local/share/myrddin/runtime/logs/fg;
+                                          default: the last three in logs/fg)
 
-Only the time on foot in a city counts. The game's log says where the player is when it asks for
+Only the time on foot in a city or a space station counts. The game's log says where the player is when it asks for
 the inventory of a place, and when a hangar was granted and the armistice zone left or entered:
   spawned in the city   from a minute after that, until the zone is left, a hangar is granted or
                         a quantum target is chosen, which is the way out
@@ -24,7 +26,11 @@ import struct
 import sys
 
 HERE = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-CITIES = (("Orison", "Orison"), ("Lorville", "Lorville"), ("Levski", "Levski"), ("Area18", "Area 18"), ("NewBabbage", "New Babbage"))
+CITIES = (("Orison", "Orison"), ("Lorville", "Lorville"), ("Levski", "Levski"), ("Area18", "Area 18"), ("NewBabbage", "New Babbage"),
+          # the stations, by the names the game's log gives their inventories
+          ("RR_HUR_LEO", "Everus Harbor"), ("RR_CRU_LEO", "Seraphim Station"), ("RR_ARC_LEO", "Baijini Point"),
+          ("RR_MIC_LEO", "Port Tressler"), ("RR_CRU_L4", "CRU-L4 Shallow Fields Station"), ("RR_JP_StantonPyro", "Pyro Gateway"),
+          ("RR_JP_StantonMagnus", "Magnus Gateway"))
 STAT = re.compile(r"\s*([\d.]+) STAT x(\d) real=([\d.]+)/s generated=([\d.]+)/s shown=([\d.]+)/s")
 MARKS = (("Hangar Request Completed", "hangar"), ("Entering Armistice Zone", "enter"), ("Leaving Armistice Zone", "leave"))
 
@@ -37,11 +43,11 @@ def iowatch():
     return module
 
 
-def layer_lines(pid):
-    with open(os.path.join(HERE, "logs", "fg", f"THREADS-{pid}"), "rb") as f:
+def layer_lines(pid, folder):
+    with open(os.path.join(folder, f"THREADS-{pid}"), "rb") as f:
         start = struct.unpack_from("<8siId", f.read(32), 0)[3]
     lines = []
-    for line in open(os.path.join(HERE, "logs", "fg", f"fg-{pid}.log"), errors="replace"):
+    for line in open(os.path.join(folder, f"fg-{pid}.log"), errors="replace"):
         m = STAT.match(line)
         if m and float(m[3]) > 5.0 and float(m[4]) > 0.0:
             lines.append((start + float(m[1]), int(m[2]), float(m[3]), float(m[5])))
@@ -90,14 +96,15 @@ def stretches(places, marks, last):
 
 
 def main():
-    pids = sys.argv[1:]
-    if not pids:
-        logs = sorted(glob.glob(os.path.join(HERE, "logs", "fg", "fg-*.log")), key=os.path.getmtime)[-3:]
-        pids = [re.search(r"fg-(\d+)\.log", p)[1] for p in logs]
+    folder = os.path.join(HERE, "logs", "fg")
+    logs = [a if a.endswith(".log") else os.path.join(folder, f"fg-{a}.log") for a in sys.argv[1:]]
+    if not logs:
+        logs = sorted(glob.glob(os.path.join(folder, "fg-*.log")), key=os.path.getmtime)[-3:]
     io = iowatch()
     found = collections.defaultdict(list)
-    for pid in pids:
-        lines = layer_lines(pid)
+    for log in logs:
+        pid = re.search(r"fg-(\d+)\.log$", log)[1]
+        lines = layer_lines(pid, os.path.dirname(log))
         path = io.game_log_for(lines[0][0] - 10.0) if lines else None
         if not path:
             print(f"{pid}: no log of the game for this session")
@@ -106,7 +113,7 @@ def main():
         for city, start, stop in stretches(places, marks, lines[-1][0]):
             found[city] += [line for line in lines if start + 10.0 <= line[0] <= stop]
     tenth = lambda values: sorted(values)[int(0.1 * (len(values) - 1))]
-    print("| City | The game's own frames per second: typical (busy) | Shown with frame generation: typical (busy) |")
+    print("| Place | The game's own frames per second: typical (busy) | Shown with frame generation: typical (busy) |")
     print("|---|---|---|")
     for city, part in sorted(found.items(), key=lambda item: -len(item[1])):
         if len(part) < 6:

@@ -1,7 +1,7 @@
 # Quick start
 
-This page begins where the [Install guide](install.md) ends: the layer is built and in place, or
-you have the AppImage.
+This page begins where the [Install guide](install.md) ends: you have the AppImage, or Myrddin is
+built from source with the layer in place.
 
 ## Before the first launch
 
@@ -15,6 +15,9 @@ you have the AppImage.
   when the runner, NVAPI or the driver's DLSS libraries are missing.
 
 ## With the AppImage
+
+Download `Myrddin-x86_64.AppImage` from the
+[latest release](https://github.com/Cadwaladr/Myrddin/releases/latest), then:
 
 ```sh
 chmod +x Myrddin-x86_64.AppImage
@@ -31,9 +34,9 @@ After that the window has four pages:
   that multiplier whatever the game's frame rate. With Auto the layer picks the multiplier as the
   game's own rate changes, 2× at the least and no more than the highest multiplier set in Options
   (4× unless you change it; Options' "Experimental: 5× to 8×" lets it go up to 8×, from the next
-  launch: see [Experimental multipliers](experimental-multipliers.md)). "Performance" is Auto's: on, the game's own frames are never limited, which is the
-  fastest response; off (the default), they are limited so that every refresh of the display gets
-  a frame, a smoother picture with more latency. A change acts at once in a running game. The
+  launch: see [Experimental multipliers](experimental-multipliers.md)). By default Auto does not
+  limit the game's own frames, which is the fastest response. A change acts at once in a running
+  game. The
   overlay is MangoHud, Myrddin's own panel or none, and what is chosen is drawn with frame
   generation Off too; the panel is there from the start of the game, and Shift+7 in the game steps
   through it. "Run with logs" is the tab under the launch button. While the RSI Launcher or the game is up, the launch button says "Stop" under
@@ -43,13 +46,14 @@ After that the window has four pages:
   in the prefix, whether the game is set to DLSS, the graphics driver, the display), an entry in
   the application menu, a
   `myrddin` command for the terminal, and the launch as it is set, as a command to copy.
-- Options: display and refresh rate, the multiplier, the highest one Auto may pick and
-  "Performance" with what it does, the
+- Options: display and refresh rate, the multiplier, the highest one Auto may pick and "Limit
+  the game's own frame rate" (off by default; on, Auto limits the game's frames to an even part of
+  the display's rate so that every refresh gets a frame, with more latency), the
   performance overlay with the panel's corner and its key (click the key and press another to
   change it), how the HUD is treated in generated
   frames, the CPU scheduler, running with logs, and the reports `sc-turbo` can make. The
-  multiplier and the HUD and performance switches are kept for the next launch and also act at
-  once in a running game.
+  multiplier, the limit on the game's frame rate and the HUD and performance switches are kept
+  for the next launch and also act at once in a running game.
 - About: versions and licences.
 
 With "Run with logs" switched on (Play or Options), the window offers the session's log once the
@@ -60,7 +64,7 @@ from outside the game. Your home folder's name is not in it.
 The window is drawn in your desktop's own colours, its mark included: on KDE Plasma the colour
 scheme's, elsewhere light or dark as the desktop is set, with its accent colour where it has one.
 
-## From a checkout
+## Built from source
 
 ```sh
 ./sc-turbo gui            # a small launcher window

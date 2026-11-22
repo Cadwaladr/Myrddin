@@ -10,7 +10,7 @@ Vulkan, and Wine passes those calls on to the host's Vulkan. Myrddin is a Vulkan
 there, like MangoHud, but it also copies the motion vectors, the depth and the game's HUD layer,
 runs a modified FSR 3.1 frame interpolation on them, and presents the generated frames in the
 game's window between the real ones, with the HUD put over them sharp. NVIDIA GPUs only, with
-DLSS and Vulkan selected in the game.
+DLSS and Vulkan selected in the game (NVAPI is needed in the prefix).
 
 > [!WARNING]
 > Experimental, under active development, and tested on one setup only (see
@@ -22,19 +22,19 @@ DLSS and Vulkan selected in the game.
 
 You need an NVIDIA GPU and the game on a Wine runner with vkd3d-proton (see
 [Requirements](#requirements)). In the game, set the renderer to Vulkan and the upscaler to DLSS.
-Then build and launch:
+Then download `Myrddin-x86_64.AppImage` from the
+[latest release](https://github.com/Cadwaladr/Myrddin/releases/latest) and start it:
 
 ```sh
-git clone https://github.com/Cadwaladr/Myrddin.git
-cd Myrddin
-./build.sh install    # builds the layer and puts it in place
-./sc-turbo fg 4       # launch with frame generation, up to 4×
+chmod +x Myrddin-x86_64.AppImage
+./Myrddin-x86_64.AppImage
 ```
 
-`sc-turbo` starts the game with a copy of your launch script (by default the LUG Helper's, in
-`~/Games/star-citizen`) and never changes the script itself. The packages the build needs and
-the launcher window are in the [install guide](docs/install.md); the first launch is walked
-through in the [quick start guide](docs/quickstart.md).
+The first start asks where the game is (it looks where the LUG Helper puts it) and checks what a
+launch needs. Myrddin starts the game with a copy of your launch script (by default the LUG
+Helper's, in `~/Games/star-citizen`) and never changes the script itself. The first launch is
+walked through in the [quick start guide](docs/quickstart.md); what the AppImage needs from your
+system, and how to build Myrddin from source instead, are in the [install guide](docs/install.md).
 
 ## Features
 
@@ -47,28 +47,36 @@ through in the [quick start guide](docs/quickstart.md).
 - Even frame pacing, capped at the display's refresh rate.
 - A launcher window with the settings, the session's frame rates and Stop and Kill buttons, and
   the `sc-turbo` command line for everything the window does.
+- Your launch script is never altered: Myrddin starts the game with its own copy of it, with its
+  settings placed in the copy.
 - A frame rate overlay: MangoHud, or Myrddin's own panel (Shift+7 in the game).
 
 ## Frame rates
 
-On the test machine, on foot in the cities on 2026-11-19: 2560×1440 at 120 Hz, DLSS rendering at
-1280×720, frame generation up to 4×. Typical is the median of the ten-second averages, busy the
-slowest tenth of them.
+On the test machine, on foot in cities and space stations on 2026-11-19 and 20: 2560×1440 at
+120 Hz, DLSS rendering at 1280×720, frame generation up to 4×. Typical is the median of the
+ten-second averages, busy the slowest tenth of them.
 
-| City | The game's own frames per second, typical (busy) | Shown with frame generation, typical (busy) |
+| Place | The game's own frames per second, typical (busy) | Shown with frame generation, typical (busy) |
 |---|---|---|
 | New Babbage | 30 (26) | 116 (103) |
 | Lorville | 36 (29) | 117 (110) |
 | Orison | 29 (25) | 114 (92) |
+| Pyro Gateway | 31 (28) | 117 (109) |
+| CRU-L4 Shallow Fields Station | 40 (28) | 117 (109) |
+| Port Tressler | 24 (17) | 83 (59) |
+| Seraphim Station | 40 (38) | 119 (112) |
 
-Generated frames make motion smoother but delay every real frame: at 4×, with the game at 26 to
-29 frames a second, a real frame reached the display 75 to 77 ms after the game handed its
-inputs to DLSS. [Measurements](docs/measurements.md) has more sessions and where that time goes.
+Generated frames make motion smoother but delay every real frame. What Myrddin adds is the time
+it takes to generate the frames and the wait while the generated frames ahead of each real frame
+are shown, a wait every frame interpolation has: about 14 ms at 2× with the game near 60 frames a
+second, 34 to 37 ms at 4× with the game at 26 to 29. [Measurements](docs/measurements.md) has more
+sessions and the whole way from the game to the display.
 
 ## Requirements
 
-- An NVIDIA GPU, with Vulkan as the game's renderer and DLSS as its upscaler. AMD and Intel GPUs
-  are not supported.
+- An NVIDIA GPU, with Vulkan as the game's renderer and DLSS as its upscaler, and NVAPI in the
+  game's prefix. AMD and Intel GPUs are not supported.
 - Linux on x86_64, with the game under Wine on a runner that ships vkd3d-proton, such as the
   Star Citizen LUG's "experimental" runners.
 - Tested on one setup: Fedora Linux 44, kernel 7.3.4, KDE Plasma 6.8.3 on Wayland, an RTX 4070
@@ -79,7 +87,7 @@ inputs to DLSS. [Measurements](docs/measurements.md) has more sessions and where
 
 | Page | Contents |
 |---|---|
-| [Install guide](docs/install.md) | building from source, the launcher window, the AppImage |
+| [Install guide](docs/install.md) | the AppImage and what it needs, building from source |
 | [Quick start guide](docs/quickstart.md) | the first launch, the launcher window's pages, the first commands |
 | [Commands and settings](docs/usage.md) | every command, `sc-turbo.conf`, what the layer does in detail |
 | [Limitations](docs/limitations.md) | requirements, known faults, the tested configuration |

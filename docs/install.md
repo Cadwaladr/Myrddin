@@ -1,50 +1,16 @@
 # Install guide
 
-Myrddin runs from a checkout of this repository or as an AppImage, one file with a window. There
-is no download yet, so both begin with a build from source.
+Myrddin comes as an AppImage, one file with a window, on the
+[Releases](https://github.com/Cadwaladr/Myrddin/releases) page. It can also be built from source
+and run from the source folder.
 [Limitations](limitations.md#requirements-and-limitations) says what the GPU, the game and the
 Wine runner must be, and [Optional extras](optional.md#optional-dependencies) lists what is only
 needed for single features.
 
-## From a checkout
-
-Fedora package names. Other distributions have the same tools under other names.
-
-```sh
-sudo dnf install clang gcc cmake ninja-build glslang python3 \
-                 vulkan-headers vulkan-loader-devel wayland-devel wayland-protocols-devel
-
-git clone https://github.com/Cadwaladr/Myrddin.git
-cd Myrddin
-./build.sh            # AMD's library (once), both layers, the test program
-./build.sh install    # puts the new layer in place; not while the game runs
-```
-
-`build.sh` writes into `build/`, and regenerates a shader's header in `fg/` when you have changed
-its source. The Wayland packages are only needed for the test program. The tests
-(`tools/test-chain.sh`, `tools/fg-validate.sh`) run in a headless Weston and need `weston`,
-`python3-numpy` and `python3-pillow`.
-
-The small launcher window of a checkout (`./sc-turbo gui`) needs GTK 4, libadwaita and PyGObject
-(Fedora: `python3-gobject gtk4 libadwaita`).
-
 ## The AppImage
 
 `Myrddin-x86_64.AppImage` is one file with a window, `sc-turbo`, its tools and the layer.
-
-### Building it
-
-The window of the AppImage is a Qt 6 program in [`app/`](../app/README.md) (Qt 6.5 or later: `sudo
-dnf install qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg-devel`):
-
-```sh
-cmake -S app -B build/app -G Ninja && cmake --build build/app
-build/app/myrddin --runtime .    # the window, on the sc-turbo of this checkout
-```
-
-The AppImage itself is built in containers, with podman, by the scripts in
-[`appimage/`](../appimage/README.md): the layer once more so that it loads on any distribution,
-the window with Qt's official libraries, then the image and its tests.
+Download it from the [latest release](https://github.com/Cadwaladr/Myrddin/releases/latest).
 
 ### What it needs
 
@@ -58,7 +24,7 @@ the AppImage needs:
 - A desktop's usual libraries, on Wayland or X11: libglvnd (OpenGL, EGL), libX11 and libxcb,
   libwayland-client, fontconfig, FreeType, and the GPU driver's OpenGL. Qt, the window's font and
   everything else are inside.
-- `bash` and `python3` for `sc-turbo` and its tools, as from a checkout.
+- `bash` and `python3` for `sc-turbo` and its tools.
 
 ### Starting it
 
@@ -78,6 +44,42 @@ across updates, and a newer AppImage replaces the rest only while the game and t
 are closed. The window's own choices are in `~/.config/myrddin/myrddin.conf`. It has been tested
 on the machine under [Tested configuration](limitations.md#tested-configuration), and in Ubuntu
 22.04, Debian 12, Fedora and Arch containers without a game.
+
+## Building from source
+
+Fedora package names. Other distributions have the same tools under other names.
+
+```sh
+sudo dnf install clang gcc cmake ninja-build glslang python3 \
+                 vulkan-headers vulkan-loader-devel wayland-devel wayland-protocols-devel
+
+git clone https://github.com/Cadwaladr/Myrddin.git
+cd Myrddin
+./build.sh            # AMD's library (once), both layers, the test program
+./build.sh install    # puts the new layer in place; not while the game runs
+```
+
+`build.sh` writes into `build/`, and regenerates a shader's header in `fg/` when you have changed
+its source. The Wayland packages are only needed for the test program. The tests
+(`tools/test-chain.sh`, `tools/fg-validate.sh`) run in a headless Weston and need `weston`,
+`python3-numpy` and `python3-pillow`.
+
+The small launcher window of the source folder (`./sc-turbo gui`) needs GTK 4, libadwaita and
+PyGObject (Fedora: `python3-gobject gtk4 libadwaita`).
+
+### Building the AppImage
+
+The window of the AppImage is a Qt 6 program in [`app/`](../app/README.md) (Qt 6.5 or later: `sudo
+dnf install qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg-devel`):
+
+```sh
+cmake -S app -B build/app -G Ninja && cmake --build build/app
+build/app/myrddin --runtime .    # the window, on the sc-turbo of the source folder
+```
+
+The AppImage itself is built in containers, with podman, by the scripts in
+[`appimage/`](../appimage/README.md): the layer once more so that it loads on any distribution,
+the window with Qt's official libraries, then the image and its tests.
 
 ## Where the game is
 

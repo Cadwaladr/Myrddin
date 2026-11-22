@@ -130,7 +130,7 @@ scxctl get                       # what runs now
 scxctl stop                      # afterwards: the kernel's own again
 ```
 
-In a checkout of the project, `tools/sc-ab-sched.sh lavd` compares a scheduler with the kernel's
+In the source folder, `tools/sc-ab-sched.sh lavd` compares a scheduler with the kernel's
 own in a running game (hold a steady view for about four minutes).
 
 ## The CPU's hardware prefetchers
@@ -224,7 +224,7 @@ read kernel bug reports and changes nothing else.
 
 To repeat the measurement, read `tools/base-ab-root.py` (the part that needs root: it switches on
 request and puts everything back when it ends) and `tools/base-ab.py` (which reads the layer's
-frame-rate lines and asks for the switches in time with them), in a checkout of the project; both
+frame-rate lines and asks for the switches in time with them), in the source folder; both
 say at their top how they are run.
 
 ## Huge pages
