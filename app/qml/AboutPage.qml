@@ -27,7 +27,7 @@ PageView {
             lineHeight: 1.35
             color: Theme.dim
             font.pixelSize: 13
-            text: "Frame generation for Star Citizen on Linux, as a Vulkan layer on the host side of Wine. It does not change the game's files, its code or its memory, and sends it no input."
+            text: "Frame generation for Star Citizen on Linux. It works between the game and the graphics driver, does not change the game's files, its code or its memory, and sends it no input."
         }
     }
 

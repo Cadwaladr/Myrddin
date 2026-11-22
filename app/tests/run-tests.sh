@@ -71,7 +71,7 @@ window idle 2500 --page play --test-eval 'backend.setMode("off"); backend.setOve
     --test-eval '@900 console.warn("overlay words: " + (function find(o) { if (!o) return ""; if (typeof o.few === "string" && typeof o.generating === "boolean") return o.few; for (var i = 0; i < o.children.length; i++) { var r = find(o.children[i]); if (r) return r } return "" })(window.contentItem))' || bad "the window ran"
 sleep 0.5
 has "$rt/calls.log" "fg 4 panel off watch" "Off with Myrddin's panel: the layer loaded with nothing generated, up to the limit when switched on (\"fg 4 panel off\")"
-grep -q 'overlay words: The game.s rate and pacing; nothing is generated' "$work/last.err" && ok "and Play says what the panel shows then" || bad "and Play says what the panel shows then ($(grep -o 'overlay words: .*' "$work/last.err"))"
+grep -q 'overlay words: The game.s rate and frame timing; no frames added' "$work/last.err" && ok "and Play says what the panel shows then" || bad "and Play says what the panel shows then ($(grep -o 'overlay words: .*' "$work/last.err"))"
 fresh
 fresh
 window idle 2500 --test-eval 'backend.panel(backend.conf.fill === false ? "tl" : "tr")' || bad "the window ran"

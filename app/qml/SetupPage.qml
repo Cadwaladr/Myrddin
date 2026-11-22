@@ -21,7 +21,7 @@ PageView {
 
     Card {
         heading: "Where the game is"
-        note: "The Wine prefix Star Citizen is installed in: the folder that holds sc-launch.sh. The LUG Helper puts it in ~/Games/star-citizen unless told otherwise."
+        note: "The folder Star Citizen is installed in, the one with sc-launch.sh in it. The LUG Helper uses ~/Games/star-citizen unless you chose another."
 
         RowLayout {
             Layout.fillWidth: true

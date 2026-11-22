@@ -5,7 +5,7 @@ PageView {
     id: page
     signal go(string page)
     title: "Star Citizen"
-    subtitle: "Frames generated between the game's own, from its motion vectors and depth."
+    subtitle: "Adds frames between the game's own, worked out from how the picture moves."
     headerExtra: StatePill {}
 
     readonly property bool live: backend.state === "running" && backend.layerSession
@@ -111,10 +111,10 @@ PageView {
                     color: Theme.faint
                     font.pixelSize: 12
                     lineHeight: 1.2
-                    text: backend.stopping ? (backend.canKill ? "Something of the session is still there. Kill ends it at once." : "The game and the RSI Launcher are asked to end.")
+                    text: backend.stopping ? (backend.canKill ? "Part of the session is still running. Kill ends it at once." : "Asking the game and the RSI Launcher to close.")
                         : backend.state === "launcher" ? "Start the game from the RSI Launcher."
-                        : backend.state === "running" ? (page.live ? "The game runs with Myrddin's layer: a change here acts at once." : "This session does not write to Myrddin's log: it was started without the layer, or not from here. Generated frames come with a launch from this window.")
-                        : backend.prefs.watch ? "Opens the RSI Launcher. The session's log is offered when the game has closed." : "Opens the RSI Launcher."
+                        : backend.state === "running" ? (page.live ? "Myrddin is running with the game: changes here apply straight away." : "This window cannot follow this game: it was started without Myrddin, or from somewhere else. Launch from here to add frames.")
+                        : backend.prefs.watch ? "Opens the RSI Launcher. The session's log is offered when the game closes." : "Opens the RSI Launcher."
                 }
             }
         }
@@ -124,7 +124,7 @@ PageView {
     Card {
         heading: "Session"
         note: page.live ? "Frame rates: a point every ten seconds, the last fifteen minutes."
-                        : backend.layerProblem !== "" ? "" : "Frame rates appear here while the game runs with the layer."
+                        : backend.layerProblem !== "" ? "" : "Frame rates appear here while the game runs with Myrddin."
         // (the last session's layer log says something went wrong: a report of it, in place of the line above)
         RowLayout {
             visible: !page.live && backend.layerProblem !== ""

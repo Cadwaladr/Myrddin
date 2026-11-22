@@ -277,7 +277,7 @@ ApplicationWindow {
                 spacing: 14
                 Text { text: "Before you play"; color: Theme.text; font.pixelSize: 18; font.weight: Font.DemiBold }
                 Text {
-                    text: "Settings of this desktop that are known to get in the way of the game. Each can be fixed here; Options, under \"Known problems\", can undo every fix."
+                    text: "Desktop settings known to cause trouble in the game. Each can be fixed here, and Options, under \"Known problems\", can undo every fix."
                     color: Theme.dim
                     font.pixelSize: 13
                     lineHeight: 1.25
@@ -332,7 +332,7 @@ ApplicationWindow {
                 spacing: 12
                 Text { text: "Report a bug"; color: Theme.text; font.pixelSize: 18; font.weight: Font.DemiBold }
                 Text {
-                    text: "The report is copied. It holds what the layer's log of the last session says went wrong, the settings and the system's versions; the names of your home folder, the game's folder and this computer are left out.\n\n1. Open a new issue on GitHub (a GitHub account is needed).\n2. Paste the report into it.\n3. Say what you were doing when it happened and what you saw. A screenshot helps."
+                    text: "The report is copied. It says what went wrong in your last session, with your settings and system versions; your folder and computer names are left out.\n\n1. Open a new issue on GitHub (you need a GitHub account).\n2. Paste the report into it.\n3. Say what you were doing and what you saw. A screenshot helps."
                     color: Theme.dim
                     font.pixelSize: 13
                     lineHeight: 1.25

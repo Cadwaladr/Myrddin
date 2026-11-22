@@ -142,7 +142,7 @@ window, it is named.
   about, or a limit of your own
 - `SC_LAUNCH_COPY=0`: start the launch script itself, with nothing placed
 - `SC_MONITOR`, `SC_FG_TARGET`: the display the game should use and its refresh rate, where the
-  desktop cannot be asked (the window: Options, "Display" and "Refresh rate to fill")
+  desktop cannot be asked (the window: Options, "Display" and "Refresh rate")
 - `SC_MANGOHUD=1`: MangoHud at every launch, with frame generation or without (the window's
   overlay choice "MangoHud")
 - `SC_FG_PANEL_KEY=Ctrl+F9`: the key that steps the layer's panel in the game, in place of
@@ -160,8 +160,8 @@ window, it is named.
 - `export SC_FG_GAPFILL=0`, `export SC_FG_PICTURES=0`, `export SC_FG_BOOST=1`: the layer's own
   settings, which it reads from the environment, so they are exported: frames that come without
   the HUD are not bridged, the map is moved like the markers, the GPU's speed is held up (the
-  window: Options, "Bridge frames that come without the HUD", "Leave the map at the game's rate"
-  and "Hold the GPU's speed up")
+  window: Options, "Smooth over frames without the HUD", "Leave the map at the game's rate"
+  and "Keep the GPU's speed up")
 - `SC_FG_FILL=1`: with a multiplier that follows the game's rate, the game's own frames are
   limited to an even part of the display's rate and the layer takes the fewest generated frames
   that fill the display, so that every refresh gets a frame, with more latency. Without the line

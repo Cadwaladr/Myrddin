@@ -193,7 +193,7 @@ at (the display's rate divided by the multiplier: 30 at 4× on 120 Hz).
 ### Automated by Myrddin
 
 Set up [Myrddin's root helper](#myrddins-root-helper-for-the-prefetchers-and-huge-pages) and
-switch on "CPU prefetchers off while playing" in Options (`SC_PREFETCH=off` in `sc-turbo.conf`).
+switch on "Disable CPU prefetchers" in Options (`SC_PREFETCH=off` in `sc-turbo.conf`).
 A launch then switches the prefetchers off and puts the register back as it was once the game has
 closed. The helper works on Intel's 12th to 14th generation Core CPUs (Alder Lake and Raptor Lake)
 only; on others it leaves the register alone and says why. Like `wrmsr` below, it needs a kernel
@@ -267,7 +267,7 @@ huge pages would need a change in Wine, which is not part of Myrddin.
 ### Automated by Myrddin
 
 Set up [Myrddin's root helper](#myrddins-root-helper-for-the-prefetchers-and-huge-pages) and
-switch on "Huge pages while playing" in Options (`SC_THP=on` in `sc-turbo.conf`). A launch then
+switch on "Huge pages" in Options (`SC_THP=on` in `sc-turbo.conf`). A launch then
 sets the settings below and puts them back as they were once the game has closed. Memory that is
 in huge pages by then stays so, which does no harm.
 

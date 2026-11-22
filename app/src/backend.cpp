@@ -578,7 +578,7 @@ void Backend::setMode(const QString& mode) {
     emit commandChanged();
     if (m_state != QStringLiteral("running") && m_state != QStringLiteral("launcher")) return;
     if (!m_layerSession) {
-        if (mode != QStringLiteral("off")) emit said(QStringLiteral("This session was not started with the layer from here: generated frames come with the next launch"));
+        if (mode != QStringLiteral("off")) emit said(QStringLiteral("This game was not started with Myrddin from here: frames are added from the next launch"));
         return;
     }
     QString answer;
@@ -709,7 +709,7 @@ void Backend::kill() {
 void Backend::showLaunchLog() {
     m_toolBusy = false;
     m_toolTitle = QStringLiteral("The last launch");
-    m_toolOutput = m_launchLog.isEmpty() ? QStringLiteral("Nothing yet: what sc-turbo says when it starts the game shows up here (the display it found, the runner, anything in the way).") : m_launchLog;
+    m_toolOutput = m_launchLog.isEmpty() ? QStringLiteral("Nothing yet: the launch messages show up here (the display found, the runner, anything in the way).") : m_launchLog;
     emit toolChanged();
 }
 
@@ -1075,7 +1075,7 @@ void Backend::refreshChecks() {
         if (!QDir(root).exists())
             list << check(QStringLiteral("runner"), QStringLiteral("Wine runner"), QStringLiteral("%1 is named in the launch script but is not there").arg(name), QStringLiteral("warn"));
         else if (dll.exists() && dll.size() < 1000000)
-            list << check(QStringLiteral("runner"), QStringLiteral("Wine runner"), QStringLiteral("%1 has no vkd3d-proton, and frame generation needs it: the game will show no generated frames. The LUG's experimental runners have it.").arg(name), QStringLiteral("warn"));
+            list << check(QStringLiteral("runner"), QStringLiteral("Wine runner"), QStringLiteral("%1 has no vkd3d-proton, which frame generation needs: the game will show no added frames. Pick one of the LUG's experimental runners in the LUG Helper.").arg(name), QStringLiteral("warn"));
         else
             list << check(QStringLiteral("runner"), QStringLiteral("Wine runner"), dll.exists() ? QStringLiteral("%1, with vkd3d-proton").arg(name) : name, QStringLiteral("ok"));
     }
@@ -1087,21 +1087,21 @@ void Backend::refreshChecks() {
     if (QDir(system32).exists()) {
         const bool nvapi = QFileInfo::exists(system32 + QStringLiteral("/nvapi64.dll"));
         const bool ngx = QFileInfo::exists(system32 + QStringLiteral("/nvngx.dll")) && QFileInfo::exists(system32 + QStringLiteral("/_nvngx.dll"));
-        const QString title = QStringLiteral("NVAPI in the prefix");
-        const QString without = QStringLiteral(" the game offers no DLSS, and without DLSS there are no generated frames.");
+        const QString title = QStringLiteral("DLSS support (NVAPI)");
+        const QString without = QStringLiteral(" the game cannot offer DLSS, which Myrddin needs.");
         if (!nvapi)
-            list << check(QStringLiteral("nvapi"), title, QStringLiteral("The prefix has no nvapi64.dll (dxvk-nvapi). The LUG Helper installs it. Without it") + without, QStringLiteral("warn"));
+            list << check(QStringLiteral("nvapi"), title, QStringLiteral("Missing from the game folder (nvapi64.dll, from dxvk-nvapi); the LUG Helper installs it. Without it") + without, QStringLiteral("warn"));
         else if (!ngx)
-            list << check(QStringLiteral("nvapi"), title, QStringLiteral("nvapi64.dll is there, but NVIDIA's NGX libraries (nvngx.dll and _nvngx.dll) are not. A LUG runner links them in from the driver. Without them") + without, QStringLiteral("warn"));
+            list << check(QStringLiteral("nvapi"), title, QStringLiteral("Part of it is missing (NVIDIA's nvngx.dll files); the LUG's runners bring them. Without them") + without, QStringLiteral("warn"));
         else
-            list << check(QStringLiteral("nvapi"), title, QStringLiteral("nvapi64.dll (dxvk-nvapi) and NVIDIA's NGX libraries are there: the game can offer DLSS"), QStringLiteral("ok"));
+            list << check(QStringLiteral("nvapi"), title, QStringLiteral("Installed: the game can offer DLSS"), QStringLiteral("ok"));
     }
 
     // the graphics driver
     const QString nvidia = readAll(QStringLiteral("/proc/driver/nvidia/version"));
     static const QRegularExpression driverVersion(QStringLiteral(R"(Kernel Module.*?\s(\d+\.\d+(?:\.\d+)?)\s)"));
     if (nvidia.isEmpty()) {
-        list << check(QStringLiteral("gpu"), QStringLiteral("Graphics driver"), QStringLiteral("No NVIDIA driver is loaded. The layer takes DLSS's inputs, which only NVIDIA's driver hands out: without it the game runs, but without generated frames."), QStringLiteral("warn"));
+        list << check(QStringLiteral("gpu"), QStringLiteral("Graphics driver"), QStringLiteral("No NVIDIA driver is loaded. Myrddin works with DLSS, which needs NVIDIA's driver: the game runs, but without added frames."), QStringLiteral("warn"));
     } else {
         const auto match = driverVersion.match(nvidia);
         list << check(QStringLiteral("gpu"), QStringLiteral("Graphics driver"), QStringLiteral("NVIDIA %1").arg(match.hasMatch() ? match.captured(1) : QStringLiteral("driver")), QStringLiteral("ok"));
@@ -1121,7 +1121,7 @@ void Backend::refreshChecks() {
     // successfully" and frames were generated. The game writes the file when a setting is changed.
     {
         const QString title = QStringLiteral("DLSS in the game");
-        const QString why = QStringLiteral(" Its motion vectors and depth are what the generated frames are made from.");
+        const QString why = QStringLiteral(" Myrddin needs DLSS to make its frames.");
         const QString games = (prefix.isEmpty() ? QFileInfo(script).absolutePath() : prefix) + QStringLiteral("/drive_c/Program Files/Roberts Space Industries/StarCitizen");
         QFileInfo newest;
         const QFileInfoList channels = QDir(games).entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
@@ -1132,7 +1132,7 @@ void Backend::refreshChecks() {
             }
         }
         if (!newest.exists()) {
-            list << check(QStringLiteral("dlss"), title, QStringLiteral("Not known yet: the game keeps its settings in a file that is written once it has run. Set the upscaler to DLSS there (Options > Graphics).") + why, QStringLiteral("info"));
+            list << check(QStringLiteral("dlss"), title, QStringLiteral("Not known yet: the game saves its settings once it has run. Set the upscaler to DLSS in the game (Options > Graphics).") + why, QStringLiteral("info"));
         } else {
             static const QRegularExpression technique(QStringLiteral(R"re(<Attr\s+name="UpscalingTechnique"\s+value="([^"]*)")re"));
             const auto match = technique.match(readAll(newest.absoluteFilePath()));
@@ -1166,7 +1166,7 @@ void Backend::refreshChecks() {
                     m_displays << line.section(QStringLiteral("<-"), 0, 0).simplified();
             }
             if (m_displays.isEmpty())
-                m_asyncChecks << check(QStringLiteral("display"), QStringLiteral("Display"), QStringLiteral("This desktop does not say which display is the main one (KDE Plasma and COSMIC do). The runner picks the largest; name one in Options if that is wrong."), QStringLiteral("info"), {}, QStringLiteral("options"));
+                m_asyncChecks << check(QStringLiteral("display"), QStringLiteral("Display"), QStringLiteral("This desktop does not say which display is the main one, so Wine picks the largest. If that is the wrong one, pick yours in Options."), QStringLiteral("info"), {}, QStringLiteral("options"));
             else
                 m_asyncChecks << check(QStringLiteral("display"), QStringLiteral("Display"), m_displayChoice.isEmpty() ? m_displays.first() : m_displayChoice, QStringLiteral("ok"));
             finishChecks();
@@ -1188,15 +1188,15 @@ void Backend::refreshChecks() {
             if (code != 0) {
                 // (a runtime older than this window has no "others": nothing to say)
             } else if (kept.isEmpty() && forced.isEmpty() && gamescope.isEmpty()) {
-                m_asyncChecks << check(QStringLiteral("others"), title, QStringLiteral("None asked for in the launch script or the environment"), QStringLiteral("ok"));
+                m_asyncChecks << check(QStringLiteral("others"), title, QStringLiteral("None set for the game"), QStringLiteral("ok"));
             } else {
                 QStringList text;
                 if (!kept.isEmpty())
-                    text << kept.join(QStringLiteral("; ")) + QStringLiteral(". A launch with frame generation keeps them off and says so; frame generation Off leaves them as they are.");
+                    text << kept.join(QStringLiteral("; ")) + QStringLiteral(". Myrddin keeps them off while it adds frames; with frame generation Off they work as before.");
                 if (!forced.isEmpty())
-                    text << QStringLiteral("%1 names another frame generator or limiter, which keeps it on whatever Myrddin sets: take it out there.").arg(forced.join(QStringLiteral(" and ")));
+                    text << QStringLiteral("%1 forces another frame generator or limiter on, and Myrddin cannot switch it off: remove it there.").arg(forced.join(QStringLiteral(" and ")));
                 if (!gamescope.isEmpty())
-                    text << QStringLiteral("The game is started inside gamescope (%1), which paces every frame itself: untested with Myrddin.").arg(gamescope.first());
+                    text << QStringLiteral("The game is started inside gamescope (%1), which Myrddin has not been tested with.").arg(gamescope.first());
                 m_asyncChecks << check(QStringLiteral("others"), title, text.join(QLatin1Char(' ')), QStringLiteral("warn"));
             }
             finishChecks();
@@ -1207,7 +1207,7 @@ void Backend::refreshChecks() {
             m_schedAllowed = code == 0;
             const QString wanted = m_conf.value(QStringLiteral("scheduler")).toString();
             if (!wanted.isEmpty() && !m_schedAllowed)
-                m_asyncChecks << check(QStringLiteral("sched"), QStringLiteral("CPU scheduler"), QStringLiteral("scx_%1 is chosen in Options, but it is not set up on this computer: it needs scx-scheds, scx-tools and a polkit rule. The game runs with the kernel's own scheduler. Options, Advanced performance tweaks, links to how it is set up.").arg(wanted), QStringLiteral("warn"), {}, QStringLiteral("options"));
+                m_asyncChecks << check(QStringLiteral("sched"), QStringLiteral("CPU scheduler"), QStringLiteral("scx_%1 is picked in Options but not set up on this computer, so the game runs with the system default. Options, Advanced performance tweaks, links to the setup.").arg(wanted), QStringLiteral("warn"), {}, QStringLiteral("options"));
             finishChecks();
         });
         ++m_pendingChecks;
@@ -1215,7 +1215,7 @@ void Backend::refreshChecks() {
             if (round != m_checkRound) return;
             m_tuneAllowed = code == 0;
             if ((m_conf.value(QStringLiteral("prefetchOff")).toBool() || m_conf.value(QStringLiteral("hugePages")).toBool()) && !m_tuneAllowed)
-                m_asyncChecks << check(QStringLiteral("tune"), QStringLiteral("Prefetchers and huge pages"), QStringLiteral("Switched on in Options, but Myrddin's root helper is not set up on this computer, so a launch leaves the computer as it is. Options, Advanced performance tweaks, links to how it is set up."), QStringLiteral("warn"), {}, QStringLiteral("options"));
+                m_asyncChecks << check(QStringLiteral("tune"), QStringLiteral("CPU prefetchers and huge pages"), QStringLiteral("Switched on in Options but not set up on this computer, so they change nothing yet. Options, Advanced performance tweaks, links to the setup."), QStringLiteral("warn"), {}, QStringLiteral("options"));
             finishChecks();
         });
     }
@@ -1225,7 +1225,7 @@ void Backend::refreshChecks() {
                    [this, round](int, const QString& output) {
                        if (round != m_checkRound) return;
                        if (output.trimmed() != QStringLiteral("false"))
-                           m_asyncChecks << check(QStringLiteral("kde-tearing"), QStringLiteral("Screen tearing (KDE Plasma)"), QStringLiteral("KWin lets fullscreen windows tear. If the picture tears in the game, switch that off."), QStringLiteral("info"), QStringLiteral("Switch off"));
+                           m_asyncChecks << check(QStringLiteral("kde-tearing"), QStringLiteral("Screen tearing (KDE Plasma)"), QStringLiteral("Full-screen games are allowed to tear. If the picture tears in the game, switch this off."), QStringLiteral("info"), QStringLiteral("Switch off"));
                        finishChecks();
                    });
         if (processUp("plasma-keyboard")) {
@@ -1234,7 +1234,7 @@ void Backend::refreshChecks() {
                        [this, round](int, const QString& output) {
                            if (round != m_checkRound) return;
                            if (output.trimmed() != QStringLiteral("false"))
-                               m_asyncChecks << check(QStringLiteral("kde-diacritics"), QStringLiteral("Held keys (KDE Plasma)"), QStringLiteral("The on-screen keyboard offers accented letters when a key is held. While it does, held A, S, D, C and E do not reach the game as keys."), QStringLiteral("warn"), QStringLiteral("Switch off"));
+                               m_asyncChecks << check(QStringLiteral("kde-diacritics"), QStringLiteral("Held keys (KDE Plasma)"), QStringLiteral("Holding a key brings up accented letters, so held keys such as A, S, D, C and E do not reach the game."), QStringLiteral("warn"), QStringLiteral("Switch off"));
                            finishChecks();
                        });
         }
@@ -1524,7 +1524,7 @@ void Backend::makeBugReport() {
 
     const QString log = newestLayerLog();
     if (log.isEmpty()) {
-        out << QString() << QStringLiteral("No log of the layer was found: the game has not run with frame generation yet.");
+        out << QString() << QStringLiteral("No Myrddin log was found: the game has not run with frame generation yet.");
     } else {
         const QStringList lines = readAll(log, 8000000).split(QLatin1Char('\n'));
         QList<int> problems;
@@ -1625,11 +1625,11 @@ void Backend::findProblems() {
             entry.insert(QStringLiteral("fixed"), fixed);
             if (id == QStringLiteral("accents")) {
                 entry.insert(QStringLiteral("title"), QStringLiteral("Accented letters on held keys (KDE Plasma)"));
-                entry.insert(QStringLiteral("detail"), present ? QStringLiteral("Plasma offers accented letters when a key is held, and keeps such keys from the game: W can move the character while A, S and D do not. The fix switches that offer off.")
-                                                               : QStringLiteral("Switched off by Myrddin. Undo switches the offer of accented letters on again."));
+                entry.insert(QStringLiteral("detail"), present ? QStringLiteral("Holding a key brings up accented letters and keeps the key from the game: W moves the character, but A, S and D do not. Fix switches this off.")
+                                                               : QStringLiteral("Switched off by Myrddin. Undo switches accented letters on again."));
             } else {
                 entry.insert(QStringLiteral("title"), QStringLiteral("Tearing allowed (KDE Plasma)"));
-                entry.insert(QStringLiteral("detail"), present ? QStringLiteral("KWin lets full-screen games tear: the picture, generated frames included, shows tear lines. Allowing it takes about 11 ms off the way to the display. The fix switches tearing off.")
+                entry.insert(QStringLiteral("detail"), present ? QStringLiteral("Full-screen games are allowed to tear, so the picture can show tear lines. Tearing gets frames to the screen a little sooner. Fix switches it off.")
                                                                : QStringLiteral("Switched off by Myrddin. Undo allows tearing again."));
             }
             if (present || fixed) list << entry;

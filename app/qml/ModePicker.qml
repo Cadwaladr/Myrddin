@@ -12,17 +12,17 @@ ColumnLayout {
     readonly property string mode: backend.prefs.mode
     readonly property int limit: backend.prefs.limit
     readonly property var held: ({
-        "2": "One generated frame between every two of the game's, whatever its frame rate. The game's own rate is kept to half the display's at the most.",
-        "3": "Two generated frames between every two of the game's, whatever its frame rate. The game's own rate is kept to a third of the display's at the most.",
-        "4": "Three generated frames between every two of the game's, whatever its frame rate. The game's own rate is kept to a quarter of the display's at the most."
+        "2": "Adds one frame between each two of the game's, at any frame rate. The game's own rate is held to half your display's at most.",
+        "3": "Adds two frames between each two of the game's, at any frame rate. The game's own rate is held to a third of your display's at most.",
+        "4": "Adds three frames between each two of the game's, at any frame rate. The game's own rate is held to a quarter of your display's at most."
     })
     readonly property var count: ({ "2": "one generated frame", "3": "two generated frames", "4": "three generated frames" })
-    readonly property string few: mode === "off" ? (live ? "Generation is off: the game shows its own frames." : "The game as it is, without Myrddin's layers.")
-        : mode === "auto" ? (limit === 2 ? "2×, and none while the game alone is near the display's rate."
+    readonly property string few: mode === "off" ? (live ? "Generation is off: the game shows its own frames." : "The game as it is, without Myrddin.")
+        : mode === "auto" ? (limit === 2 ? "2×, or none when the game is close to your display's rate."
                                          : "Follows the game's frame rate, from 2× up to " + limit + "×.")
         : "Always " + mode + "×: " + count[mode] + " for each of the game's."
-    readonly property string words: mode === "off" ? (live ? "Generation is off: the game shows its own frames." : "The game as it is, with none of Myrddin's layers loaded.")
-        : mode === "auto" ? (limit === 2 ? "Myrddin generates one frame between every two of the game's, and none while the game alone is near the display's rate."
+    readonly property string words: mode === "off" ? (live ? "Generation is off: the game shows its own frames." : "The game as it is, without Myrddin.")
+        : mode === "auto" ? (limit === 2 ? "Myrddin adds one frame between each two of the game's, or none when the game is close to your display's rate."
                                          : "Myrddin picks the multiplier as the game's own rate changes, from 2× up to " + limit + "×.")
         : held[mode]
     spacing: brief ? 10 : 12
@@ -45,7 +45,7 @@ ColumnLayout {
     }
     Text {
         id: explain
-        text: root.brief ? root.few : root.words + (root.live ? " A change acts at once in the running game." : "")
+        text: root.brief ? root.few : root.words + (root.live ? " A change applies straight away in the running game." : "")
         color: Theme.dim
         font.pixelSize: 14
         lineHeight: 1.2

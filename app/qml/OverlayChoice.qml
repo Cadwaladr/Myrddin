@@ -9,14 +9,14 @@ Choice {
     // game's own rate, and Myrddin's panel comes with the layer loaded and nothing generated)
     readonly property bool generating: backend.prefs.mode !== "off"
     readonly property string words: which === "mangohud" ? (!backend.mangohudInstalled ? "MangoHud is not installed on this system: the game starts without it."
-                                                           : generating ? "Its frame rate counts every frame that is shown, generated ones too."
+                                                           : generating ? "Counts every frame you see, generated ones included."
                                                            : "With frame generation Off it shows the game's own frame rate.")
-                                  : which === "panel" ? (generating ? "Myrddin's own readout: the shown rate, the game's rate, pacing."
-                                                        : "Myrddin's own readout. With frame generation Off the layer is loaded to draw it and generates nothing; generation can be switched on in the running game.")
+                                  : which === "panel" ? (generating ? "Myrddin's own readout: the frame rate you see, the game's own rate and frame timing."
+                                                        : "Myrddin's own readout. With frame generation Off it shows the game's own rate, and generation can still be switched on while you play.")
                                   : "Nothing is drawn over the game."
     readonly property string few: which === "mangohud" ? (!backend.mangohudInstalled ? "Not installed: the game starts without it."
-                                                         : generating ? "Counts every shown frame, generated ones too." : "The game's own frame rate.")
-                                : which === "panel" ? (generating ? "The shown rate, the game's rate and pacing." : "The game's rate and pacing; nothing is generated.")
+                                                         : generating ? "Counts every frame you see, generated ones too." : "The game's own frame rate.")
+                                : which === "panel" ? (generating ? "Both frame rates and frame timing." : "The game's rate and frame timing; no frames added.")
                                 : "Nothing is drawn over the game."
     implicitWidth: 220
     model: {

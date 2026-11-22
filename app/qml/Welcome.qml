@@ -61,7 +61,7 @@ Rectangle {
                     lineHeight: 1.35
                     color: Theme.dim
                     font.pixelSize: 14
-                    text: "Myrddin starts Star Citizen with a Vulkan layer that puts generated frames between the game's own. It needs an NVIDIA GPU, DLSS chosen as the upscaler in the game, and one of the LUG's experimental runners."
+                    text: "Myrddin starts Star Citizen and adds generated frames between the game's own. It needs an NVIDIA graphics card, DLSS chosen as the upscaler in the game's settings, and one of the LUG's experimental runners."
                 }
                 Text {
                     Layout.fillWidth: true

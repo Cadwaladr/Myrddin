@@ -10,7 +10,7 @@ for.
 ./sc-turbo fg-where     # the last session: where each thread was inside the layer
 ```
 
-In the window: Options, Reports, "Where the layer stands".
+In the window: Options, Reports, "Frame generation status".
 
 A line in the log that begins with `lock` means a thread waited more than a second for one of
 the layer's locks, or that a lock left behind by a call that never returned was taken over.
