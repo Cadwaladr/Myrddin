@@ -16,7 +16,9 @@ run on.
   pictures alone. It has been tried in the test program only, not in the game.
 - Linux, with the game running under Wine. The layer works on the host side of Wine and relies
   on Wine passing the game's Vulkan calls through to the host. The game has only been played
-  with Wine's Wayland driver. X11 and Proton are untested.
+  with Wine's Wayland driver, on the LUG's runners. With Proton's Wayland driver the RSI Launcher
+  could not be used, so the game never started: GE-Proton 11-1 showed no launcher window at all,
+  Proton-CachyOS 11 a white one (tried on 2026-11-22). X11, and Proton on X11, are untested.
 - A runner that ships vkd3d-proton. The Star Citizen LUG's "experimental" runners
   (`lug-wine-tkg-experimental-wayland-git-…`) do. On them the game renders with Vulkan but
   presents its finished frames through Direct3D 12, and that is the swapchain Myrddin puts the
