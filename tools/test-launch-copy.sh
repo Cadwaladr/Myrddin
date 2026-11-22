@@ -24,7 +24,7 @@ runner() {   # runner NAME
            DXVK_NVAPI_DRS_NGX_DLSS_SR_OVERRIDE DXVK_NVAPI_DRS_NGX_DLSS_RR_OVERRIDE DXVK_NVAPI_DRS_NGX_DLSS_FG_OVERRIDE \\
            DXVK_NVAPI_DRS_NGX_DLSS_SR_OVERRIDE_RENDER_PRESET_SELECTION DXVK_NVAPI_DRS_NGX_DLSS_RR_OVERRIDE_RENDER_PRESET_SELECTION \\
            DXVK_NVAPI_SET_NGX_DEBUG_OPTIONS VK_LOADER_LAYERS_ENABLE VK_VRAM_REPORT_LIMIT_HEAP_SIZE VK_VRAM_REPORT_LIMIT_DEVICE_ID \\
-           VK_ADD_LAYER_PATH; do
+           VK_ADD_LAYER_PATH NVPRESENT_ENABLE_SMOOTH_MOTION DISABLE_LAYER_NV_PRESENT_1 DISABLE_LSFGVK DISABLE_LSFG VKD3D_FRAME_RATE DXVK_FRAME_RATE MANGOHUD_CONFIG; do
       [ -n "\${!v+set}" ] && echo "\$v=\${!v}"
   done; } > "\$WINEPREFIX/called"
 exit 0
@@ -372,6 +372,50 @@ if [ -x "$here/sc-turbo" ] && grep -q 'sc-launch-copy' "$here/sc-turbo"; then
     [ $rc = 0 ] && ! alive $p4 && grep -q "ended: 1 processes of the prefix" "$work/turbo.txt"; check $? "kill ends the one that stayed"
     alive $d1 && alive $d2; check $? "and still nothing else"
     kill $d1 $d2 2>/dev/null; wait 2>/dev/null
+    echo "12. Other frame generators and frame limits: kept off at a launch with frame generation, and named"
+    script "$work/sc-launch.sh" 'export NVPRESENT_ENABLE_SMOOTH_MOTION=1
+export VKD3D_FRAME_RATE="60"
+# export DXVK_FRAME_RATE=30   (a comment: not counted)'
+    before="$(sha256sum < "$work/sc-launch.sh")"
+    turbo ./sc-turbo fg 2
+    called "DISABLE_LAYER_NV_PRESENT_1=1" && called "VKD3D_FRAME_RATE=0" && called "SC_FG=1"; check $? "Smooth Motion is kept off and vkd3d-proton's limit set to none, the script's own lines notwithstanding"
+    grep -q "NOTE: NVIDIA Smooth Motion (the driver's frame generation) is switched on in the launch script" "$work/turbo.txt" \
+        && grep -q "NOTE: VKD3D_FRAME_RATE=60 (a frame-rate limit) is set in the launch script" "$work/turbo.txt"; check $? "and both are named before the launch"
+    ! grep -q "DXVK_FRAME_RATE" "$work/turbo.txt" && ! grep -q "^DXVK_FRAME_RATE" "$work/prefix/called"; check $? "a limit in a comment is not counted"
+    [ "$(sha256sum < "$work/sc-launch.sh")" = "$before" ]; check $? "the launch script itself is left as it was"
+    turbo ./sc-turbo run
+    ! grep -q "^DISABLE_LAYER_NV_PRESENT_1" "$work/prefix/called" && called "VKD3D_FRAME_RATE=60" && ! grep -q "Smooth Motion" "$work/turbo.txt"; check $? "without frame generation (\"run\", the window's Off) both stay as the script sets them"
+    turbo ./sc-turbo others
+    grep -qx "generator	NVIDIA Smooth Motion (the driver's frame generation)	the launch script" "$work/turbo.txt" \
+        && grep -qx "limiter	VKD3D_FRAME_RATE=60 (a frame-rate limit)	the launch script" "$work/turbo.txt"; check $? "\"others\" lists them for the window"
+    turbo env SC_LAUNCH_COPY=0 ./sc-turbo fg 2
+    called "DISABLE_LAYER_NV_PRESENT_1=1" && called "VKD3D_FRAME_RATE=60" && grep -q "without a copy of the launch script (SC_LAUNCH_COPY=0) it stays" "$work/turbo.txt"; check $? "without a copy: Smooth Motion still off, the script's limit stays, and that is said"
+    script "$work/sc-launch.sh" ""
+    mkdir -p "$work/home/.config/lsfg-vk"; printf 'version = 2\n[[profile]]\nname = "sc"\nactive_in = ["StarCitizen.exe"]\nmultiplier = 2\n' > "$work/home/.config/lsfg-vk/conf.toml"
+    turbo ./sc-turbo others
+    grep -qx "generator	lsfg-vk (Lossless Scaling's frame generation)	~/.config/lsfg-vk/conf.toml (a profile for Star Citizen)" "$work/turbo.txt"; check $? "lsfg-vk set up for the game in its own settings is found"
+    turbo ./sc-turbo fg 2
+    called "DISABLE_LSFGVK=1" && called "DISABLE_LSFG=1" && grep -q "NOTE: lsfg-vk (Lossless Scaling's frame generation) is switched on in ~/.config/lsfg-vk/conf.toml" "$work/turbo.txt"; check $? "and kept off at a launch with frame generation (both its versions), and named"
+    printf 'version = 2\n[[profile]]\nname = "other"\nactive_in = ["ocarina.exe"]\n' > "$work/home/.config/lsfg-vk/conf.toml"
+    turbo ./sc-turbo others
+    [ ! -s "$work/turbo.txt" ]; check $? "lsfg-vk set up for other games only, and a script that asks for nothing: nothing listed"
+    turbo env NVPRESENT_ENABLE_SMOOTH_MOTION=1 ./sc-turbo others
+    grep -qx "generator	NVIDIA Smooth Motion (the driver's frame generation)	the environment" "$work/turbo.txt"; check $? "Smooth Motion from the environment is found as well"
+    turbo env NVPRESENT_ENABLE_SMOOTH_MOTION=0 ./sc-turbo others
+    [ ! -s "$work/turbo.txt" ]; check $? "NVPRESENT_ENABLE_SMOOTH_MOTION=0 does not switch it on: not listed"
+    turbo env VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation:VK_LAYER_NV_present ./sc-turbo others
+    grep -qx "forced	VK_INSTANCE_LAYERS	the environment" "$work/turbo.txt"; check $? "a layer list that forces one of them on is named"
+    turbo env VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation ./sc-turbo others
+    [ ! -s "$work/turbo.txt" ]; check $? "a layer list without them is not"
+    turbo ./sc-turbo fg 2
+    called "MANGOHUD_CONFIG=read_cfg,fps_limit=0"; check $? "MangoHud's own limit is none at a launch with frame generation, its settings file still read"
+    turbo env MANGOHUD_CONFIG=fps_only ./sc-turbo fg 2
+    called "MANGOHUD_CONFIG=fps_only,fps_limit=0"; check $? "a MANGOHUD_CONFIG of the user's own gets the limit added at its end"
+    turbo ./sc-turbo run
+    ! grep -q "^MANGOHUD_CONFIG" "$work/prefix/called"; check $? "\"run\" leaves MangoHud's settings alone"
+    script "$work/sc-launch.sh" 'export NVPRESENT_ENABLE_SMOOTH_MOTION=1'
+    turbo ./sc-turbo fg 2
+    called "NVPRESENT_ENABLE_SMOOTH_MOTION=0" && called "DISABLE_LAYER_NV_PRESENT_1=1"; check $? "Smooth Motion asked for in the script: the copy also sets its own switch to 0"
 fi
 
 echo

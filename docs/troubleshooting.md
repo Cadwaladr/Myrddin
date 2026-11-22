@@ -14,8 +14,10 @@ In the window: Options, Reports, "Where the layer stands".
 
 A line in the log that begins with `lock` means a thread waited more than a second for one of
 the layer's locks, or that a lock left behind by a call that never returned was taken over.
-Both, with the output of `fg-where`, are what a bug report needs. Frame generation Off (on the
-window's Play page, or `./sc-turbo fg-off`) tells you whether the layer is involved at all.
+Both, with the output of `fg-where`, are what a bug report needs. The window's "Report a bug"
+(Options, "Logs and reports", and on the Play page when the last session's log has a problem in
+it) puts them together and opens a new issue on GitHub. Frame generation Off (on the window's
+Play page, or `./sc-turbo fg-off`) tells you whether the layer is involved at all.
 
 ## Only some keys act in the game (KDE Plasma)
 
@@ -23,7 +25,8 @@ Seen on Plasma 6.8: W moved the character and A, S and D did not, while all of t
 the chat. Plasma's on-screen keyboard service offers accented letters when a physical key is
 held, and it holds those keys back from any program that takes text input. Wine's Wayland driver
 always takes text input, so the letters that have accents arrive as text. `sc-turbo` says so at
-launch when it finds the option on. To switch it off:
+launch when it finds the option on, and the window offers to switch it off when it starts
+(Options, "Known problems", can undo that). From a terminal:
 
 ```sh
 kwriteconfig6 --file plasmakeyboardrc --group General --key diacriticsPopupEnabled --type bool --notify false
@@ -32,7 +35,8 @@ kwriteconfig6 --file plasmakeyboardrc --group General --key diacriticsPopupEnabl
 ## The picture tears (KDE Plasma)
 
 KWin lets fullscreen windows tear by default. On Plasma 6.8 the game's picture tore, generated
-frames included, until that was switched off. `sc-turbo` says so at launch:
+frames included, until that was switched off. `sc-turbo` says so at launch, and the window offers
+to switch it off when it starts (Options, "Known problems", can undo that). From a terminal:
 
 ```sh
 kwriteconfig6 --file kwinrc --group Compositing --key AllowTearing --type bool false

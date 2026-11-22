@@ -35,6 +35,7 @@ These go further:
 ./sc-turbo stop                  # end the session: the game, the RSI Launcher, the rest of the prefix
 ./sc-turbo kill                  #   the same without asking, for a session that "stop" did not end
 ./sc-turbo displays              # the displays, the one the game takes and its refresh rate
+./sc-turbo others                # other frame generators and frame limits your setup asks for
 ./sc-turbo fg-watch              # the session's log at a glance
 ./sc-turbo fg-where              # after a freeze: what each thread was doing inside the layer
 ./sc-turbo                       # every command, with the switches for tuning and diagnosis
@@ -72,16 +73,41 @@ script or your environment has not set it:
 - "DLSS 4": NVIDIA's updater, which fetches the current DLSS from NVIDIA into the prefix, and
   dxvk-nvapi's override that makes the game use it, with its newest preset, in place of the DLSS
   the game came with. That is for the picture, not for the frame rate.
-  `SC_DLSS_OVERRIDE=0` leaves it out.
+  `SC_DLSS_OVERRIDE=0` leaves it out (the window: Options, "DLSS 4").
 - A limit on the graphics memory the game is told about, the wiki's remedy for frame drops when
   the card's memory runs out: 9216 MiB on a 12 GB card, 8192 on 10, 6144 on 8, 4096 on 6, 2048
   on 4, and larger cards are left alone. It works through Mesa's Vulkan layer
-  `VK_LAYER_MESA_vram_report_limit` (package `vulkan-mesa-layers` or similar). Fedora has no
-  package for it, and `tools/build-vram-layer.sh` builds it into `build/vram-limit` there.
-  `SC_VRAM_LIMIT=off` leaves it out. The card and its memory are asked of `nvidia-smi`: an 11 GB
-  card gets the 10 GB figure, 9 GB the 8 GB one and so on. Where `nvidia-smi` cannot name the
-  card, no limit is set and the launch says so. With several NVIDIA cards of different kinds the
-  limit is for the first one `nvidia-smi` names, and the launch says that too.
+  `VK_LAYER_MESA_vram_report_limit`, which the AppImage carries. Of the distributions, Arch has it
+  (package `vulkan-mesa-layers`); Fedora, Debian and Ubuntu do not package it, and
+  `tools/build-vram-layer.sh` builds it into `build/vram-limit` for a source folder.
+  `SC_VRAM_LIMIT=off` leaves it out (the window: Options, "Graphics memory limit"). The card
+  and its memory are asked of `nvidia-smi`: an 11 GB card gets the 10 GB figure, 9 GB the 8 GB
+  one and so on. Where `nvidia-smi` cannot name the card, no limit is set and the launch says so.
+  With several NVIDIA cards of different kinds the limit is for the first one `nvidia-smi` names,
+  and the launch says that too.
+
+### Other frame generators and frame limits
+
+A second frame generator would work on the frames Myrddin presents, generated ones included, and
+a frame limit would hold the game's frames or every frame that goes out. At a launch with frame
+generation, `sc-turbo` keeps them off and names each one your launch script or your environment
+asks for:
+
+- NVIDIA Smooth Motion (`NVPRESENT_ENABLE_SMOOTH_MOTION=1`), lsfg-vk (Lossless Scaling's frame
+  generation, both its 1.x and 2.x versions, also when its own settings name the game),
+  libstrangle and LatencyFleX are switched off with the Vulkan loader's switch for each, which
+  wins over the one that switches it on.
+- `VKD3D_FRAME_RATE`, `DXVK_FRAME_RATE` and `MANGOHUD_FPS_LIMIT` are set to 0, none, in the copy.
+- MangoHud's own `fps_limit` is none at every launch with frame generation, with the rest of its
+  settings as they are (`MANGOHUD_CONFIG=read_cfg,fps_limit=0`).
+- A Vulkan layer list (`VK_INSTANCE_LAYERS`, `VK_LOADER_LAYERS_ENABLE`, `VK_LOADER_LAYERS_ALLOW`)
+  that names one of them keeps it on whatever `sc-turbo` sets: the launch says so.
+- gamescope paces every frame itself and cannot be switched off from inside: the launch says so.
+
+`./sc-turbo others` lists what it finds, and the window's system check shows it. "Off" on the
+window's Play page (`./sc-turbo run`) starts the game without Myrddin's layer and leaves all of
+these as you set them. For a limit on the game's own frame rate, use Options, "Limit the game's
+own frame rate".
 
 Without a copy, your script is started as it is, with none of the settings above placed in it,
 in two cases: when no copy of it can be made (it is not a shell script, or it looks for its files
@@ -190,9 +216,9 @@ setting](experimental-multipliers.md)).
   flickering where their vectors are wrong.
 - Real and generated frames are spaced evenly and capped at the display's refresh rate.
 - With `./sc-turbo fg 3 hud`, MangoHud sits below the layer and counts every frame that goes out.
-  Keep MangoHud's own `fps_limit` off, or it holds the layer's frames back. The layer also has a
-  small panel of its own (shown rate, the game's own rate, a pacing graph) when you ask for it
-  at launch; Shift+7 in the game steps through it.
+  Its own `fps_limit` would hold the layer's frames back, so a launch sets it to none. The layer
+  also has a small panel of its own (shown rate, the game's own rate, a pacing graph) when you
+  ask for it at launch; Shift+7 in the game steps through it.
 
 Around the layer there is a launcher window, an optional CPU scheduler for the time the game
 runs, and tools for measuring: two settings compared within one session (`sc-turbo fg-ab`), the

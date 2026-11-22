@@ -252,6 +252,106 @@ ApplicationWindow {
         }
     }
 
+    // Known problems, at the start: settings of this desktop that are known to get in the way, each with its fix
+    // (Options, "Known problems", has the same and the undo)
+    Rectangle {
+        id: problemsNote
+        anchors.fill: parent
+        color: Theme.scrim
+        visible: backend.problemsOffer && !welcome.shown && backend.bugReport === ""
+        MouseArea { anchors.fill: parent }   // (the page behind takes no clicks while it is up)
+        Rectangle {
+            anchors.centerIn: parent
+            width: Math.min(640, parent.width - 80)
+            height: problemsColumn.implicitHeight + 44
+            radius: Theme.radius
+            color: Theme.card
+            border.width: 1
+            border.color: Theme.accent
+            ColumnLayout {
+                id: problemsColumn
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: 22
+                spacing: 14
+                Text { text: "Before you play"; color: Theme.text; font.pixelSize: 18; font.weight: Font.DemiBold }
+                Text {
+                    text: "Settings of this desktop that are known to get in the way of the game. Each can be fixed here; Options, under \"Known problems\", can undo every fix."
+                    color: Theme.dim
+                    font.pixelSize: 13
+                    lineHeight: 1.25
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                }
+                Repeater {
+                    model: backend.problems.filter((p) => p.present)
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 14
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 3
+                            Text { text: modelData.title; color: Theme.text; font.pixelSize: 14; font.weight: Font.Medium; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                            Text { text: modelData.detail; color: Theme.dim; font.pixelSize: 13; lineHeight: 1.2; wrapMode: Text.WordWrap; Layout.fillWidth: true }
+                        }
+                        ActionButton { text: "Fix"; onClicked: backend.fixProblem(modelData.id) }
+                    }
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Item { Layout.fillWidth: true }
+                    ActionButton { kind: "quiet"; text: "Leave them as they are"; onClicked: backend.leaveProblems() }
+                }
+            }
+        }
+    }
+
+    // "Report a bug": the report is made and copied; where it goes
+    Rectangle {
+        id: reportNote
+        anchors.fill: parent
+        color: Theme.scrim
+        // (out of the way while the report is being read)
+        visible: backend.bugReport !== "" && backend.toolTitle !== "Bug report"
+        MouseArea { anchors.fill: parent }
+        Rectangle {
+            anchors.centerIn: parent
+            width: Math.min(600, parent.width - 80)
+            height: reportColumn.implicitHeight + 44
+            radius: Theme.radius
+            color: Theme.card
+            border.width: 1
+            border.color: Theme.accent
+            ColumnLayout {
+                id: reportColumn
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: 22
+                spacing: 12
+                Text { text: "Report a bug"; color: Theme.text; font.pixelSize: 18; font.weight: Font.DemiBold }
+                Text {
+                    text: "The report is copied. It holds what the layer's log of the last session says went wrong, the settings and the system's versions; the names of your home folder, the game's folder and this computer are left out.\n\n1. Open a new issue on GitHub (a GitHub account is needed).\n2. Paste the report into it.\n3. Say what you were doing when it happened and what you saw. A screenshot helps."
+                    color: Theme.dim
+                    font.pixelSize: 13
+                    lineHeight: 1.25
+                    wrapMode: Text.WordWrap
+                    Layout.fillWidth: true
+                }
+                Text { text: backend.tidyPath(backend.bugReport); color: Theme.faint; font.pixelSize: 12; elide: Text.ElideMiddle; Layout.fillWidth: true }
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: 10
+                    ActionButton { text: "Open GitHub"; icon: Theme.iconLink; onClicked: backend.openLink(backend.issuesPage) }
+                    ActionButton { text: "Read it"; icon: Theme.iconLog; onClicked: backend.readBugReport() }
+                    ActionButton { text: "Show the folder"; icon: Theme.iconFolder; onClicked: backend.openFolder("reports") }
+                    ActionButton { kind: "quiet"; text: "Close"; onClicked: backend.closeBugReport() }
+                }
+            }
+        }
+    }
+
     Welcome {
         id: welcome
         shown: startPage === "welcome" || (startPage === "" && !backend.prefs.welcomed)

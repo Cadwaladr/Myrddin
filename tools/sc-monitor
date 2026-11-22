@@ -12,10 +12,11 @@ layer; sc-turbo asks for both at every launch. In this order:
     1. SC_MONITOR=NAME, if that display is on
     2. the display the desktop has as primary: KDE Plasma (kscreen-doctor: priority 1) or
        COSMIC (cosmic-randr: "Xwayland primary"), whichever is running
-    3. the one with the highest refresh rate; of several, the one with the most pixels
+    3. the one with the highest refresh rate; of several, the one with the most pixels (niri,
+       read with `niri msg --json outputs`, has no primary display: always this)
 
-    tools/sc-monitor         the name; nothing when the displays cannot be read (neither
-                             desktop's tool answers) or with SC_MONITOR=off: the runner then picks
+    tools/sc-monitor         the name; nothing when the displays cannot be read (no desktop's
+                             tool answers) or with SC_MONITOR=off: the runner then picks
     tools/sc-monitor rate    that display's refresh rate, Hz
     tools/sc-monitor show    all displays, the choice and why
 """
@@ -78,11 +79,43 @@ def cosmic_displays():
     return sorted(found, key=lambda d: d["name"]) # (cosmic-randr's order changes from call to call)
 
 
+def niri_displays():
+    """The displays that are on, from `niri msg --json outputs` (niri): a map from each display's
+    name to its modes, the index of the current one (none while it is off) and where it is."""
+    if not os.environ.get("NIRI_SOCKET"):
+        return []
+    try:
+        text = subprocess.run(["niri", "msg", "--json", "outputs"], capture_output=True, text=True, timeout=5).stdout
+        outputs = json.loads(text)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+    found = []
+    for name, o in (outputs.items() if isinstance(outputs, dict) else []):
+        modes, index, logical = o.get("modes") or [], o.get("current_mode"), o.get("logical")
+        if not isinstance(index, int) or not 0 <= index < len(modes) or not logical:
+            continue
+        mode = modes[index]
+        found.append({
+            "name": o.get("name") or name,
+            "width": int(mode["width"]),
+            "height": int(mode["height"]),
+            "rate": int(mode.get("refresh_rate", 0)) / 1000,
+            "primary": False,
+            "place": f"{logical.get('x', '?')},{logical.get('y', '?')}",
+            "scale": float(logical.get("scale", 1.0)),
+            "what": f"{o.get('make', '')} {o.get('model', '')}".strip(),
+        })
+    return sorted(found, key=lambda d: d["name"])
+
+
 def displays():
     """The displays that are on and the desktop that told: the running desktop's tool first."""
-    readers = [("KDE Plasma", kde_displays), ("COSMIC", cosmic_displays)]
-    if "COSMIC" in os.environ.get("XDG_CURRENT_DESKTOP", "").upper():
-        readers.reverse()
+    readers = [("KDE Plasma", kde_displays), ("COSMIC", cosmic_displays), ("niri", niri_displays)]
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").upper()
+    first = next((r for r in readers if r[0].split()[0].upper() in desktop), None)
+    if first:
+        readers.remove(first)
+        readers.insert(0, first)
     for desktop, read in readers:
         found = read()
         if found:
@@ -105,7 +138,7 @@ def choose(found, desktop):
             return d, missing + f"{desktop}'s primary display"
     if found:
         return max(found, key=lambda d: (d["rate"], d["width"] * d["height"])), missing + "the highest refresh rate"
-    return None, missing + "the displays could not be read (kscreen-doctor, cosmic-randr): left to the runner"
+    return None, missing + "the displays could not be read (kscreen-doctor, cosmic-randr, niri msg): left to the runner"
 
 
 def main():

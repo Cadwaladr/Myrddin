@@ -32,6 +32,7 @@ fg-watch) printf '%s\n' "  time  mult  game  shown  p50   p99" "  10 s  x4    30
 latency)  printf '%s\n' "x4: game frame to display 41.5 ms (the game's frame 33.1, generation 4.2, wait for the display 4.2)" ;;
 check)    printf '%s\n' "== ntsync ==" "in use by the game (pid 1234)" ;;
 iowatch)  printf '%s\n' "io-1234.csv: 46 minutes" "GPU memory: 10.0 GB at the most" "(asked with: $*; home: $HOME/Games)" ;;
+others)   [ -n "${FAKE_OTHERS:-}" ] && printf '%b\n' "$FAKE_OTHERS"; exit 0 ;;
 "")       echo "usage"; exit 1 ;;
 *)        echo "$1: done" ;;
 esac

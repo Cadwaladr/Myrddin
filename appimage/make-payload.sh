@@ -71,17 +71,15 @@ cat > "$new/THIRD-PARTY.md" <<'EOF'
 Myrddin is free software under the GNU General Public License, version 3 or later (`LICENSE`).
 The frame generation from the game's motion vectors is Myrddin's own implementation. The approach,
 building AMD's FSR 3 frame interpolation from its sources on Linux and giving it a game's own depth
-and motion vectors with a HUD-free picture, was found in a fork of the PS5 emulator KytyPS5
+and motion vectors with a HUD-free picture, comes from a fork of the PS5 emulator KytyPS5
 (https://github.com/chenxiao07/KytyPS5, pull requests #117 and #118 by Bios2000). It served as a
-guide; none of its code, which is GPL-2.0-only, is in Myrddin. What was first written for the
-authors' own modified build of Lichii, an emulator made to run Nintendo Switch 2 games, and
-carried over is in the second row. The frame-generation layer, `build/fg/libsc_fg.so`, contains
-this code and data from elsewhere:
+guide; none of its code, which is GPL-2.0-only, is in Myrddin. The frame-generation layer,
+`build/fg/libsc_fg.so`, contains this code and data from elsewhere:
 
 | Component | Where it is | Licence | Text |
 |---|---|---|---|
-| AMD FidelityFX SDK 1.1.4 (frame interpolation, optical flow), Copyright (C) 2024 Advanced Micro Devices, Inc., with our changes that yield several generated frames per pair | linked into `libsc_fg.so` | MIT | `licenses/FidelityFX-SDK-MIT.txt` |
-| Our Linux build recipe of the SDK, its compatibility header and swapchain stub, first written for our build of Lichii; the files carry the notice of the project they were written in, Copyright 2026 Eden Emulator Project | linked into `libsc_fg.so` | GPL-3.0-or-later | `LICENSE` |
+| AMD FidelityFX SDK 1.1.4 (frame interpolation, optical flow), Copyright (C) 2024 Advanced Micro Devices, Inc., changed to yield several generated frames per pair | linked into `libsc_fg.so` | MIT | `licenses/FidelityFX-SDK-MIT.txt` |
+| The Linux build recipe of the SDK, its compatibility header and swapchain stub; the files carry the notice Copyright 2026 Eden Emulator Project | linked into `libsc_fg.so` | GPL-3.0-or-later | `LICENSE` |
 | Adwaita Sans (the performance panel's letters, as a glyph atlas), Copyright the Inter Project Authors, Renzhi Li, Jamie Gravendeel, Florian Müllner | compiled into `libsc_fg.so` | SIL Open Font License 1.1 | `licenses/AdwaitaSans-OFL-1.1.txt` |
 | GNU C++ library (libstdc++) and helper routines of GCC's runtime library (libgcc), Copyright Free Software Foundation, Inc. | linked statically into `libsc_fg.so` (and libgcc's into `libsc_probe.so`) so that they need no C++ library of the system; the unwinder is the system's `libgcc_s.so.1` | GPL-3.0 with the GCC Runtime Library Exception 3.1 | `LICENSE`, `licenses/GCC-RUNTIME-LIBRARY-EXCEPTION-3.1.txt` |
 | Khronos Vulkan headers 1.4.341 | used when compiling (types and constants) | Apache-2.0 OR MIT | not required for compiled use |
@@ -97,8 +95,8 @@ A library of its own, not part of the layer above:
 `build/vram-limit/VERSION` names the Mesa release it was built from.
 
 Star Citizen is a trademark of Cloud Imperium Games; FidelityFX and FSR are AMD's; DLSS is
-NVIDIA's; Nintendo Switch is Nintendo's; PS5 is Sony Interactive Entertainment's. Myrddin is an
-independent project: none of them is affiliated with it or endorses it.
+NVIDIA's; PS5 is Sony Interactive Entertainment's. Myrddin is an independent project: none of
+them is affiliated with it or endorses it.
 EOF
 
 rm -rf "$payload"; mv "$new" "$payload"

@@ -529,5 +529,115 @@ sleep 0.5
 has "$rt/calls.log" "xdg-open https://github.com/Cadwaladr/Myrddin/blob/main/docs/experimental-multipliers.md" "the switch's link opens Experimental multipliers on GitHub"
 
 echo
+echo "22. the LUG wiki's NVIDIA settings: DLSS 4 and the graphics memory limit"
+fresh; : > "$rt/calls.log"
+window idle 2500 --test-eval '@1500 backend.panel(backend.conf.dlss4 && backend.conf.vramLimit ? "tl" : "tr")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel tl" "both are on at first"
+window idle 2500 --test-eval 'backend.setOption("dlss4", false); backend.setOption("vramLimit", false)' || bad "the window ran"
+sleep 0.5
+has "$rt/sc-turbo.conf" "SC_DLSS_OVERRIDE=0" "DLSS 4 off: SC_DLSS_OVERRIDE=0 in sc-turbo.conf"
+has "$rt/sc-turbo.conf" "SC_VRAM_LIMIT=off" "the limit off: SC_VRAM_LIMIT=off in sc-turbo.conf"
+window idle 2500 --test-eval 'backend.setOption("dlss4", true); backend.setOption("vramLimit", true)' || bad "the window ran"
+sleep 0.5
+hasnt "$rt/sc-turbo.conf" "SC_DLSS_OVERRIDE" "on again: nothing written for DLSS 4"
+hasnt "$rt/sc-turbo.conf" "SC_VRAM_LIMIT" "on again: nothing written for the limit"
+echo "SC_VRAM_LIMIT=7000" >> "$rt/sc-turbo.conf"; : > "$rt/calls.log"
+window idle 2500 --test-eval '@1500 backend.panel(backend.conf.vramLimit ? "bl" : "br"); backend.setOption("dlss4", false)' || bad "the window ran"
+sleep 0.5
+has "$rt/calls.log" "fg-panel bl" "a limit of one's own (SC_VRAM_LIMIT=7000) is read as on"
+has "$rt/sc-turbo.conf" "SC_VRAM_LIMIT=7000" "and kept when the file is written again"
+[ "$(grep -c 'SC_VRAM_LIMIT' "$rt/sc-turbo.conf")" = 1 ] && ok "once" || bad "once"
+window idle 2500 --test-eval 'backend.setOption("vramLimit", false)' || bad "the window ran"
+sleep 0.5
+[ "$(grep -c 'SC_VRAM_LIMIT' "$rt/sc-turbo.conf")" = 1 ] && has "$rt/sc-turbo.conf" "SC_VRAM_LIMIT=off" "switched off, it gives way to off" || bad "switched off, it gives way to off"
+
+echo "23. known problems of the desktop (KDE Plasma): the note at the start, the fix and its undo"
+fresh; : > "$rt/calls.log"; mkdir -p "$MYRDDIN_CONFIG_DIR"; printf '[General]\nwelcomed=true\n' > "$MYRDDIN_CONFIG_DIR/myrddin.conf"
+# stand-ins: kwriteconfig6 writes the test's own settings files (XDG_CONFIG_HOME) as KConfig would, and says what it was asked
+mkdir -p "$work/kde"
+cat > "$work/kde/kwriteconfig6" <<'STANDIN'
+#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+with open(os.environ["CALLS"], "a") as log: log.write("kwriteconfig6 " + " ".join(args) + "\n")
+opt = lambda name: args[args.index(name) + 1] if name in args else None
+path = os.path.join(os.environ["XDG_CONFIG_HOME"], opt("--file")); group, key = "[" + opt("--group") + "]", opt("--key")
+lines = open(path).read().splitlines() if os.path.exists(path) else []
+out, current, done = [], None, False
+for line in lines:
+    if line.startswith("["): 
+        if current == group and not done and "--delete" not in args: out.append(key + "=" + args[-1]); done = True
+        current = line
+    elif current == group and line.split("=")[0] == key: continue
+    out.append(line)
+if not done and "--delete" not in args:
+    if current != group: out.append(group)
+    out.append(key + "=" + args[-1])
+open(path, "w").write("\n".join(out) + "\n")
+STANDIN
+printf '#!/bin/sh\necho "busctl $*" >> "$CALLS"\n' > "$work/kde/busctl"; chmod +x "$work/kde/kwriteconfig6" "$work/kde/busctl"
+kde() { CALLS="$rt/calls.log" PATH="$work/kde:$PATH" MYRDDIN_FAKE_DESKTOP=KDE window "$@"; }
+kde idle 2500 --test-eval '@1500 backend.panel(backend.problemsOffer && backend.problems.length === 2 && backend.problems.every((p) => p.present) ? "tl" : "tr")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel tl" "on KDE, with both settings as Plasma has them by default, the note at the start offers both"
+kde idle 2500 --test-eval 'backend.fixProblem("tearing")' || bad "the window ran"
+has "$rt/calls.log" "kwriteconfig6 --file kwinrc --group Compositing --key AllowTearing --type bool false" "the fix for tearing: AllowTearing false in kwinrc"
+has "$rt/calls.log" "busctl --user call org.kde.KWin /KWin org.kde.KWin reconfigure" "and KWin is told to read its settings again"
+: > "$rt/calls.log"
+kde idle 2500 --test-eval '@1500 var t = backend.problems.filter((p) => p.id === "tearing")[0]; backend.panel(t && !t.present && t.fixed ? "bl" : "br")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel bl" "afterwards tearing is listed as fixed by Myrddin, with its undo"
+kde idle 2500 --test-eval 'backend.undoProblem("tearing")' || bad "the window ran"
+has "$rt/calls.log" "kwriteconfig6 --file kwinrc --group Compositing --key AllowTearing --delete" "the undo: the key goes again, as before the fix (there was none)"
+grep -q AllowTearing "$XDG_CONFIG_HOME/kwinrc" && bad "kwinrc as it was" || ok "kwinrc as it was"
+kde idle 2500 --test-eval 'backend.fixProblem("accents")' || bad "the window ran"
+has "$rt/calls.log" "kwriteconfig6 --file plasmakeyboardrc --group General --key diacriticsPopupEnabled --type bool --notify false" "the fix for accented letters, as the troubleshooting page has it"
+: > "$rt/calls.log"
+kde idle 2500 --test-eval '@1500 backend.panel(backend.problemsOffer ? "tl" : "tr")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel tr" "one fixed, the other undone on purpose: the note at the start does not come again"
+printf '[General]\nwelcomed=true\n' > "$MYRDDIN_CONFIG_DIR/myrddin.conf"; rm -f "$XDG_CONFIG_HOME/kwinrc"; : > "$rt/calls.log"
+kde idle 2500 --test-eval '@1500 backend.leaveProblems(); backend.panel(backend.problemsOffer ? "tl" : "tr")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel tr" "\"Leave them as they are\": the note goes"
+: > "$rt/calls.log"
+window idle 2500 --test-eval '@1500 backend.panel(backend.problems.length === 0 && !backend.problemsOffer ? "bl" : "br")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel bl" "on another desktop nothing is listed"
+printf '[General]\nwelcomed=true\n' > "$MYRDDIN_CONFIG_DIR/myrddin.conf"; rm -f "$XDG_CONFIG_HOME/kwinrc" "$XDG_CONFIG_HOME/plasmakeyboardrc"; : > "$rt/calls.log"
+MYRDDIN_FAKE_KEYBOARD=0 kde idle 2500 --test-eval '@1500 backend.panel(backend.problems.length === 1 && backend.problems[0].id === "tearing" ? "tl" : "tr")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel tl" "without Plasma's on-screen keyboard running, its accented letters are not listed (tearing is)"
+
+echo "24. report a bug"
+fresh; : > "$rt/calls.log"; mkdir -p "$rt/logs/fg"
+printf '   120.500 STAT x2 real=58.4/s generated=58.4/s shown=116.9/s untouched=0 | failed=0\n   121.000 fg: base rate 60/s, multiplier x2 -> x3\n   122.000 fg: submit failed (-4)\n   123.000 fg: the last 64 presents written to %s/logs/fg/x\n' "$rt" > "$rt/logs/fg/fg-123.log"
+window idle 2500 --test-eval '@1500 backend.panel(backend.layerProblem !== "" ? "tl" : "tr"); backend.makeBugReport()' || bad "the window ran"
+has "$rt/calls.log" "fg-panel tl" "a layer log with a problem in it: the note for a report is there"
+report=$(ls "$rt"/logs/reports/report-*.txt 2>/dev/null | head -1)
+[ -n "$report" ] && ok "the report is written to logs/reports" || bad "the report is written to logs/reports"
+grep -q "submit failed" "$report" 2>/dev/null && ok "it holds the problem line" || bad "it holds the problem line"
+grep -q "multiplier x2 -> x3" "$report" 2>/dev/null && ok "with the lines around it" || bad "with the lines around it"
+grep -qF "$rt" "$report" 2>/dev/null && bad "no folder of this computer in it" || ok "no folder of this computer in it"
+grep -qF "<Myrddin's folder>/logs/fg/x" "$report" 2>/dev/null && ok "Myrddin's folder is named as such" || bad "Myrddin's folder is named as such"
+: > "$rt/calls.log"
+window idle 2500 --test-eval '@1500 backend.panel(backend.layerProblem === "" ? "bl" : "br")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel bl" "once reported, that log's note does not come again"
+printf '   10.000 fg: switched on\n   20.000 fg: switched off (OFF file)\n' > "$rt/logs/fg/fg-124.log"; rm -f "$rt"/logs/reports/*.txt
+window idle 2500 --test-eval 'backend.makeBugReport()' || bad "the window ran"
+grep -q "no problem lines; its last 25 lines" "$rt"/logs/reports/report-*.txt 2>/dev/null && ok "a log without problems: its last lines instead" || bad "a log without problems: its last lines instead"
+# counters ("failed=0") and the layer's pacing giving way are no problems; a failed call is (newer files, so they count)
+printf '   10.000 fg: state device=0x1 swapchain=0x2 failed=0 modified=1\n   20.000 fg: the game'"'"'s frames kept waiting for present calls that did not come in time: frames go on without that wait for 2 s\n' > "$rt/logs/fg/fg-125.log"
+touch -d "@$(( $(date +%s) + 60 ))" "$rt/logs/fg/fg-125.log"; : > "$rt/calls.log"
+window idle 2500 --test-eval '@1500 backend.panel(backend.layerProblem === "" ? "tl" : "tr")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel tl" "counters and the layer's pacing giving way: no note"
+printf '   10.000 fg: vkQueueSubmit failed: 0xfffffffc\n' > "$rt/logs/fg/fg-126.log"
+touch -d "@$(( $(date +%s) + 120 ))" "$rt/logs/fg/fg-126.log"; : > "$rt/calls.log"
+window idle 2500 --test-eval '@1500 backend.panel(backend.layerProblem !== "" ? "bl" : "br")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel bl" "a call that failed: the note"
+
+echo "25. other frame generators and limits in the system check"
+fresh; : > "$rt/calls.log"
+window idle 3000 --test-eval '@2200 var r = backend.checks.filter((c) => c.key === "others")[0]; backend.panel(r && r.level === "ok" ? "tl" : "tr")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel tl" "none found: a row with a check mark"
+: > "$rt/calls.log"
+FAKE_OTHERS='generator\tNVIDIA Smooth Motion (the driver'"'"'s frame generation)\tthe launch script\nlimiter\tVKD3D_FRAME_RATE=60 (a frame-rate limit)\tthe environment' \
+    window idle 3000 --test-eval '@2200 var r = backend.checks.filter((c) => c.key === "others")[0]; backend.panel(r && r.level === "warn" && r.detail.indexOf("NVIDIA Smooth Motion") >= 0 && r.detail.indexOf("VKD3D_FRAME_RATE=60") >= 0 ? "bl" : "br")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel bl" "Smooth Motion and a limit found: a warning that names both"
+
 [ $fails = 0 ] && echo "all checks passed" || echo "$fails check(s) FAILED"
 exit $fails

@@ -155,6 +155,21 @@ PageView {
     }
 
     Card {
+        heading: "NVIDIA settings from the LUG wiki"
+        note: "Placed in Myrddin's copy of the launch script, never in the script itself, and only where the script does not set them already. Each acts from the next launch."
+        SettingRow {
+            title: "DLSS 4"
+            detail: "The game uses the newest DLSS, with its newest preset, in place of the one it came with: NVIDIA's updater fetches it into the game's folder and dxvk-nvapi makes the game use it. It is for the picture, not for the frame rate. On by default."
+            Toggle { checked: backend.conf.dlss4; onToggled: (v) => backend.setOption("dlss4", v) }
+        }
+        SettingRow {
+            title: "Graphics memory limit"
+            detail: "The game is told the card has less memory than it has (9 GB on a 12 GB card, 8 on 10, 6 on 8), so that it leaves room for the desktop, DLSS and Myrddin: the wiki's remedy for frame drops when the card's memory runs out. Off: the game is told all of it. On by default."
+            Toggle { checked: backend.conf.vramLimit; onToggled: (v) => backend.setOption("vramLimit", v) }
+        }
+    }
+
+    Card {
         heading: "Advanced performance tweaks"
         note: "These switches work once the matching tweak has been set up on this computer, which needs root once; Myrddin never asks for a password. Until then a launch leaves the computer as it is. Each takes effect at the next launch and is undone when the game has closed."
         ActionButton {
@@ -183,7 +198,30 @@ PageView {
     }
 
     Card {
+        heading: "Known problems"
+        note: backend.problems.length === 0 ? "Nothing on this desktop is known to get in the way of the game." : "Settings of this desktop that are known to get in the way of the game. A fix changes the desktop's own setting; Undo puts it back as it was."
+        Repeater {
+            model: backend.problems
+            SettingRow {
+                title: modelData.title
+                detail: modelData.detail
+                ActionButton {
+                    text: modelData.present ? "Fix" : "Undo"
+                    kind: modelData.present ? "plain" : "quiet"
+                    onClicked: modelData.present ? backend.fixProblem(modelData.id) : backend.undoProblem(modelData.id)
+                }
+            }
+        }
+    }
+
+    Card {
         heading: "Logs and reports"
+        SettingRow {
+            title: "Report a bug"
+            detail: "A short report from the layer's log of the last session: what it says went wrong, the settings and the system's versions, without the names of your home folder, the game's folder or this computer. It is copied, and the window says where to send it."
+            ActionButton { text: "Report a bug"; icon: Theme.iconLog; onClicked: backend.makeBugReport() }
+        }
+        Divider {}
         SettingRow {
             title: "Run with logs"
             detail: "Writes a log of each session: what the launch said, the frame rates, and what the game used of the disk, memory and graphics memory. It is read from outside the game. When the game closes, the window offers the log: read it, copy it or delete it."

@@ -123,7 +123,17 @@ PageView {
     // 2. the session: frame rates while the game runs with the layer
     Card {
         heading: "Session"
-        note: page.live ? "Frame rates: a point every ten seconds, the last fifteen minutes." : "Frame rates appear here while the game runs with the layer."
+        note: page.live ? "Frame rates: a point every ten seconds, the last fifteen minutes."
+                        : backend.layerProblem !== "" ? "" : "Frame rates appear here while the game runs with the layer."
+        // (the last session's layer log says something went wrong: a report of it, in place of the line above)
+        RowLayout {
+            visible: !page.live && backend.layerProblem !== ""
+            Layout.fillWidth: true
+            spacing: 10
+            Icon { path: Theme.iconWarn; color: Theme.warn; size: 18 }
+            Text { text: backend.layerProblem; color: Theme.text; font.pixelSize: 13; elide: Text.ElideRight; Layout.fillWidth: true }
+            ActionButton { text: "Report a bug"; onClicked: backend.makeBugReport() }
+        }
         RowLayout {
             Layout.fillWidth: true
             spacing: page.roomy ? 34 : 18

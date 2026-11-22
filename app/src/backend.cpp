@@ -15,11 +15,13 @@
 #include <QProcess>
 #include <QRegularExpression>
 #include <QSaveFile>
+#include <QSysInfo>
 #include <QSet>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QUrl>
 
+#include <algorithm>
 #include <cstdio>
 #include <functional>
 
@@ -233,6 +235,8 @@ Backend::Backend(const QString& runtimeOverride, QObject* parent) : QObject(pare
 
     loadConf();
     loadPrefs();
+    findProblems();       // the desktop's settings known to get in the way: the note at the start, Options' "Known problems"
+    findLayerProblem();   // the last session's layer log, for "Report a bug"
     // One thing is drawn over the game, or none. Settings that have both: MangoHud, which counts the shown frames.
     if (m_conf.value(QStringLiteral("mangohud")).toBool() && m_prefs.value(QStringLiteral("panel")).toBool()) {
         m_prefs.insert(QStringLiteral("panel"), false);
@@ -305,6 +309,11 @@ void Backend::loadConf() {
     // frames are never limited is the first one a player sees)
     bool mangohud = false, markers = true, keepHud = true, gapfill = true, pictures = true, boost = false, fill = false,
          prefetchOff = false, hugePages = false, experimental = false;
+    // (the LUG wiki's NVIDIA settings that sc-turbo places in its copy of the launch script, both on unless the settings
+    // file says otherwise: DLSS 4 and the limit on the graphics memory the game is told about; a limit of one's own,
+    // a number of MiB, is kept as it is)
+    bool dlss4 = true, vramLimit = true;
+    QString vramOwn;
     QString panelKey = QStringLiteral("Shift+7");
     m_confKept.clear();
     static const QRegularExpression assignment(QStringLiteral(R"(^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$)"));
@@ -330,6 +339,13 @@ void Backend::loadConf() {
         else if (name == QStringLiteral("SC_PREFETCH")) prefetchOff = confValue(value, prefix) == QStringLiteral("off");
         else if (name == QStringLiteral("SC_THP")) hugePages = confValue(value, prefix) == QStringLiteral("on");
         else if (name == QStringLiteral("SC_FG_EXPERIMENTAL")) experimental = confValue(value, prefix) == QStringLiteral("1");
+        else if (name == QStringLiteral("SC_DLSS_OVERRIDE")) dlss4 = confValue(value, prefix) != QStringLiteral("0");
+        else if (name == QStringLiteral("SC_VRAM_LIMIT")) {
+            const QString limit = confValue(value, prefix);
+            static const QRegularExpression mib(QStringLiteral(R"(^\d+$)"));
+            if (limit == QStringLiteral("off") || limit == QStringLiteral("0")) vramLimit = false;
+            else if (mib.match(limit).hasMatch()) { vramLimit = true; vramOwn = limit; }
+        }
         else if (name == QStringLiteral("SC_FG_PANEL_KEY")) {
             panel_key::Combo combo;   // (one the panel does not know: the default stays)
             if (panel_key::Parse(confValue(value, prefix).toUtf8().constData(), combo)) panelKey = QString::fromUtf8(combo.text);
@@ -352,6 +368,9 @@ void Backend::loadConf() {
     m_conf.insert(QStringLiteral("prefetchOff"), prefetchOff);
     m_conf.insert(QStringLiteral("hugePages"), hugePages);
     m_conf.insert(QStringLiteral("experimental"), experimental);
+    m_conf.insert(QStringLiteral("dlss4"), dlss4);
+    m_conf.insert(QStringLiteral("vramLimit"), vramLimit);
+    m_conf.insert(QStringLiteral("vramOwn"), vramOwn);
     m_conf.insert(QStringLiteral("panelKey"), panelKey);
 }
 
@@ -383,6 +402,10 @@ void Backend::saveConf() {
     if (m_conf.value(QStringLiteral("boost")).toBool()) out << QStringLiteral("export SC_FG_BOOST=1");
     // (5x to 8x: room for that many generated frames is made at the launch, so it acts from the next one)
     if (m_conf.value(QStringLiteral("experimental")).toBool()) out << QStringLiteral("export SC_FG_EXPERIMENTAL=1");
+    // (the LUG wiki's NVIDIA settings in the copy of the launch script: written only where they are not as by default)
+    if (!m_conf.value(QStringLiteral("dlss4")).toBool()) out << QStringLiteral("SC_DLSS_OVERRIDE=0");
+    if (!m_conf.value(QStringLiteral("vramLimit")).toBool()) out << QStringLiteral("SC_VRAM_LIMIT=off");
+    else if (!text("vramOwn").isEmpty()) out << QStringLiteral("SC_VRAM_LIMIT=") + text("vramOwn");
     if (!m_confKept.isEmpty()) {
         out << QStringLiteral("# (lines the window does not know, kept as they were)");
         out << m_confKept;
@@ -586,7 +609,9 @@ void Backend::setLimit(int n) {
 void Backend::setOption(const QString& name, bool on) {
     // the prefetchers and huge pages: for the next launch (sc-turbo switches them when it starts the game);
     // 5x to 8x (experimental): the same, and a limit above 4 goes when it is switched off
-    if (name == QStringLiteral("prefetchOff") || name == QStringLiteral("hugePages") || name == QStringLiteral("experimental")) {
+    // DLSS 4 and the graphics memory limit: placed in the copy of the launch script, so for the next launch as well
+    if (name == QStringLiteral("prefetchOff") || name == QStringLiteral("hugePages") || name == QStringLiteral("experimental")
+        || name == QStringLiteral("dlss4") || name == QStringLiteral("vramLimit")) {
         m_conf.insert(name, on);
         m_saveLater.start();
         if (name == QStringLiteral("experimental") && !on && m_prefs.value(QStringLiteral("limit")).toInt() > 4) setLimit(4);
@@ -749,6 +774,8 @@ void Backend::poll() {
     // launch stays "pending" until the launcher has closed too.
     if (m_logPending && !m_logBusy && (m_state == QStringLiteral("idle") || m_state == QStringLiteral("launcher"))) makeSessionLog(m_state == QStringLiteral("idle"));
 
+    // the game has closed: what its layer log says went wrong, for "Report a bug"
+    if (before != QStringLiteral("idle") && m_state == QStringLiteral("idle")) findLayerProblem();
     if (before != QStringLiteral("idle") && m_state == QStringLiteral("idle") && !m_runtimeNote.isEmpty()) {
         m_runtimeNote = installPayload(m_runtime, false);
         emit runtimeChanged();
@@ -1144,6 +1171,36 @@ void Backend::refreshChecks() {
                 m_asyncChecks << check(QStringLiteral("display"), QStringLiteral("Display"), m_displayChoice.isEmpty() ? m_displays.first() : m_displayChoice, QStringLiteral("ok"));
             finishChecks();
         });
+        // other frame generators and frame limits that the launch script or the environment asks for
+        // ("sc-turbo others": KIND<TAB>NAME<TAB>WHERE a line); a launch with frame generation keeps them off
+        ++m_pendingChecks;
+        startAsync(m_runtime + QStringLiteral("/sc-turbo"), {QStringLiteral("others")}, [this, round](int code, const QString& output) {
+            if (round != m_checkRound) return;
+            QStringList kept, forced, gamescope;
+            for (const QString& line : output.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
+                const QStringList field = line.split(QLatin1Char('\t'));
+                if (field.size() < 3) continue;
+                if (field.at(0) == QStringLiteral("gamescope")) gamescope << field.at(2);
+                else if (field.at(0) == QStringLiteral("forced")) forced << QStringLiteral("%1 (in %2)").arg(field.at(1), field.at(2));
+                else kept << QStringLiteral("%1, in %2").arg(field.at(1), field.at(2));
+            }
+            const QString title = QStringLiteral("Other frame generators and limits");
+            if (code != 0) {
+                // (a runtime older than this window has no "others": nothing to say)
+            } else if (kept.isEmpty() && forced.isEmpty() && gamescope.isEmpty()) {
+                m_asyncChecks << check(QStringLiteral("others"), title, QStringLiteral("None asked for in the launch script or the environment"), QStringLiteral("ok"));
+            } else {
+                QStringList text;
+                if (!kept.isEmpty())
+                    text << kept.join(QStringLiteral("; ")) + QStringLiteral(". A launch with frame generation keeps them off and says so; frame generation Off leaves them as they are.");
+                if (!forced.isEmpty())
+                    text << QStringLiteral("%1 names another frame generator or limiter, which keeps it on whatever Myrddin sets: take it out there.").arg(forced.join(QStringLiteral(" and ")));
+                if (!gamescope.isEmpty())
+                    text << QStringLiteral("The game is started inside gamescope (%1), which paces every frame itself: untested with Myrddin.").arg(gamescope.first());
+                m_asyncChecks << check(QStringLiteral("others"), title, text.join(QLatin1Char(' ')), QStringLiteral("warn"));
+            }
+            finishChecks();
+        });
         ++m_pendingChecks;
         startAsync(m_runtime + QStringLiteral("/tools/sc-sched"), {QStringLiteral("allowed")}, [this, round](int code, const QString&) {
             if (round != m_checkRound) return;
@@ -1190,7 +1247,7 @@ void Backend::finishChecks() {
     if (m_pendingChecks > 0) return;
     // in a fixed order, whatever order the answers came in
     QVariantList merged = m_checks;
-    for (const char* key : {"display", "sched", "tune", "kde-diacritics", "kde-tearing"})
+    for (const char* key : {"display", "sched", "tune", "others", "kde-diacritics", "kde-tearing"})
         for (const QVariant& item : std::as_const(m_asyncChecks))
             if (item.toMap().value(QStringLiteral("key")).toString() == QLatin1String(key)) {
                 // before the closing reminder about the game's own setting
@@ -1213,18 +1270,9 @@ void Backend::applyFix(const QString& key) {
         emit said(QStringLiteral("Found the game in %1").arg(tidyPath(found)));
         refreshChecks();
     } else if (key == QStringLiteral("kde-tearing")) {
-        startAsync(QStringLiteral("kwriteconfig6"), {QStringLiteral("--file"), QStringLiteral("kwinrc"), QStringLiteral("--group"), QStringLiteral("Compositing"), QStringLiteral("--key"), QStringLiteral("AllowTearing"), QStringLiteral("--type"), QStringLiteral("bool"), QStringLiteral("false")},
-                   [this](int code, const QString&) {
-                       if (code == 0) QProcess::startDetached(QStringLiteral("busctl"), {QStringLiteral("--user"), QStringLiteral("call"), QStringLiteral("org.kde.KWin"), QStringLiteral("/KWin"), QStringLiteral("org.kde.KWin"), QStringLiteral("reconfigure")});
-                       emit said(code == 0 ? QStringLiteral("Tearing switched off in KWin") : QStringLiteral("Could not change KWin's setting"));
-                       refreshChecks();
-                   });
+        fixProblem(QStringLiteral("tearing"));   // (the same fix as the note at the start and Options' "Known problems", with its undo)
     } else if (key == QStringLiteral("kde-diacritics")) {
-        startAsync(QStringLiteral("kwriteconfig6"), {QStringLiteral("--file"), QStringLiteral("plasmakeyboardrc"), QStringLiteral("--group"), QStringLiteral("General"), QStringLiteral("--key"), QStringLiteral("diacriticsPopupEnabled"), QStringLiteral("--type"), QStringLiteral("bool"), QStringLiteral("--notify"), QStringLiteral("false")},
-                   [this](int code, const QString&) {
-                       emit said(code == 0 ? QStringLiteral("Accented-letter popup switched off") : QStringLiteral("Could not change the keyboard's setting"));
-                       refreshChecks();
-                   });
+        fixProblem(QStringLiteral("accents"));
     }
 }
 
@@ -1307,6 +1355,7 @@ void Backend::setCliLink(bool on) {
 void Backend::openFolder(const QString& which) {
     QString dir = m_runtime;
     if (which == QStringLiteral("logs")) dir = m_runtime + QStringLiteral("/logs");
+    else if (which == QStringLiteral("reports")) dir = m_runtime + QStringLiteral("/logs/reports");
     else if (which == QStringLiteral("prefix")) dir = m_conf.value(QStringLiteral("prefix")).toString();
     else if (which == QStringLiteral("licences")) dir = licenceFolder();
     if (dir.isEmpty() || !QDir(dir).exists()) {
@@ -1350,4 +1399,314 @@ QString Backend::fullPath(const QString& path) const {
     if (text.startsWith(QStringLiteral("~/"))) text = home() + text.mid(1);
     if (text.size() > 1 && text.endsWith(QLatin1Char('/'))) text.chop(1);
     return text;
+}
+
+// ---------------------------------------------------------------------------------------------
+// "Report a bug": the layer's log of the newest session, cut down to what says something went wrong, with the
+// settings and the system's versions, and no folder, login or host name of this computer. Written to
+// logs/reports, put on the clipboard (as text and as a file), and offered with where to send it.
+
+namespace {
+
+// The lines of the layer's log that say something went wrong: a Vulkan call, a submit or a set-up that failed,
+// a call into the layer that never came back, a lock that had to be taken over. (Statistics lines are left out:
+// their counters have names such as "failed=0", and so do the "fg: state" lines: a word followed by "=" is a
+// counter. So is "the game's frames kept waiting for present calls": the layer's own pacing giving way, up to six
+// times in an ordinary session, seen in 3 of 8 sessions of 2026-11-20/21. Over the 116 sessions logged by then,
+// nothing else matched.)
+bool problemLine(const QString& line) {
+    static const QRegularExpression re(QStringLiteral(R"(failed(?!=)|could not|cannot|never came back|taken over|let go|^\s*[\d.]+ lock |VK_ERROR|\berror\b(?!=))"),
+                                       QRegularExpression::CaseInsensitiveOption);
+    return !line.contains(QStringLiteral(" STAT x")) && re.match(line).hasMatch();
+}
+
+// The value of KEY in [GROUP] of a KDE settings file as KConfig reads it: the user's own file, then the system's
+// (/etc/xdg), then FALLBACK; with OWN, the user's own file only. (A key may carry flags, as in Key[$i]=value.)
+QString kdeSetting(const QString& file, const QString& group, const QString& key, const QString& fallback, bool own = false) {
+    QStringList places = {xdgDir("XDG_CONFIG_HOME", QStringLiteral("/.config")) + QLatin1Char('/') + file};
+    if (!own) places << QStringLiteral("/etc/xdg/") + file;
+    const QString header = QLatin1Char('[') + group + QLatin1Char(']');
+    for (const QString& place : places) {
+        QString current;
+        for (const QString& raw : readAll(place).split(QLatin1Char('\n'))) {
+            const QString line = raw.trimmed();
+            if (line.startsWith(QLatin1Char('['))) { current = line; continue; }
+            const int eq = line.indexOf(QLatin1Char('='));
+            if (current != header || eq <= 0) continue;
+            QString name = line.left(eq).trimmed();
+            if (name.contains(QLatin1Char('['))) name = name.left(name.indexOf(QLatin1Char('[')));
+            if (name == key) return line.mid(eq + 1).trimmed();
+        }
+    }
+    return fallback;
+}
+
+// The two settings of KDE Plasma that are known to get in the way of the game (docs/troubleshooting.md).
+struct KdeProblem { const char* id; const char* file; const char* group; const char* key; bool reconfigure; };
+const KdeProblem kKdeProblems[] = {
+    {"accents", "plasmakeyboardrc", "General", "diacriticsPopupEnabled", false},
+    {"tearing", "kwinrc", "Compositing", "AllowTearing", true},
+};
+const KdeProblem* kdeProblem(const QString& id) {
+    for (const KdeProblem& problem : kKdeProblems)
+        if (id == QLatin1String(problem.id)) return &problem;
+    return nullptr;
+}
+
+}  // namespace
+
+QString Backend::newestLayerLog() const {
+    const QFileInfoList logs = QDir(m_runtime + QStringLiteral("/logs/fg")).entryInfoList({QStringLiteral("fg-*.log")}, QDir::Files, QDir::Time);
+    return logs.isEmpty() ? QString() : logs.first().absoluteFilePath();
+}
+
+QString Backend::scrubbed(QString text) const {
+    // (the longest folders first: Myrddin's own folder and the game's are often under the home folder)
+    QStringList folders = {m_runtime, m_conf.value(QStringLiteral("prefix")).toString()};
+    std::sort(folders.begin(), folders.end(), [](const QString& a, const QString& b) { return a.size() > b.size(); });
+    for (const QString& folder : folders) {
+        if (folder.size() < 2) continue;
+        text.replace(folder, folder == m_runtime ? QStringLiteral("<Myrddin's folder>") : QStringLiteral("<game folder>"));
+    }
+    text = tidyText(text);
+    const QString host = QSysInfo::machineHostName();
+    if (host.size() > 1) text.replace(QRegularExpression(QStringLiteral("\\b%1\\b").arg(QRegularExpression::escape(host))), QStringLiteral("<host>"));
+    return text;
+}
+
+void Backend::findLayerProblem() {
+    const QString log = newestLayerLog();
+    QString found;
+    if (!log.isEmpty()) {
+        const qint64 stamp = QFileInfo(log).lastModified().toSecsSinceEpoch();
+        // (a log that has been reported, or whose note was answered, says nothing more)
+        if (stamp > QSettings(configFile(), QSettings::IniFormat).value(QStringLiteral("problemSeen"), 0).toLongLong()) {
+            int lines = 0;
+            for (const QString& line : readAll(log, 8000000).split(QLatin1Char('\n')))
+                if (problemLine(line)) ++lines;
+            if (lines > 0) found = lines == 1 ? QStringLiteral("The layer wrote a problem into its log in the last session.")
+                                              : QStringLiteral("The layer wrote %1 problems into its log in the last session.").arg(lines);
+        }
+    }
+    if (found == m_layerProblem) return;
+    m_layerProblem = found;
+    emit bugReportChanged();
+}
+
+void Backend::makeBugReport() {
+    QStringList out;
+    out << QStringLiteral("Myrddin bug report, %1").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm")));
+    out << QStringLiteral("Version %1, runtime %2").arg(version(), runtimeVersion().isEmpty() ? QStringLiteral("?") : runtimeVersion());
+    out << QStringLiteral("System: %1, kernel %2, desktop %3 (%4)")
+               .arg(QSysInfo::prettyProductName(), QSysInfo::kernelVersion(),
+                    qEnvironmentVariable("XDG_CURRENT_DESKTOP", QStringLiteral("?")), qEnvironmentVariable("XDG_SESSION_TYPE", QStringLiteral("?")));
+    // the card and the NVIDIA driver as the driver itself states them (no program is run for it)
+    QString driver = QRegularExpression(QStringLiteral(R"(Kernel Module\s+(?:for\s+\S+\s+)?(\d[\d.]*))"))
+                         .match(readAll(QStringLiteral("/proc/driver/nvidia/version"), -1)).captured(1);
+    QStringList cards;
+    for (const QString& gpu : QDir(QStringLiteral("/proc/driver/nvidia/gpus")).entryList(QDir::Dirs | QDir::NoDotAndDotDot)) {
+        const QString model = QRegularExpression(QStringLiteral(R"(Model:\s*(.+))")).match(readAll(QStringLiteral("/proc/driver/nvidia/gpus/%1/information").arg(gpu))).captured(1).trimmed();
+        if (!model.isEmpty()) cards << model;
+    }
+    out << QStringLiteral("GPU: %1, NVIDIA driver %2").arg(cards.isEmpty() ? QStringLiteral("?") : cards.join(QStringLiteral(", ")),
+                                                           driver.isEmpty() ? QStringLiteral("?") : driver);
+    // the settings, without the ones that name folders or settings of one's own for the game
+    QStringList settings;
+    static const QRegularExpression own(QStringLiteral(R"(^(?:export\s+)?(SC_PREFIX|SC_LAUNCH|SC_RUNNER|SC_LAUNCH_SET)=)"));
+    for (const QString& line : readAll(confPath()).split(QLatin1Char('\n'))) {
+        const QString trimmed = line.trimmed();
+        if (trimmed.isEmpty() || trimmed.startsWith(QLatin1Char('#')) || own.match(trimmed).hasMatch()) continue;
+        settings << trimmed;
+    }
+    out << QStringLiteral("Settings: %1").arg(settings.isEmpty() ? QStringLiteral("none") : settings.join(QStringLiteral("; ")));
+    const QString launched = readAll(m_runtime + QStringLiteral("/logs/launch.out"), 6000).trimmed();
+    if (!launched.isEmpty()) out << QString() << QStringLiteral("== The last launch") << launched;
+
+    const QString log = newestLayerLog();
+    if (log.isEmpty()) {
+        out << QString() << QStringLiteral("No log of the layer was found: the game has not run with frame generation yet.");
+    } else {
+        const QStringList lines = readAll(log, 8000000).split(QLatin1Char('\n'));
+        QList<int> problems;
+        for (int i = 0; i < lines.size(); ++i)
+            if (problemLine(lines.at(i))) problems << i;
+        const QString name = QFileInfo(log).fileName();
+        out << QString();
+        if (problems.isEmpty()) {
+            out << QStringLiteral("== %1: no problem lines; its last 25 lines").arg(name);
+            for (int i = std::max(0, int(lines.size()) - 26); i < lines.size(); ++i) out << lines.at(i);
+        } else {
+            out << QStringLiteral("== %1: %2 problem line(s), each with the three lines before and after it").arg(name).arg(problems.size());
+            int shown = 0, last = -1;
+            for (int at : problems) {
+                if (shown >= 150) { out << QStringLiteral("(more problem lines follow in the log)"); break; }
+                const int from = std::max(at - 3, last + 1), to = std::min(at + 3, int(lines.size()) - 1);
+                if (from > last + 1 && last >= 0) out << QStringLiteral("...");
+                for (int i = from; i <= to; ++i, ++shown) out << lines.at(i);
+                last = std::max(last, to);
+            }
+            // the last statistics line, for the state the layer was in
+            for (int i = lines.size() - 1; i >= 0; --i)
+                if (lines.at(i).contains(QStringLiteral(" STAT x"))) { out << QStringLiteral("== The last statistics line") << lines.at(i).left(400); break; }
+        }
+        // where each thread was inside the layer when the session ended
+        const QString threads = QFileInfo(log).absolutePath() + QStringLiteral("/THREADS-") + name.mid(3).chopped(4);
+        if (QFile::exists(threads) && QFile::exists(m_runtime + QStringLiteral("/tools/fg-where.py"))) {
+            QProcess where;
+            where.setProgram(QStringLiteral("python3"));
+            where.setArguments({m_runtime + QStringLiteral("/tools/fg-where.py"), threads});
+            where.setProcessEnvironment(childEnvironment());
+            where.setProcessChannelMode(QProcess::MergedChannels);
+            where.start();
+            if (where.waitForFinished(4000)) out << QString() << QStringLiteral("== Where the threads were (sc-turbo fg-where)") << QString::fromUtf8(where.readAll()).trimmed();
+            else where.kill();
+        }
+    }
+
+    const QString text = scrubbed(out.join(QLatin1Char('\n'))) + QLatin1Char('\n');
+    const QString dir = m_runtime + QStringLiteral("/logs/reports");
+    QDir().mkpath(dir);
+    const QString path = dir + QStringLiteral("/report-%1.txt").arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss")));
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly) || file.write(text.toUtf8()) < 0 || !file.commit()) {
+        emit said(QStringLiteral("The report could not be written to %1").arg(tidyPath(dir)));
+        return;
+    }
+    if (auto* clipboard = QGuiApplication::clipboard()) {
+        auto* data = new QMimeData;
+        data->setText(text);
+        data->setUrls({QUrl::fromLocalFile(path)});
+        clipboard->setMimeData(data);
+    }
+    // the newest log is reported: its note goes
+    if (!log.isEmpty()) QSettings(configFile(), QSettings::IniFormat).setValue(QStringLiteral("problemSeen"), QFileInfo(log).lastModified().toSecsSinceEpoch());
+    m_layerProblem.clear();
+    m_bugReport = path;
+    emit bugReportChanged();
+}
+
+void Backend::readBugReport() {
+    if (m_bugReport.isEmpty()) return;
+    m_toolBusy = false;
+    m_toolTitle = QStringLiteral("Bug report");
+    m_toolOutput = readAll(m_bugReport);
+    emit toolChanged();
+}
+
+void Backend::closeBugReport() {
+    if (m_bugReport.isEmpty()) return;
+    m_bugReport.clear();
+    emit bugReportChanged();
+}
+
+// ---------------------------------------------------------------------------------------------
+// Known problems: settings of the desktop that are known to get in the way of the game, found when the window starts.
+// Each can be fixed from here, and the fix undone: what the setting was before is kept in the window's own settings.
+
+void Backend::findProblems() {
+    // (pictures and tests name the desktop they pretend to be on: MYRDDIN_FAKE_DESKTOP)
+    const QString desktop = m_fake.isEmpty() ? qEnvironmentVariable("XDG_CURRENT_DESKTOP") : qEnvironmentVariable("MYRDDIN_FAKE_DESKTOP");
+    QSettings stored(configFile(), QSettings::IniFormat);
+    QVariantList list;
+    if (desktop.contains(QStringLiteral("KDE"), Qt::CaseInsensitive)) {
+        // (the accented letters come from Plasma's on-screen keyboard: without it running, its setting does nothing;
+        // pictures and tests say it does not run with MYRDDIN_FAKE_KEYBOARD=0)
+        const bool keyboard = m_fake.isEmpty() ? processUp("plasma-keyboard") : qEnvironmentVariable("MYRDDIN_FAKE_KEYBOARD") != QStringLiteral("0");
+        for (const KdeProblem& problem : kKdeProblems) {
+            const QString id = QString::fromLatin1(problem.id);
+            const bool set = kdeSetting(QString::fromLatin1(problem.file), QString::fromLatin1(problem.group), QString::fromLatin1(problem.key), QStringLiteral("true")) != QStringLiteral("false");
+            const bool present = set && (id != QStringLiteral("accents") || keyboard);
+            // (a fix that has been undone by hand since: nothing left to undo)
+            if (set) stored.remove(QStringLiteral("undo/") + id);
+            const bool fixed = !set && stored.contains(QStringLiteral("undo/") + id);
+            QVariantMap entry;
+            entry.insert(QStringLiteral("id"), id);
+            entry.insert(QStringLiteral("present"), present);
+            entry.insert(QStringLiteral("fixed"), fixed);
+            if (id == QStringLiteral("accents")) {
+                entry.insert(QStringLiteral("title"), QStringLiteral("Accented letters on held keys (KDE Plasma)"));
+                entry.insert(QStringLiteral("detail"), present ? QStringLiteral("Plasma offers accented letters when a key is held, and keeps such keys from the game: W can move the character while A, S and D do not. The fix switches that offer off.")
+                                                               : QStringLiteral("Switched off by Myrddin. Undo switches the offer of accented letters on again."));
+            } else {
+                entry.insert(QStringLiteral("title"), QStringLiteral("Tearing allowed (KDE Plasma)"));
+                entry.insert(QStringLiteral("detail"), present ? QStringLiteral("KWin lets full-screen games tear: the picture, generated frames included, shows tear lines. Allowing it takes about 11 ms off the way to the display. The fix switches tearing off.")
+                                                               : QStringLiteral("Switched off by Myrddin. Undo allows tearing again."));
+            }
+            if (present || fixed) list << entry;
+        }
+    }
+    m_problems = list;
+    emit problemsChanged();
+}
+
+bool Backend::problemsOffer() const {
+    const QStringList left = QSettings(configFile(), QSettings::IniFormat).value(QStringLiteral("problemsLeft")).toStringList();
+    for (const QVariant& entry : m_problems) {
+        const QVariantMap problem = entry.toMap();
+        if (problem.value(QStringLiteral("present")).toBool() && !left.contains(problem.value(QStringLiteral("id")).toString())) return true;
+    }
+    return false;
+}
+
+void Backend::fixProblem(const QString& id) {
+    const KdeProblem* problem = kdeProblem(id);
+    if (!problem) return;
+    const QString file = QString::fromLatin1(problem->file), group = QString::fromLatin1(problem->group), key = QString::fromLatin1(problem->key);
+    // what it was, for the undo: the value of the user's own file, or that there was none
+    const QString before = kdeSetting(file, group, key, QStringLiteral("(none)"), true);
+    QStringList words = {QStringLiteral("--file"), file, QStringLiteral("--group"), group, QStringLiteral("--key"), key, QStringLiteral("--type"), QStringLiteral("bool")};
+    if (!problem->reconfigure) words << QStringLiteral("--notify");
+    words << QStringLiteral("false");
+    const bool reconfigure = problem->reconfigure;
+    startAsync(QStringLiteral("kwriteconfig6"), words, [this, id, before, reconfigure](int code, const QString&) {
+        if (code != 0) {
+            emit said(QStringLiteral("kwriteconfig6 could not change the setting"));
+            return;
+        }
+        QSettings(configFile(), QSettings::IniFormat).setValue(QStringLiteral("undo/") + id, before);
+        if (reconfigure) startAsync(QStringLiteral("busctl"), {QStringLiteral("--user"), QStringLiteral("call"), QStringLiteral("org.kde.KWin"), QStringLiteral("/KWin"), QStringLiteral("org.kde.KWin"), QStringLiteral("reconfigure")}, [](int, const QString&) {});
+        findProblems();
+        refreshChecks();
+        emit said(QStringLiteral("Fixed. Options, under \"Known problems\", can undo it"));
+    });
+}
+
+void Backend::undoProblem(const QString& id) {
+    const KdeProblem* problem = kdeProblem(id);
+    if (!problem) return;
+    QSettings stored(configFile(), QSettings::IniFormat);
+    if (!stored.contains(QStringLiteral("undo/") + id)) return;
+    const QString before = stored.value(QStringLiteral("undo/") + id).toString();
+    QStringList words = {QStringLiteral("--file"), QString::fromLatin1(problem->file), QStringLiteral("--group"), QString::fromLatin1(problem->group), QStringLiteral("--key"), QString::fromLatin1(problem->key)};
+    if (!problem->reconfigure) words << QStringLiteral("--notify");
+    if (before == QStringLiteral("(none)")) words << QStringLiteral("--delete");
+    else words << QStringLiteral("--type") << QStringLiteral("bool") << before;
+    const bool reconfigure = problem->reconfigure;
+    startAsync(QStringLiteral("kwriteconfig6"), words, [this, id, reconfigure](int code, const QString&) {
+        if (code != 0) {
+            emit said(QStringLiteral("kwriteconfig6 could not change the setting back"));
+            return;
+        }
+        QSettings settings(configFile(), QSettings::IniFormat);
+        settings.remove(QStringLiteral("undo/") + id);
+        // (undone on purpose: the note at the start does not ask about it again)
+        QStringList left = settings.value(QStringLiteral("problemsLeft")).toStringList();
+        if (!left.contains(id)) left << id;
+        settings.setValue(QStringLiteral("problemsLeft"), left);
+        if (reconfigure) startAsync(QStringLiteral("busctl"), {QStringLiteral("--user"), QStringLiteral("call"), QStringLiteral("org.kde.KWin"), QStringLiteral("/KWin"), QStringLiteral("org.kde.KWin"), QStringLiteral("reconfigure")}, [](int, const QString&) {});
+        findProblems();
+        refreshChecks();
+        emit said(QStringLiteral("Undone: the setting is as it was"));
+    });
+}
+
+void Backend::leaveProblems() {
+    QSettings stored(configFile(), QSettings::IniFormat);
+    QStringList left = stored.value(QStringLiteral("problemsLeft")).toStringList();
+    for (const QVariant& entry : m_problems) {
+        const QString id = entry.toMap().value(QStringLiteral("id")).toString();
+        if (entry.toMap().value(QStringLiteral("present")).toBool() && !left.contains(id)) left << id;
+    }
+    stored.setValue(QStringLiteral("problemsLeft"), left);
+    emit problemsChanged();
 }

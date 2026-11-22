@@ -62,6 +62,11 @@ class Backend : public QObject {
     Q_PROPERTY(bool toolBusy READ toolBusy NOTIFY toolChanged)
     Q_PROPERTY(QString toolTitle READ toolTitle NOTIFY toolChanged)
     Q_PROPERTY(QString toolOutput READ toolOutput NOTIFY toolChanged)
+    Q_PROPERTY(QString bugReport READ bugReport NOTIFY bugReportChanged)        // the report just made, waiting in its dialog ("": none)
+    Q_PROPERTY(QString layerProblem READ layerProblem NOTIFY bugReportChanged)  // the layer's log of the last session says something went wrong
+    Q_PROPERTY(QString issuesPage READ issuesPage CONSTANT)                     // where a bug report goes: a new issue on GitHub
+    Q_PROPERTY(QVariantList problems READ problems NOTIFY problemsChanged)      // settings here known to get in the way, each with a fix and its undo
+    Q_PROPERTY(bool problemsOffer READ problemsOffer NOTIFY problemsChanged)    // the note at the start: some are there and not answered yet
 
 public:
     explicit Backend(const QString& runtimeOverride, QObject* parent = nullptr);
@@ -118,12 +123,17 @@ public:
     bool toolBusy() const { return m_toolBusy; }
     QString toolTitle() const { return m_toolTitle; }
     QString toolOutput() const { return m_toolOutput; }
+    QString bugReport() const { return m_bugReport; }
+    QString layerProblem() const { return m_layerProblem; }
+    QString issuesPage() const { return QStringLiteral("https://github.com/Cadwaladr/Myrddin/issues/new"); }
+    QVariantList problems() const { return m_problems; }
+    bool problemsOffer() const;
 
     Q_INVOKABLE void launch();
     // Each of these is kept for the next launch and, where a game runs with the layer, sent to it at once.
     Q_INVOKABLE void setMode(const QString& mode);    // off | 2 | 3 | 4 (the multiplier, held there) | auto (the layer picks, up to the limit)
     Q_INVOKABLE void setLimit(int n);                 // the highest multiplier Auto may pick (2 to 4; to 8 with "experimental")
-    Q_INVOKABLE void setOption(const QString& name, bool on);   // markers | keepHud | gapfill | pictures | boost | fill | prefetchOff | hugePages | experimental
+    Q_INVOKABLE void setOption(const QString& name, bool on);   // markers | keepHud | gapfill | pictures | boost | fill | prefetchOff | hugePages | experimental | dlss4 | vramLimit
     Q_INVOKABLE void setOverlay(const QString& which);          // off | mangohud | panel: what is drawn over the game (at the next launch)
     Q_INVOKABLE void panel(const QString& word);      // next | off | 1 | 2 | 3 | tl | tr | bl | br
     Q_INVOKABLE QString keyName(int nativeScanCode, int modifiers) const;   // "Shift+7" for a key press; "" for one the panel cannot use
@@ -137,13 +147,19 @@ public:
     Q_INVOKABLE void copySessionLog();     // onto the clipboard, as text and as a file
     Q_INVOKABLE void deleteSessionLog();   // the log and the recording it was made from
     Q_INVOKABLE void keepSessionLog();     // it stays in the log folder; the offer goes
+    Q_INVOKABLE void makeBugReport();      // a short report from the newest layer log: written to logs/reports, copied, offered
+    Q_INVOKABLE void readBugReport();      // ... shown like a report
+    Q_INVOKABLE void closeBugReport();     // ... its dialog goes; the file stays in logs/reports
+    Q_INVOKABLE void fixProblem(const QString& id);    // accents | tearing: the setting changed, its old value kept for the undo
+    Q_INVOKABLE void undoProblem(const QString& id);   // the setting as it was before the fix
+    Q_INVOKABLE void leaveProblems();      // the note at the start goes; it comes back only for a problem not answered yet
     Q_INVOKABLE void refreshChecks();
     Q_INVOKABLE QString detectPrefix() const;         // "" when nothing is found
     Q_INVOKABLE bool looksLikePrefix(const QString& dir) const;
     Q_INVOKABLE void applyFix(const QString& key);
     Q_INVOKABLE void setMenuEntry(bool on);
     Q_INVOKABLE void setCliLink(bool on);
-    Q_INVOKABLE void openFolder(const QString& which);   // logs | runtime | prefix | licences
+    Q_INVOKABLE void openFolder(const QString& which);   // logs | reports | runtime | prefix | licences
     Q_INVOKABLE void openLink(const QString& url);       // a web page in the desktop's browser (https only)
     Q_INVOKABLE void copy(const QString& text);
     Q_INVOKABLE QString tidyPath(const QString& path) const;   // file:// off, ~ for the home folder
@@ -159,6 +175,8 @@ signals:
     void checksChanged();
     void integrationChanged();
     void toolChanged();
+    void bugReportChanged();
+    void problemsChanged();
     void said(const QString& text);                   // a short line for the window to show and fade
 
 private:
@@ -179,6 +197,10 @@ private:
     void finishChecks();
     QString confPath() const;
     QString selfPath() const;
+    QString newestLayerLog() const;
+    void findLayerProblem();       // m_layerProblem from the newest layer log, unless that one has been reported already
+    QString scrubbed(QString text) const;   // no folder, login or host name of this computer in it
+    void findProblems();           // m_problems from the desktop's own settings files
 
     QString m_runtime;
     QString m_runtimeNote;
@@ -220,5 +242,8 @@ private:
     bool m_mangohud = false;
     bool m_toolBusy = false;
     QString m_toolTitle, m_toolOutput;
+    QString m_bugReport;
+    QString m_layerProblem;
+    QVariantList m_problems;
     QString m_fake;                // MYRDDIN_FAKE=idle|launcher|running: for pictures and tests, no process is looked for
 };

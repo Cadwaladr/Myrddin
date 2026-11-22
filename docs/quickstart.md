@@ -44,13 +44,25 @@ The window has five pages:
   application menu, and the launch as a command to copy.
 - Options: the display and its refresh rate, the multiplier and the highest one Auto may pick,
   "Limit the game's own frame rate", the overlay with the panel's corner and key, how the HUD is
-  treated in generated frames, the advanced performance tweaks, running with logs and the
-  reports. Everything there is kept for the next launch; the multiplier, the limit on the game's
-  frame rate and the HUD and performance switches also act at once in a running game.
+  treated in generated frames, the NVIDIA settings from the LUG wiki (DLSS 4 and the graphics
+  memory limit, both on by default), the advanced performance tweaks, the known problems of your
+  desktop, running with logs, "Report a bug" and the reports. Everything there is kept for the
+  next launch; the multiplier, the limit on the game's frame rate and the HUD and performance
+  switches also act at once in a running game.
 - About: versions and licences.
 
 With "Run with logs" on, the window offers the session's log once the game has closed: read it,
 copy it, delete it or keep it. Your home folder's name is not in it.
+
+On KDE Plasma, the window says at its start when a setting of the desktop is known to get in the
+way of the game (accented letters on held keys, tearing), and only then, each with a Fix.
+Options, under "Known problems", has the same fixes and undoes each of them.
+
+When the layer's log of the last session says something went wrong, the Play page offers
+"Report a bug". The report holds those lines of the log with the lines around them, the
+settings and the versions of the system, without the names of your home folder, the game's
+folder or the computer. It is copied, written to `logs/reports/`, and the window opens a new
+issue on GitHub to paste it into. Options, under "Logs and reports", makes one at any time.
 
 ## Built from source
 

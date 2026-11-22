@@ -125,6 +125,10 @@
 #   sc-turbo displays  the displays and which one the game takes as its main one (the desktop's primary
 #                      display; another one: SC_MONITOR=NAME ./sc-turbo fg 4). Its refresh rate is what
 #                      the layer fills (another rate: SC_FG_TARGET=RATE)
+#   sc-turbo others    other frame generators and frame limits that the launch script or the environment
+#                      asks for (NVIDIA Smooth Motion, lsfg-vk, libstrangle, LatencyFleX, DXVK's, vkd3d-
+#                      proton's and MangoHud's limits, gamescope): "sc-turbo fg" keeps them off for its
+#                      launch and names them (MangoHud's limit is set to none at every such launch)
 #   sc-turbo fg-events   write the last ~4000 presents (which captures, timings) to logs/fg/events-*.txt;
 #                      with fg-params timing=1 also what became of each frame sent, logs/fg/presents-*.bin
 #                      (tools/display-timing.py FILE: when the display takes frames, which ones it drops)
@@ -227,7 +231,7 @@ mangohud_on() {
         export MANGOHUD=1
         if [ "${1:-}" = layer ]; then
             echo "MangoHud on: the frame rate it shows is the shown one, generated frames included"
-            echo "  (its own frame limit must stay off: fps_limit in MangoHud's settings would hold the layer's presents)"
+            echo "  (its own frame limit is off for this launch: fps_limit in its settings would hold the layer's presents)"
         else
             echo "MangoHud on: the frame rate it shows is the game's own"
         fi
@@ -308,12 +312,117 @@ vram_limit() {
         echo "  A game that runs on another card gets no limit."
     fi
 }
+# Other frame generators and frame limiters (logs/research/conflicts-research.md). A second frame
+# generator works on what this layer presents, generated frames included, and a limit held on the
+# game's frames or on every present upsets the layer's pacing. "sc-turbo fg" keeps them off for its
+# launch: NVIDIA Smooth Motion, lsfg-vk (2.x and 1.x), libstrangle and LatencyFleX through the
+# loader's switch that turns a layer off (it wins over the one that turns it on, wherever that is
+# set), and the limits DXVK, vkd3d-proton and MangoHud read from the environment set to 0 (none) in
+# the copy, after the script's own lines. Each that was asked for is named. The launch script itself
+# is never changed, and "sc-turbo run" (the window's Off) leaves all of it as the user set it.
+#   other_generators note    said before a launch with frame generation; adds to args[] of own_launch
+#   other_generators list    "sc-turbo others", for the window's system check: a line each,
+#                            "KIND<TAB>NAME<TAB>WHERE", KIND generator, limiter, forced or gamescope
+other_generators() {
+    local how="$1" script value file where found=()
+    script="$(grep -v '^[[:space:]]*#' "$launch" 2>/dev/null)"
+    # og_asked NAME: NAME is given a value in the environment or by an assignment in the launch
+    # script (comments aside), and $where says which. og_value NAME: that value (the environment's,
+    # else the script's last assignment).
+    og_asked() {
+        where=""
+        if [ -n "${!1:-}" ]; then where="the environment"
+        elif grep -Eq "(^|[[:space:];])(export[[:space:]]+)?$1=" <<< "$script"; then where="the launch script"
+        else return 1; fi
+    }
+    og_value() {
+        if [ -n "${!1:-}" ]; then printf '%s' "${!1}"
+        else grep -oE "(^|[[:space:];])(export[[:space:]]+)?$1=[\"']?[^\"' ;]*" <<< "$script" | tail -1 | sed -E "s/.*$1=[\"']?//"; fi
+    }
+    if og_asked NVPRESENT_ENABLE_SMOOTH_MOTION && [ "$(og_value NVPRESENT_ENABLE_SMOOTH_MOTION)" = 1 ]; then
+        found+=("generator	NVIDIA Smooth Motion (the driver's frame generation)	$where")
+        # (the driver's library reads the variable as well, should something force its layer in)
+        [ "$how" = note ] && [ "$SC_LAUNCH_COPY" != 0 ] && args+=(--set NVPRESENT_ENABLE_SMOOTH_MOTION=0)
+    fi
+    # lsfg-vk: asked for through its variables, or set up for the game in its settings (the first
+    # of its settings files that is there is the one it reads)
+    for value in LSFGVK_ENV LSFGVK_PROFILE LSFG_LEGACY LSFG_PROCESS ENABLE_LSFG; do
+        og_asked "$value" && { found+=("generator	lsfg-vk (Lossless Scaling's frame generation, $value)	$where"); break; }
+    done
+    for file in "${LSFGVK_CONFIG:-}" "${LSFG_CONFIG:-}" "${XDG_CONFIG_HOME:-$HOME/.config}/lsfg-vk/conf.toml" "$HOME/.config/lsfg-vk/conf.toml" /etc/lsfg-vk/conf.toml; do
+        [ -n "$file" ] && [ -f "$file" ] || continue
+        case "$file" in "$HOME"/*) where="~${file#"$HOME"}" ;; *) where="$file" ;; esac
+        grep -Eiq '^[^#]*citizen' "$file" && found+=("generator	lsfg-vk (Lossless Scaling's frame generation)	$where (a profile for Star Citizen)")
+        break
+    done
+    if og_asked ENABLE_VK_LAYER_TORKEL104_libstrangle || { grep -Eq '(^|[[:space:];|&])strangle(vk)?[[:space:]]' <<< "$script" && where="the launch script"; }; then
+        found+=("limiter	libstrangle (a frame-rate limiter)	$where")
+    fi
+    og_asked LFX && found+=("limiter	LatencyFleX (it holds the game's frames back)	$where")
+    for value in VKD3D_FRAME_RATE DXVK_FRAME_RATE MANGOHUD_FPS_LIMIT; do
+        if og_asked "$value" && [ "$(og_value "$value")" != 0 ]; then
+            found+=("limiter	$value=$(og_value "$value") (a frame-rate limit)	$where")
+            [ "$how" = note ] && [ "$SC_LAUNCH_COPY" != 0 ] && args+=(--set "$value=0")
+        fi
+    done
+    # A layer list that names one of them keeps it on whatever turns it off (the loader's order,
+    # tested with loader 1.4.341): said, not changed.
+    for value in VK_INSTANCE_LAYERS VK_LOADER_LAYERS_ENABLE VK_LOADER_LAYERS_ALLOW; do
+        og_asked "$value" || continue
+        case "$(og_value "$value")" in
+        *NV_present*|*LSFG*|*LS_frame_generation*|*libstrangle*|*LatencyFleX*) found+=("forced	$value	$where") ;;
+        esac
+    done
+    if [ -n "${GAMESCOPE_WAYLAND_DISPLAY:-}${ENABLE_GAMESCOPE_WSI:-}" ]; then
+        found+=("gamescope	gamescope	the environment")
+    elif grep -Eq '(^|[[:space:];|&])gamescope([[:space:]]|$)' <<< "$script"; then
+        found+=("gamescope	gamescope	the launch script")
+    fi
+    if [ "$how" = list ]; then
+        [ ${#found[@]} -gt 0 ] && printf '%s\n' "${found[@]}"
+        return 0
+    fi
+    export DISABLE_LAYER_NV_PRESENT_1=1 DISABLE_LSFGVK=1 DISABLE_LSFG=1 DISABLE_VK_LAYER_TORKEL104_libstrangle=1 DISABLE_LFX=1
+    # MangoHud, wherever it is switched on: below the layer it would hold every present it limits,
+    # generated frames too. Its limit is none for this launch and its other settings stay: read_cfg
+    # reads its settings file as usual and the option after it wins (tested 2026-11-22 in the test
+    # program: a settings file with fps_limit=20 held x2 to 20 frames shown; with this, 60).
+    if [ -z "${MANGOHUD_CONFIG:-}" ]; then export MANGOHUD_CONFIG="read_cfg,fps_limit=0"
+    else export MANGOHUD_CONFIG="$MANGOHUD_CONFIG,fps_limit=0"; fi
+    local line kind name
+    for line in ${found[@]+"${found[@]}"}; do
+        IFS=$'\t' read -r kind name where <<< "$line"
+        case "$kind" in
+        generator)
+            echo "NOTE: $name is switched on in $where."
+            echo "  Two frame generators would work on the same frames: it is kept off for this launch."
+            echo "  Frame generation Off in the window (\"sc-turbo run\") leaves it on." ;;
+        limiter)
+            case "$name" in
+            *=*) echo "NOTE: $name is set in $where."
+                 if [ "$SC_LAUNCH_COPY" != 0 ]; then echo "  It would hold the game's frames and upset how Myrddin spaces its own: it is set to 0 (none) for this launch."
+                 else echo "  It holds the game's frames and upsets how Myrddin spaces its own; without a copy of the launch script (SC_LAUNCH_COPY=0) it stays."; fi ;;
+            *) echo "NOTE: $name is switched on in $where."
+               echo "  It would upset how Myrddin spaces its frames: it is kept off for this launch." ;;
+            esac
+            echo "  (Myrddin's own limit: Options, \"Limit the game's own frame rate\".)" ;;
+        forced)
+            echo "NOTE: $name in $where names another frame generator or limiter, which keeps it on"
+            echo "  whatever Myrddin sets for this launch. Take it out of $name there." ;;
+        gamescope)
+            echo "NOTE: the game runs inside gamescope ($where). gamescope paces every frame itself, and"
+            echo "  Myrddin reads the desktop's display, not gamescope's: untested. Start the game without gamescope." ;;
+        esac
+    done
+}
 # From here on "$launch" is this project's copy of the user's launch script (see the top of this part).
 # A script no copy can be made of (not a shell script, or one that looks for its files from its own
 # place) is started as it is; what sc-turbo exports reaches it all the same.
 own_launch() {
-    [ "$SC_LAUNCH_COPY" = 0 ] && return 0
     local copy word args=()
+    # (a launch with frame generation: other frame generators and limits are kept off, and named)
+    [ "${fg_launch:-0}" = 1 ] && other_generators note
+    [ "$SC_LAUNCH_COPY" = 0 ] && return 0
     copy="$here/logs/launch/$(basename "$launch")"
     if [ "$SC_NVIDIA_FLAGS" != 0 ]; then
         args+=(--default __GL_SHADER_DISK_CACHE=1 --default __GL_SHADER_DISK_CACHE_SIZE=10737418240
@@ -516,6 +625,7 @@ probe|capture)
     ;;
 fg)
     [ -f "$here/build/fg/libsc_fg.so" ] || { echo "build/fg/libsc_fg.so is missing (./build.sh install)"; exit 1; }
+    fg_launch=1
     need_launch
     mkdir -p "$here/logs/fg"; rm -f "$here/logs/fg/OFF" "$here/logs/fg/LOADING" "$here/logs/fg/DUMP" "$here/logs/fg/MULT" "$here/logs/fg/HUDOFF" "$here/logs/fg/HUDLAYEROFF" "$here/logs/fg/HUDSCAN" "$here/logs/fg/TRACE" "$here/logs/fg/LAYER" "$here/logs/fg/SCDON" "$here/logs/fg/NOCAP" "$here/logs/fg/EVENTS" "$here/logs/fg/PARAMS" "$here"/logs/fg/PARAMS.layer-*
     # (the number is optional: "sc-turbo fg hud" is x2 with MangoHud)
@@ -772,6 +882,7 @@ threads) exec "$here/tools/sc-threads" show ;;
 threads-ab) shift; exec "$here/tools/sc-ab-threads.sh" "$@" ;;
 displays)
     "$here/tools/sc-monitor" show ;;
+others) other_generators list ;;
 go)
     pgrep -f 'StarCitizen\.exe' >/dev/null || { echo "StarCitizen.exe is not running"; exit 1; }
     touch "$here/logs/capture/GO" && echo "capture series requested"

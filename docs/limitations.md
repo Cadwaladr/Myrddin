@@ -10,8 +10,10 @@ run on.
   selected in the game. Under Wine that needs NVAPI (`nvapi64.dll` from dxvk-nvapi) and the
   driver's NGX libraries in the prefix: the LUG Helper installs the first, the LUG's runners link
   in the second, and `sc-turbo fg` says before the launch when either is missing. AMD and Intel
-  GPUs are not supported. A fallback without the game's vectors exists (`SC_FG_FALLBACK=1`) and has
-  never been tested.
+  GPUs are not supported. With another upscaler chosen in the game (FSR, TSR) no frames are
+  generated and the game's own rate is shown; back on DLSS, generation resumes by itself. A
+  fallback without the game's vectors exists (`SC_FG_FALLBACK=1`): it generates frames from the
+  pictures alone. It has been tried in the test program only, not in the game.
 - Linux, with the game running under Wine. The layer works on the host side of Wine and relies
   on Wine passing the game's Vulkan calls through to the host. The game has only been played
   with Wine's Wayland driver. X11 and Proton are untested.
