@@ -65,8 +65,8 @@ ten-second averages, busy the slowest tenth of them.
 | Lorville | 36 (29) | 117 (110) |
 | Orison | 29 (25) | 114 (92) |
 | Pyro Gateway | 31 (28) | 117 (109) |
-| Port Tressler | 24 (17) | 83 (59) |
-| Seraphim Station (during IAE) | 40 (38) | 119 (112) |
+| Port Tressler ( during IAE 2956 ) | 24 (17) | 83 (59) |
+| Seraphim Station | 40 (38) | 119 (112) |
 
 Generated frames make motion smoother but delay every real frame. What Myrddin adds is the time
 it takes to generate the frames and the wait while the generated frames ahead of each real frame
