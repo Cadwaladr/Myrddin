@@ -4,8 +4,7 @@ Myrddin's frame generation normally goes up to 4×: up to three generated frames
 two of the game's own. With the experimental setting it goes up to 8×, seven generated frames
 between every two. It is off by default and acts from the next launch.
 
-This is experimental. It has passed the headless tests below; it has not been tried in the game
-yet.
+This is experimental. It has passed the headless tests below.
 
 ## When it helps
 
@@ -76,10 +75,15 @@ Without the setting, `./sc-turbo fg 6` starts nothing and says why.
 
 ## How it works with the other settings
 
-- **Performance.** With "Performance" off, the default, Auto takes the fewest generated frames
-  that fill the display and holds the game to an even part of the display's rate. With 8× that
-  part can be an eighth: 15 frames a second at 120 Hz. With "Performance" on, the game is never
-  held back and Auto takes the most generated frames it can feed.
+- **Limiting the game's own frame rate.** By default the game is never held back and Auto takes
+  the most generated frames its rate can feed. With Options' "Limit the game's own frame rate"
+  on (`SC_FG_FILL=1`), Auto takes the fewest generated frames that fill the display and holds the
+  game to an even part of the display's rate. With 8× that part can be an eighth: 15 frames a
+  second at 120 Hz.
+- **Loading screens.** While the game shows one, its own rate crawls, and Auto would go to the
+  highest multiplier there. Auto starts at 3× and takes 3× at most while a loading screen is up,
+  then goes up by itself once the game's rate asks for it ([how it is
+  detected](usage.md#what-the-layer-does)).
 - **A game launched without the setting.** A multiplier above 4× asked for while it runs (from
   the window or with `fg-mult`) is held at 4×, and the layer's log says so: "this launch has room
   for x4 at most".
@@ -107,7 +111,6 @@ at 120 Hz:
 | 6×, held | 19.7 a second | 5 | 117.8 a second | intact, nothing lost |
 | 8×, held | 14.5 a second | 7 | 115.3 a second | intact, nothing lost |
 
-Auto up to 8×, with the game at about 20 a second, went from 8× to 7× to 6×. Without the setting,
-6× asked for stayed 4×, with the same swapchain as before the setting existed.
-
-Results from the game will be added here once it has been tried there.
+Auto up to 8×, with the game at about 20 a second and its frame rate limited ("Limit the game's
+own frame rate" on), started at 3× and went to 6× within two seconds. Without the setting, 6×
+asked for stayed 4×, with the same swapchain as before the setting existed.

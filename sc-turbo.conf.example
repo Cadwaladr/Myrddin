@@ -44,11 +44,11 @@
 #export SC_FG_PICTURES=0  # the map is moved like the markers (its lines double)
 #export SC_FG_BOOST=1     # the GPU is asked to keep its speed up while the game leaves it half idle
 
-# A multiplier that follows the game's rate ("fg N" without "fixed", the window's Auto) limits the
-# game's own frames to an even part of the display's rate, so that every refresh gets a frame: a
-# smoother picture, with more latency. With this line it never does: the quickest response (the
-# window's "Performance" on).
-#SC_FG_FILL=0
+# A multiplier that follows the game's rate ("fg N" without "fixed", the window's Auto) never limits
+# the game's own frames: the quickest response. With this line it limits them to an even part of the
+# display's rate, so that every refresh gets a frame, with more latency (the window's Options, "Limit
+# the game's own frame rate").
+#SC_FG_FILL=1
 
 # Experimental: multipliers from 5x to 8x ("fg 6", fg-mult 6; the window's Options, "Experimental:
 # 5x to 8x"), for places where the game's own rate falls below 30 frames a second. Room for that

@@ -107,12 +107,12 @@ cp sc-turbo.conf.example sc-turbo.conf
 - `export SC_FG_GAPFILL=0`, `export SC_FG_PICTURES=0`, `export SC_FG_BOOST=1`: the layer's own
   settings, which it reads from the environment, so they are exported: frames that come without
   the HUD are not bridged, the map is moved like the markers, the GPU's speed is held up
-- `SC_FG_FILL=0`: with a multiplier that follows the game's rate, the game's own frames are never
-  limited and the layer takes the most generated frames it can feed: the quickest response.
-  Without the line the game's frames are limited to an even part of the display's rate and the
-  layer takes the fewest generated frames that fill the display: a smoother picture, with more
-  latency (the window's "Performance" switch, off by default; `sc-turbo fg-params fill=0|1` in a
-  running game)
+- `SC_FG_FILL=1`: with a multiplier that follows the game's rate, the game's own frames are
+  limited to an even part of the display's rate and the layer takes the fewest generated frames
+  that fill the display, so that every refresh gets a frame, with more latency. Without the line
+  they are never limited and the layer takes the most generated frames it can feed: the quickest
+  response (the window's Options, "Limit the game's own frame rate", off by default;
+  `sc-turbo fg-params fill=1|0` in a running game)
 - `export SC_FG_EXPERIMENTAL=1`: experimental, off by default. Multipliers from ×5 to ×8
   (`sc-turbo fg 6`, `fg-mult 6`; the window's Options, "Experimental: 5× to 8×"), for places where
   the game's own rate falls below 30 frames a second. The layer makes room for that many
@@ -136,11 +136,18 @@ one, two or three generated frames (up to seven with the [experimental
 setting](experimental-multipliers.md)).
 
 - The multiplier is set at launch and can be changed while the game runs. Up to that limit it
-  follows the game's frame rate, and the game's frames are limited to an even part of the
-  display's rate so that the display is filled evenly (`SC_FG_FILL=0`, the window's
-  "Performance" switched on, never slows the game down instead). If the game alone gets above
+  follows the game's frame rate without slowing the game down (`SC_FG_FILL=1`, the window's
+  "Limit the game's own frame rate", limits the game's frames to an even part of the display's
+  rate instead, so that the display is filled evenly). If the game alone gets above
   92 % of the refresh rate, generation pauses until it drops below 80 %. With the word `fixed`
   (the window's 2×, 3× and 4×) the multiplier is held instead, whatever the game's frame rate.
+- Loading screens. While the game loads, its own frame rate crawls (9 to 12 frames a second at
+  the end of loading into the universe), and a multiplier that follows it would go to its limit.
+  So a multiplier that follows the game's rate starts at 3× and takes 3× at most while the game
+  shows a loading screen; once the screen has gone it follows the rate again, up to its limit.
+  The game writes in its own log (`Game.log`) when a loading screen opens and closes:
+  `tools/sc-loading`, which every `fg` launch starts, reads that log from outside the game and
+  tells the layer (its notes: `logs/loading.out`). A held multiplier stays where it is.
 - The HUD stays sharp. The game draws its HUD into a layer of its own, and `sc_fg` captures it,
   interpolates the picture without it and puts the HUD back over every generated frame. A frame
   that arrives without a capture gets its HUD-free picture worked out from the frame and the

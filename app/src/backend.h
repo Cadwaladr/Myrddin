@@ -123,7 +123,7 @@ public:
     // Each of these is kept for the next launch and, where a game runs with the layer, sent to it at once.
     Q_INVOKABLE void setMode(const QString& mode);    // off | 2 | 3 | 4 (the multiplier, held there) | auto (the layer picks, up to the limit)
     Q_INVOKABLE void setLimit(int n);                 // the highest multiplier Auto may pick (2 to 4; to 8 with "experimental")
-    Q_INVOKABLE void setOption(const QString& name, bool on);   // markers | keepHud | gapfill | pictures | boost | performance | prefetchOff | hugePages | experimental
+    Q_INVOKABLE void setOption(const QString& name, bool on);   // markers | keepHud | gapfill | pictures | boost | fill | prefetchOff | hugePages | experimental
     Q_INVOKABLE void setOverlay(const QString& which);          // off | mangohud | panel: what is drawn over the game (at the next launch)
     Q_INVOKABLE void panel(const QString& word);      // next | off | 1 | 2 | 3 | tl | tr | bl | br
     Q_INVOKABLE QString keyName(int nativeScanCode, int modifiers) const;   // "Shift+7" for a key press; "" for one the panel cannot use

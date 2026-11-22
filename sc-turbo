@@ -9,7 +9,9 @@
 #   sc-turbo fg [2|3|4] [fixed] [hud] [panel] [off] [nomarkers] [watch] [sched=NAME] [trace|old|older|next]  launch with frame generation (DLSS must be the
 #                      upscaler in game); the number is the highest multiplier, default 2: up to it the
 #                      layer picks the multiplier as the game's own rate changes (the launcher window's
-#                      "Auto"). Log and dumps: logs/fg
+#                      "Auto"). Log and dumps: logs/fg. It starts at x3 at most, and takes x3 at most
+#                      while the game shows a loading screen (tools/sc-loading reads that from the
+#                      game's own Game.log), where its rate crawls; then it follows the rate again.
 #                      ("fixed": the multiplier is held at the number, whatever the game's rate (the
 #                      window's x2, x3, x4); fg-mult changes either in the running game.
 #                      5 to 8: experimental, only with SC_FG_EXPERIMENTAL=1 in sc-turbo.conf
@@ -90,12 +92,13 @@
 #                      a frame). "gate=0 guard=0 first=0 gpuwait=0" is how it was before these four.
 #                      How the multiplier follows the game: fill=0 the most generated frames that do not
 #                      hold the game back (a game that could do 50 a second gets x2 and shows 100: what a
-#                      window's "Performance" on, SC_FG_FILL=0 in sc-turbo.conf), fill=1 the fewest that fill the
-#                      display (the same game gets x3, is held at 40 and shows 120, evenly: a smoother picture with
-#                      more delay, what a launch sets); probe=0|1 (a held game is asked what it could do by letting
-#                      one frame on early now and then, instead of guessing); adapt=0 the multiplier is
-#                      held where it was asked for, adapt=1 (default) it follows the game's rate (what
-#                      "fg N fixed" and "fg-mult N fixed|auto" set).
+#                      launch sets), fill=1 the fewest that fill the display (the same game gets x3, is held
+#                      at 40 and shows 120, every refresh a frame, with more delay: the window's "Limit the
+#                      game's own frame rate", SC_FG_FILL=1 in sc-turbo.conf); probe=0|1 (a held game is
+#                      asked what it could do by letting one frame on early now and then, instead of
+#                      guessing); adapt=0 the multiplier is held where it was asked for, adapt=1
+#                      (default) it follows the game's rate (what "fg N fixed" and "fg-mult N
+#                      fixed|auto" set).
 #                      A frame that comes without a HUD capture of its own: gapfill=1 (default) its scene is
 #                      worked out from the frame and the last capture, and the HUD stays apart from what is
 #                      interpolated; gapfill=0: such frames are not generated from, and when several come
@@ -472,6 +475,12 @@ start_tune() {
     nohup "$here/tools/sc-tune" follow "${what[@]}" >> "$here/logs/tune.out" 2>&1 &
     echo "While the game runs: $text; as before after it (log: logs/tune.out)"
 }
+# The game's loading screens, for the layer (tools/sc-loading follow): from the game's own Game.log,
+# read from outside the game; while one is up, a multiplier that follows the game's rate takes x3 at most.
+start_loading() {
+    mkdir -p "$here/logs"
+    nohup "$here/tools/sc-loading" follow "$SC_PREFIX" "$here/logs/fg" >> "$here/logs/loading.out" 2>&1 &
+}
 logs="$here/logs/probe"
 
 newest_log() { ls -t "$here"/logs/probe/probe-StarCitizen*.log "$here"/logs/capture/probe-StarCitizen*.log 2>/dev/null | head -1; }
@@ -508,7 +517,7 @@ probe|capture)
 fg)
     [ -f "$here/build/fg/libsc_fg.so" ] || { echo "build/fg/libsc_fg.so is missing (./build.sh install)"; exit 1; }
     need_launch
-    mkdir -p "$here/logs/fg"; rm -f "$here/logs/fg/OFF" "$here/logs/fg/DUMP" "$here/logs/fg/MULT" "$here/logs/fg/HUDOFF" "$here/logs/fg/HUDLAYEROFF" "$here/logs/fg/HUDSCAN" "$here/logs/fg/TRACE" "$here/logs/fg/LAYER" "$here/logs/fg/SCDON" "$here/logs/fg/NOCAP" "$here/logs/fg/EVENTS" "$here/logs/fg/PARAMS" "$here"/logs/fg/PARAMS.layer-*
+    mkdir -p "$here/logs/fg"; rm -f "$here/logs/fg/OFF" "$here/logs/fg/LOADING" "$here/logs/fg/DUMP" "$here/logs/fg/MULT" "$here/logs/fg/HUDOFF" "$here/logs/fg/HUDLAYEROFF" "$here/logs/fg/HUDSCAN" "$here/logs/fg/TRACE" "$here/logs/fg/LAYER" "$here/logs/fg/SCDON" "$here/logs/fg/NOCAP" "$here/logs/fg/EVENTS" "$here/logs/fg/PARAMS" "$here"/logs/fg/PARAMS.layer-*
     # (the number is optional: "sc-turbo fg hud" is x2 with MangoHud)
     case "${2:-}" in ''|*[!0-9]*) fg_mult=2; fg_words=("${@:2}") ;; *) fg_mult="$2"; fg_words=("${@:3}") ;; esac
     # 5x to 8x are experimental: only with SC_FG_EXPERIMENTAL=1 (sc-turbo.conf), which the layer reads
@@ -523,11 +532,12 @@ fg)
     # HUD content that moves over the screen (markers, the compass, a flight display) is put where it
     # is on its way in every generated frame, unless "nomarkers" or sc-turbo.conf says otherwise.
     export SC_FG_MARKERS="${SC_FG_MARKERS:-1}"
-    # A multiplier that follows the game's rate takes the fewest generated frames that fill the display,
-    # with the game's own rate limited to an even part of the display's (a smoother picture), unless
-    # sc-turbo.conf says SC_FG_FILL=0 (the window's "Performance" on): then the most that do not hold
-    # the game back (the quickest response).
-    export SC_FG_FILL="${SC_FG_FILL:-1}"
+    # A multiplier that follows the game's rate takes the most generated frames that do not hold the
+    # game back (the quickest response), unless sc-turbo.conf says SC_FG_FILL=1 (the window's "Limit the
+    # game's own frame rate"): then the fewest that fill the display, with the game's own rate limited to
+    # an even part of the display's so that every refresh gets a frame. (The layer's own default, for
+    # whatever loads it without sc-turbo, is 1; a launch always says which.)
+    export SC_FG_FILL="${SC_FG_FILL:-0}"
     for word in ${fg_words[@]+"${fg_words[@]}"}; do
         case "$word" in
         fixed) export SC_FG_ADAPT=0 ;;   # the multiplier is held at the number
@@ -588,14 +598,18 @@ fg)
         echo "  The multiplier is held at x$SC_FG_MULT (\"fixed\"); without that word it follows the game's rate, up to x$SC_FG_MULT."
     fi
     if [ "${SC_FG_ADAPT:-1}" != 0 ] && [ "$SC_FG_FILL" = 1 ]; then
-        echo "  The game's own rate is limited where that fills the display evenly (Performance off); \"sc-turbo fg-params fill=0\" lets it run free."
+        echo "  The game's own rate is limited where that fills the display evenly (SC_FG_FILL=1, the window's \"Limit the game's own frame rate\"); \"sc-turbo fg-params fill=0\" lets it run free."
     fi
     [ -e "$here/logs/fg/HUDOFF" ] && echo "  The HUD is not kept apart (SC_FG_KEEP_HUD=0); \"sc-turbo fg-hud on\" switches that on in the running game."
+    if [ "${SC_FG_ADAPT:-1}" != 0 ] && [ "$fg_mult" -gt 3 ]; then
+        echo "  It starts at x3 and takes x3 at most while the game shows a loading screen (log: logs/loading.out)."
+    fi
     if [ "${io_watch:-0}" = 1 ]; then
         mkdir -p "$here/logs/io"
         nohup "$here/tools/sc-iowatch" > "$here/logs/io/watch.out" 2>&1 &
         echo "Running with logs: the game's disk and memory use is noted from outside (afterwards: sc-turbo iowatch report)"
     fi
+    start_loading
     start_sched
     start_tune
     launch_now

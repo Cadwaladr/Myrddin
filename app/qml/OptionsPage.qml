@@ -5,7 +5,7 @@ PageView {
     id: page
     signal go(string page)
     title: "Options"
-    subtitle: "Kept for every launch. The multiplier and the HUD and performance switches also act at once in a running game."
+    subtitle: "Kept for every launch. The multiplier, the limit on the game's frame rate and the HUD and performance switches also act at once in a running game."
 
     readonly property bool live: backend.state === "running" && backend.layerSession
 
@@ -76,12 +76,12 @@ PageView {
             Toggle { checked: backend.conf.experimental; onToggled: (v) => backend.setOption("experimental", v) }
         }
         SettingRow {
-            title: "Performance"
-            detail: "For Auto. On: the game's own frames are never limited, so it answers as fast as it can; the shown rate may stay under the display's. "
-                  + "Off: the game's frames are limited to an even part of the display's rate (a half, a third or a quarter; down to an eighth with 5× to 8×), so that every refresh gets a frame: a smoother picture, with more latency. "
-                  + "At 120 Hz, a game that could do 50 frames a second shows 100 with On (2×, the game at 50) and 120 with Off (3×, the game held at 40). Off by default."
+            title: "Limit the game's own frame rate"
+            detail: "For Auto. On: the game's own frames are limited to an even part of the display's rate (a half, a third or a quarter; down to an eighth with 5× to 8×), so that every refresh gets a frame. "
+                  + "That adds latency: the game makes fewer frames of its own. Off: they are never limited, so the game answers as fast as it can; the shown rate may stay under the display's. "
+                  + "At 120 Hz, a game that could do 50 frames a second shows 100 with this off (2×, the game at 50) and 120 with it on (3×, the game held at 40). Off by default."
             dimmed: backend.prefs.mode !== "auto"
-            Toggle { checked: backend.conf.performance; onToggled: (v) => backend.setOption("performance", v) }
+            Toggle { checked: backend.conf.fill; onToggled: (v) => backend.setOption("fill", v) }
         }
     }
 

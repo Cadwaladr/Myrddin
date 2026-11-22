@@ -13,6 +13,19 @@ bad()  { echo "  FAIL  $1"; fails=$((fails + 1)); }
 has()  { grep -qxF -- "$2" "$1" 2>/dev/null && ok "$3" || { bad "$3 (no line \"$2\" in $(basename "$1"))"; }; }
 hasnt(){ grep -qE -- "$2" "$1" 2>/dev/null && bad "$3 (found /$2/ in $(basename "$1"))" || ok "$3"; }
 fresh() { rm -rf "$work/t"; eval "$("$here/fake-runtime.sh" "$work/t")"; rt="$work/t/runtime"; }
+# Whether the game or an RSI Launcher of this user is open on this machine, found as the window finds
+# them (Backend::launcherOpen): the program one of Wine's, the command line naming the launcher.
+real_session() {
+    local dir exe
+    pgrep -x StarCitizen.exe > /dev/null && return 0
+    for dir in /proc/[0-9]*; do
+        [ -O "$dir" ] || continue
+        exe="$(readlink "$dir/exe" 2>/dev/null)" || continue
+        case "${exe##*/}" in wine*) ;; *) continue ;; esac
+        tr '\0' ' ' < "$dir/cmdline" 2>/dev/null | grep -qi 'rsi launcher\.exe' && return 0
+    done
+    return 1
+}
 # the window, drawn nowhere, for SECONDS/1000, then gone
 window() {   # STATE SETTLE_MS [args...]
     local state=$1 settle=$2; shift 2
@@ -61,11 +74,11 @@ has "$rt/calls.log" "fg 4 panel off watch" "Off with Myrddin's panel: the layer 
 grep -q 'overlay words: The game.s rate and pacing; nothing is generated' "$work/last.err" && ok "and Play says what the panel shows then" || bad "and Play says what the panel shows then ($(grep -o 'overlay words: .*' "$work/last.err"))"
 fresh
 fresh
-window idle 2500 --test-eval 'backend.panel(backend.conf.performance === false ? "tl" : "tr")' || bad "the window ran"
-has "$rt/calls.log" "fg-panel tl" "Performance is off at first"
+window idle 2500 --test-eval 'backend.panel(backend.conf.fill === false ? "tl" : "tr")' || bad "the window ran"
+has "$rt/calls.log" "fg-panel tl" "\"Limit the game's own frame rate\" is off at first"
 hasnt "$rt/sc-turbo.conf" 'SC_FG_FILL' "which is what a launch does anyway: no line for it"
 fresh
-window idle 2500 --test-eval 'backend.setMode("4"); backend.prefs.watch = true; backend.setOption("markers", false); backend.setOption("keepHud", false); backend.setOption("gapfill", false); backend.setOption("pictures", false); backend.setOption("boost", true); backend.setOption("performance", true); backend.setOption("rm -rf", true); backend.launch()' || bad "the window ran"
+window idle 2500 --test-eval 'backend.setMode("4"); backend.prefs.watch = true; backend.setOption("markers", false); backend.setOption("keepHud", false); backend.setOption("gapfill", false); backend.setOption("pictures", false); backend.setOption("boost", true); backend.setOption("fill", true); backend.setOption("rm -rf", true); backend.launch()' || bad "the window ran"
 sleep 0.5
 has "$rt/calls.log" "fg 4 fixed watch" "\"watch\" is passed"
 hasnt "$rt/calls.log" '^fg-(params|hud)' "no game runs: nothing is sent to one"
@@ -74,12 +87,12 @@ has "$rt/sc-turbo.conf" "SC_FG_KEEP_HUD=0" "the HUD not kept apart is in sc-turb
 has "$rt/sc-turbo.conf" "export SC_FG_GAPFILL=0" "frames without the HUD not bridged: exported from sc-turbo.conf"
 has "$rt/sc-turbo.conf" "export SC_FG_PICTURES=0" "the map moved: exported from sc-turbo.conf"
 has "$rt/sc-turbo.conf" "export SC_FG_BOOST=1" "the GPU's speed held up: exported from sc-turbo.conf"
-has "$rt/sc-turbo.conf" "SC_FG_FILL=0" "Performance on: the game's frames never limited, in sc-turbo.conf"
+has "$rt/sc-turbo.conf" "SC_FG_FILL=1" "the game's frames limited to fill the display: in sc-turbo.conf"
 hasnt "$rt/sc-turbo.conf" 'rm -rf' "a switch that is not one of them is not written"
 ( . "$rt/sc-turbo.conf"; [ "$(sh -c 'echo $SC_FG_GAPFILL$SC_FG_PICTURES$SC_FG_BOOST')" = 001 ] ) && ok "a program started after it sees the three" || bad "a program started after it sees the three"
 window idle 2500 --test-eval 'backend.conf.targetRate = "100"' || bad "the window ran"
 [ "$(grep -c 'SC_FG_GAPFILL\|SC_FG_BOOST\|SC_FG_KEEP_HUD\|SC_FG_PICTURES\|SC_FG_FILL' "$rt/sc-turbo.conf")" = 5 ] && ok "they are read back and written once" || bad "they are read back and written once"
-window idle 2500 --test-eval 'backend.setOption("keepHud", true); backend.setOption("gapfill", true); backend.setOption("pictures", true); backend.setOption("boost", false); backend.setOption("performance", false)' || bad "the window ran"
+window idle 2500 --test-eval 'backend.setOption("keepHud", true); backend.setOption("gapfill", true); backend.setOption("pictures", true); backend.setOption("boost", false); backend.setOption("fill", false)' || bad "the window ran"
 hasnt "$rt/sc-turbo.conf" 'SC_FG_GAPFILL|SC_FG_BOOST|SC_FG_KEEP_HUD|SC_FG_PICTURES|SC_FG_FILL' "back at their defaults the lines are taken out"
 
 echo "3. nothing is launched while something is in the way"
@@ -92,18 +105,18 @@ hasnt "$rt/calls.log" '^(fg|run)' "no second launch while the launcher is open"
 
 echo "4. in the running game"
 fresh
-window running 3000 --test-eval 'backend.setMode("3"); backend.setOption("markers", false); backend.setOption("keepHud", false); backend.setOption("boost", true); backend.setOption("performance", true); backend.setOption("bad;name", true); backend.setMode("$(id)"); backend.panel("tr"); backend.panel("--help")' || bad "the window ran"
+window running 3000 --test-eval 'backend.setMode("3"); backend.setOption("markers", false); backend.setOption("keepHud", false); backend.setOption("boost", true); backend.setOption("fill", true); backend.setOption("bad;name", true); backend.setMode("$(id)"); backend.panel("tr"); backend.panel("--help")' || bad "the window ran"
 has "$rt/calls.log" "fg-mult 3 fixed" "a multiplier of one's own is sent, held"
 has "$rt/calls.log" "fg-params markers=0" "a switch of Options is sent"
 has "$rt/calls.log" "fg-hud off" "the HUD switch is sent"
 has "$rt/calls.log" "fg-params boost=1" "the GPU switch is sent"
-has "$rt/calls.log" "fg-params fill=0" "Performance on is sent as the layer's \"fill\" the other way round"
+has "$rt/calls.log" "fg-params fill=1" "\"Limit the game's own frame rate\" is sent as the layer's \"fill\""
 has "$rt/calls.log" "fg-panel tr" "the panel's corner is sent"
 has "$rt/sc-turbo.conf" "SC_FG_MARKERS=0" "and what was switched is kept for the next launch"
 hasnt "$rt/calls.log" 'bad|id\)|^rm|help' "words outside the lists are not sent"
 hasnt "$rt/calls.log" '^(fg [0-9]|run)' "nothing is launched"
-window running 2500 --test-eval 'backend.setOption("performance", false)' || bad "the window ran"
-has "$rt/calls.log" "fg-params fill=1" "and Performance off again"
+window running 2500 --test-eval 'backend.setOption("fill", false)' || bad "the window ran"
+has "$rt/calls.log" "fg-params fill=0" "and off again"
 hasnt "$rt/sc-turbo.conf" 'SC_FG_FILL' "which is what a launch does anyway: no line for it"
 window running 2500 --test-eval 'backend.setMode("off")' || bad "the window ran"
 has "$rt/calls.log" "fg-off" "Off stops generation"
@@ -116,7 +129,7 @@ cat > "$rt/sc-turbo.conf" <<CONF
 SC_PREFIX="\$HOME/somewhere else"
 SC_LAUNCH="\$SC_PREFIX/start.sh"
 SC_FG_PRIORITY=5
-export SC_FG_FILL=0
+export SC_FG_FILL=1
 export WINE_SOMETHING="a b"
 CONF
 window idle 2500 --test-eval 'backend.conf.targetRate = "144"' || bad "the window ran"
@@ -124,15 +137,15 @@ has "$rt/sc-turbo.conf" "SC_PREFIX='$HOME/somewhere else'" "a \$HOME path is kep
 has "$rt/sc-turbo.conf" "SC_LAUNCH='$HOME/somewhere else/start.sh'" "a \$SC_PREFIX path is kept (written out)"
 has "$rt/sc-turbo.conf" "SC_FG_TARGET=144" "the new value is written"
 has "$rt/sc-turbo.conf" "SC_FG_PRIORITY=5" "an unknown setting is kept"
-has "$rt/sc-turbo.conf" "SC_FG_FILL=0" "a fill rule of 0 set by hand is read as Performance on, and kept"
+has "$rt/sc-turbo.conf" "SC_FG_FILL=1" "a fill rule of 1 set by hand is read as \"Limit the game's own frame rate\" on, and kept"
 has "$rt/sc-turbo.conf" 'export WINE_SOMETHING="a b"' "an unknown export is kept"
 has "$rt/sc-turbo.conf" "# my own note" "a comment is kept"
 window idle 2500 --test-eval 'backend.conf.targetRate = ""' || bad "the window ran"
 [ "$(grep -c 'my own note' "$rt/sc-turbo.conf")" = 1 ] && [ "$(grep -c 'lines the window does not know' "$rt/sc-turbo.conf")" = 1 ] && ok "nothing doubles on the second save" || bad "nothing doubles on the second save"
 hasnt "$rt/sc-turbo.conf" 'SC_FG_TARGET' "an emptied value is taken out"
-echo 'export SC_FG_FILL=1' >> "$rt/sc-turbo.conf"
-window idle 2500 --test-eval 'if (backend.conf.performance === false) backend.conf.targetRate = "165"' || bad "the window ran"
-has "$rt/sc-turbo.conf" "SC_FG_TARGET=165" "a fill rule of 1 set by hand after it is read as Performance off"
+echo 'export SC_FG_FILL=0' >> "$rt/sc-turbo.conf"
+window idle 2500 --test-eval 'if (backend.conf.fill === false) backend.conf.targetRate = "165"' || bad "the window ran"
+has "$rt/sc-turbo.conf" "SC_FG_TARGET=165" "a fill rule of 0 set by hand after it is read as \"Limit the game's own frame rate\" off"
 hasnt "$rt/sc-turbo.conf" 'SC_FG_FILL' "which is what a launch does anyway: no line for it"
 
 echo "6. menu entry and terminal command"
@@ -171,9 +184,18 @@ grep -q '^HDMI-A-1' "$work/cli.out" && ok "sc-turbo ran from there" || bad "sc-t
 echo "SC_PREFIX='/keep/me'" > "$inst/sc-turbo.conf"; mkdir -p "$inst/logs/fg"; echo x > "$inst/logs/fg/fg-1.log"
 chmod -R u+w "$pay"; echo "v3" > "$pay/VERSION"; rm "$pay/tools/sc-sched"; echo new > "$pay/tools/new-tool"; chmod -R a-w "$pay"
 stamp=$(stat -c %Y "$inst/sc-turbo")
-( unset MYRDDIN_RUNTIME; MYRDDIN_PAYLOAD="$pay" "$bin" displays > /dev/null 2>&1 )
-[ "$(cat "$inst/VERSION")" = v3 ] && [ -e "$inst/tools/new-tool" ] && ok "a newer version replaces it" || bad "a newer version replaces it"
-[ ! -e "$inst/tools/sc-sched" ] && ok "a file the new version has not is removed" || bad "a file the new version has not is removed"
+( unset MYRDDIN_RUNTIME; MYRDDIN_PAYLOAD="$pay" "$bin" displays > /dev/null 2> "$work/update.err" )
+# (a newer version waits while the game or the RSI Launcher is open, and that counts on the machine the
+# tests run on too: with either of them open here, the wait is what is checked)
+if real_session; then
+    [ "$(cat "$inst/VERSION")" = v2 ] && grep -q "once the game and the RSI Launcher are closed" "$work/update.err" \
+        && ok "a newer version waits while the game or the RSI Launcher is open here, and says so" \
+        || bad "a newer version waits while the game or the RSI Launcher is open here, and says so"
+    echo "  skip  a newer version replaces it, and a file it has not is removed (the game or the RSI Launcher is open on this machine)"
+else
+    [ "$(cat "$inst/VERSION")" = v3 ] && [ -e "$inst/tools/new-tool" ] && ok "a newer version replaces it" || bad "a newer version replaces it"
+    [ ! -e "$inst/tools/sc-sched" ] && ok "a file the new version has not is removed" || bad "a file the new version has not is removed"
+fi
 [ "$(cat "$inst/sc-turbo.conf")" = "SC_PREFIX='/keep/me'" ] && [ -e "$inst/logs/fg/fg-1.log" ] && ok "settings and logs are kept" || bad "settings and logs are kept"
 touch -d '2001-01-01' "$inst/sc-turbo"
 ( unset MYRDDIN_RUNTIME; MYRDDIN_PAYLOAD="$pay" "$bin" displays > /dev/null 2>&1 )

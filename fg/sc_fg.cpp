@@ -45,6 +45,8 @@
 //                      (probe/test_chain.c)
 // Control files in SC_FG_DIR, looked at once a second:
 //   OFF     while it exists, frames pass through untouched
+//   LOADING while it exists (the game shows a loading screen; tools/sc-loading keeps it from the game's
+//           own log), a multiplier that follows the game's rate takes x3 at most
 //   DUMP    removed when seen; the next generated frame and its real frame are written as .ppm
 //   EVENTS  removed when seen; the last presents (captures used, timings) are written as text
 //   PARAMS  name=value lines, removed when read: HUD detection, and chain / nohud / wait / shift / vectors /
@@ -2883,6 +2885,11 @@ constexpr uint32_t MAX_GENERATED = FFX_FRAMEINTERPOLATION_MAX_GENERATED_FRAMES;
 /// setting (SC_FG_EXPERIMENTAL=1). Only that many outputs, command buffers and extra swapchain images
 /// are made, so a launch without it uses no more memory than before the setting existed.
 const uint32_t g_generated_cap = EnvFloat("SC_FG_EXPERIMENTAL", 0.0f) != 0.0f ? MAX_GENERATED : std::min(3u, MAX_GENERATED);
+/// Where a multiplier that follows the game's rate starts on a new swapchain, and the most it takes
+/// while the game shows a loading screen (control file LOADING). The game's rate crawls while it
+/// loads (9 to 12 frames a second at the end of loading into the universe), and following it would
+/// take the multiplier to its limit there; after that it goes up by itself where the rate asks.
+constexpr uint32_t LOADING_MULTIPLIER = 3;
 constexpr int COMMAND_SETS = 3;
 constexpr int HUD_PASSES = 10; ///< the HUD passes' pipelines; one more follows them:
 constexpr int UNMIX_PASS = 9;  ///< (the last of them) hud_unmix.comp: a scene worked out, see RecordUnmix
@@ -3043,8 +3050,10 @@ struct Fg {
     bool failed{};
     bool ready{};
 
-    uint32_t generated{std::clamp<uint32_t>(static_cast<uint32_t>(EnvFloat("SC_FG_MULT", 2.0f)), 2, g_generated_cap + 1) - 1};
-    uint32_t max_generated{generated}; ///< what was asked for; `generated` adapts below it to the frame rate
+    /// What was asked for; `generated` adapts below it to the frame rate (from x3 at most at the start,
+    /// LOADING_MULTIPLIER), or is held there.
+    uint32_t max_generated{std::clamp<uint32_t>(static_cast<uint32_t>(EnvFloat("SC_FG_MULT", 2.0f)), 2, g_generated_cap + 1) - 1};
+    uint32_t generated{FollowsRate() ? std::min(max_generated, LOADING_MULTIPLIER - 1) : max_generated};
     double multiplier_changed{};
     uint32_t family{};
     Image backbuffer;
@@ -3280,6 +3289,7 @@ struct Fg {
     double last_entry{};
     double period{};  ///< smoothed time between the game's presents, seconds
     bool too_fast{};  ///< the game alone is above SC_FG_MAX_BASE
+    bool loading{};   ///< the game shows a loading screen (control file LOADING): x3 at most
     // statistics
     double stats_since{};
     uint32_t real_frames{}, generated_frames{}, passed_frames{};
@@ -5346,6 +5356,34 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
             Log("fg: %s", off ? "switched off (OFF file)" : "switched on");
             fg.off = off;
         }
+        // A loading screen (LOADING, kept by tools/sc-loading while the game's own log says one is
+        // up): a multiplier that follows the game's rate comes down to x3 at once and stays at most
+        // there until the screen has gone; a held one stays where it was asked for.
+        const bool loading = ControlFile("LOADING", false);
+        if (loading != fg.loading) {
+            fg.loading = loading;
+            const bool lower = loading && FollowsRate() && !fg.too_fast && fg.generated + 1 > LOADING_MULTIPLIER;
+            if (lower) {
+                Log("fg: a loading screen: x%u -> x%u, and x%u at most while it is up (the multiplier follows the "
+                    "game's rate)", fg.generated + 1, LOADING_MULTIPLIER, LOADING_MULTIPLIER);
+                fg.generated = LOADING_MULTIPLIER - 1;
+                fg.multiplier_changed = now;
+                GateMultiplierChanged();
+                fg.ready_count = 0; // the time they take changes with their number
+                fg.ready_seconds = 0.0;
+                fg.votes_up = fg.votes_down = 0;
+            } else if (loading && FollowsRate()) {
+                Log("fg: a loading screen: x%u at most while it is up (the multiplier follows the game's rate)",
+                    LOADING_MULTIPLIER);
+            } else if (loading) {
+                Log("fg: a loading screen (the multiplier is held at x%u and stays there)", fg.max_generated + 1);
+            } else if (FollowsRate()) {
+                Log("fg: the loading screen has gone: the multiplier follows the game's rate up to x%u again",
+                    fg.max_generated + 1);
+            } else {
+                Log("fg: the loading screen has gone");
+            }
+        }
         {
             char dump_path[600];
             std::snprintf(dump_path, sizeof dump_path, "%s/DUMP", Dir());
@@ -5655,9 +5693,10 @@ bool Generate(Device& d, Fg& fg, VkQueue queue, uint32_t family, const VkPresent
             // Whether to generate at all is one rule's alone, however the multiplier is rounded:
             // not above 92 % of the display's rate, and again below 80 %.
             const uint32_t least = may_stop && rate > target * (fg.too_fast ? 0.80 : 0.92) ? 1u : 2u;
+            // (While a loading screen is up, x3 at most: see LOADING_MULTIPLIER.)
+            const uint32_t most = fg.loading ? std::min(fg.max_generated + 1, LOADING_MULTIPLIER) : fg.max_generated + 1;
             const uint32_t wanted =
-                least == 1 ? 1u
-                           : std::clamp(std::clamp(current, std::max(low, 2u), std::max(high, 2u)), 2u, fg.max_generated + 1);
+                least == 1 ? 1u : std::clamp(std::clamp(current, std::max(low, 2u), std::max(high, 2u)), 2u, most);
             fg.votes_up = wanted > current ? fg.votes_up + 1 : 0;
             fg.votes_down = wanted < current ? fg.votes_down + 1 : 0;
             // (A step down on what probes found that had to be taken back: none for a while.)

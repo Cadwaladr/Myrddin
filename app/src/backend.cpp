@@ -301,8 +301,9 @@ QString Backend::selfPath() const {
 
 void Backend::loadConf() {
     QString prefix, launch, monitor, target, sched;
-    // ("Performance" is off unless the settings say SC_FG_FILL=0: the smoother picture is the first one a player sees)
-    bool mangohud = false, markers = true, keepHud = true, gapfill = true, pictures = true, boost = false, performance = false,
+    // ("Limit the game's own frame rate", the layer's "fill", is off unless the settings say SC_FG_FILL=1: a game whose
+    // frames are never limited is the first one a player sees)
+    bool mangohud = false, markers = true, keepHud = true, gapfill = true, pictures = true, boost = false, fill = false,
          prefetchOff = false, hugePages = false, experimental = false;
     QString panelKey = QStringLiteral("Shift+7");
     m_confKept.clear();
@@ -325,7 +326,7 @@ void Backend::loadConf() {
         else if (name == QStringLiteral("SC_FG_GAPFILL")) gapfill = confValue(value, prefix) != QStringLiteral("0");
         else if (name == QStringLiteral("SC_FG_PICTURES")) pictures = confValue(value, prefix) != QStringLiteral("0");
         else if (name == QStringLiteral("SC_FG_BOOST")) boost = confValue(value, prefix) == QStringLiteral("1");
-        else if (name == QStringLiteral("SC_FG_FILL")) performance = confValue(value, prefix) == QStringLiteral("0");
+        else if (name == QStringLiteral("SC_FG_FILL")) fill = confValue(value, prefix) == QStringLiteral("1");
         else if (name == QStringLiteral("SC_PREFETCH")) prefetchOff = confValue(value, prefix) == QStringLiteral("off");
         else if (name == QStringLiteral("SC_THP")) hugePages = confValue(value, prefix) == QStringLiteral("on");
         else if (name == QStringLiteral("SC_FG_EXPERIMENTAL")) experimental = confValue(value, prefix) == QStringLiteral("1");
@@ -347,7 +348,7 @@ void Backend::loadConf() {
     m_conf.insert(QStringLiteral("gapfill"), gapfill);
     m_conf.insert(QStringLiteral("pictures"), pictures);
     m_conf.insert(QStringLiteral("boost"), boost);
-    m_conf.insert(QStringLiteral("performance"), performance);
+    m_conf.insert(QStringLiteral("fill"), fill);
     m_conf.insert(QStringLiteral("prefetchOff"), prefetchOff);
     m_conf.insert(QStringLiteral("hugePages"), hugePages);
     m_conf.insert(QStringLiteral("experimental"), experimental);
@@ -369,9 +370,9 @@ void Backend::saveConf() {
     if (word.match(text("scheduler")).hasMatch()) out << QStringLiteral("SC_SCHED=") + text("scheduler");
     if (!m_conf.value(QStringLiteral("markers")).toBool()) out << QStringLiteral("SC_FG_MARKERS=0");
     if (!m_conf.value(QStringLiteral("keepHud")).toBool()) out << QStringLiteral("SC_FG_KEEP_HUD=0");
-    // ("Performance" on: the game's frames are never limited; off, a launch's default, they are, so that
-    // the display is filled evenly)
-    if (m_conf.value(QStringLiteral("performance")).toBool()) out << QStringLiteral("SC_FG_FILL=0");
+    // ("Limit the game's own frame rate" on: the game's frames are limited to an even part of the display's rate, so
+    // that every refresh gets a frame; off, a launch's default, they are never limited)
+    if (m_conf.value(QStringLiteral("fill")).toBool()) out << QStringLiteral("SC_FG_FILL=1");
     if (text("panelKey") != QStringLiteral("Shift+7") && !text("panelKey").isEmpty()) out << QStringLiteral("SC_FG_PANEL_KEY=") + shellQuoted(text("panelKey"));
     // (switched by Myrddin's root helper for the time the game runs, where a user has set it up)
     if (m_conf.value(QStringLiteral("prefetchOff")).toBool()) out << QStringLiteral("SC_PREFETCH=off");
@@ -592,15 +593,14 @@ void Backend::setOption(const QString& name, bool on) {
         if (m_state != QStringLiteral("idle")) emit said(QStringLiteral("From the next launch"));
         return;
     }
-    static const QStringList params = {QStringLiteral("markers"), QStringLiteral("gapfill"), QStringLiteral("pictures"), QStringLiteral("boost")};
-    if (name != QStringLiteral("keepHud") && name != QStringLiteral("performance") && !params.contains(name)) return;
+    static const QStringList params = {QStringLiteral("markers"), QStringLiteral("gapfill"), QStringLiteral("pictures"), QStringLiteral("boost"),
+                                       QStringLiteral("fill")};
+    if (name != QStringLiteral("keepHud") && !params.contains(name)) return;
     m_conf.insert(name, on);
     m_saveLater.start();   // (insert() from here does not say "changed", which is what a page's own change does)
     if (!steering()) return;
     QString answer;
     if (name == QStringLiteral("keepHud")) scTurbo({QStringLiteral("fg-hud"), on ? QStringLiteral("on") : QStringLiteral("off")}, &answer);
-    // ("Performance" is the layer's "fill" the other way round)
-    else if (name == QStringLiteral("performance")) scTurbo({QStringLiteral("fg-params"), on ? QStringLiteral("fill=0") : QStringLiteral("fill=1")}, &answer);
     else scTurbo({QStringLiteral("fg-params"), name + (on ? QStringLiteral("=1") : QStringLiteral("=0"))}, &answer);
     emit said(answer.section(QLatin1Char('\n'), 0, 0));
 }

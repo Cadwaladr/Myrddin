@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+# The game's loading screens, for Myrddin's layer. While Star Citizen shows one, its own rate crawls (9 to 12
+# frames a second at the end of loading into the universe), and a multiplier that follows that rate would go to
+# its limit there. The game writes in its own log (Game.log) when a loading screen opens and when it has closed;
+# this reads that log from outside the game, like any text file, and keeps the layer's control file LOADING
+# while a screen is up: the layer then takes x3 at most, and follows the rate again once it has gone. Nothing
+# in the game is touched.
+#
+#   tools/sc-loading follow PREFIX DIR   what every "sc-turbo fg" launch starts: DIR/LOADING while a loading
+#                                        screen is up. It waits for the game as long as the RSI Launcher runs
+#                                        (30 minutes without it), and after the game has ended as long as the
+#                                        launcher still runs; only the newest launch's follower acts
+#                                        (logs/loading.follow). Its notes go to logs/loading.out.
+#   tools/sc-loading where PREFIX        the Game.log it follows: in the folder the RSI Launcher's own log last
+#                                        started the game from, or else the default LIVE folder
+#
+# The game's lines it goes by (Star Citizen 4.x):
+#   [CGlobalGameUI::OpenLoadingScreen] Started
+#   Loading screen for pu : SC_Frontend closed after 64.26 seconds
+# A screen with no end in the log is let go after 10 minutes. Where the game stops writing these lines, no
+# LOADING is kept and the multiplier follows the rate as it did before. (SC_COMM and SC_LAUNCHER_PATTERN name
+# the game's process and the launcher's command line for tests.)
+set -u
+here="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+comm="${SC_COMM:-StarCitizen.exe}"
+launcher_pattern="${SC_LAUNCHER_PATTERN:-[R]SI Launcher\.exe}"
+
+game_log() {   # game_log PREFIX
+    local prefix="$1" log win drive rest
+    log="$(ls -t "$prefix"/drive_c/users/*/AppData/Roaming/rsilauncher/logs/log.log 2>/dev/null | head -1)"
+    if [ -n "$log" ]; then
+        # {"t":"...", "[main][info] ": "[Launcher::launch] Launching Star Citizen LIVE from (C:\\Program Files\\...\\LIVE)"}
+        win="$(grep -o 'Launching Star Citizen [A-Za-z0-9_-]* from ([^)]*)' "$log" 2>/dev/null | tail -1)"
+        win="${win#*from (}"; win="${win%)}"; win="${win//\\\\/\\}"
+        if [[ "$win" == [A-Za-z]:* ]]; then
+            drive="${win:0:1}"; drive="${drive,,}"; rest="${win:2}"; rest="${rest//\\//}"
+            if [ -d "$prefix/dosdevices/$drive:" ]; then echo "$prefix/dosdevices/$drive:$rest/Game.log"; return; fi
+            if [ "$drive" = c ]; then echo "$prefix/drive_c$rest/Game.log"; return; fi
+        fi
+    fi
+    echo "$prefix/drive_c/Program Files/Roberts Space Industries/StarCitizen/LIVE/Game.log"
+}
+
+case "${1:-}" in
+where)
+    [ -n "${2:-}" ] || { echo "where PREFIX"; exit 2; }
+    game_log "$2" ;;
+follow)
+    [ -n "${2:-}" ] && [ -n "${3:-}" ] || { echo "follow PREFIX DIR"; exit 2; }
+    prefix="$2"; dir="$3"; flag="$dir/LOADING"
+    owner="$here/logs/loading.follow"; mkdir -p "$here/logs" "$dir"; echo $$ > "$owner"
+    stamp() { echo "$(date '+%F %T') [$$] $*"; }
+    game() { pgrep -x "${comm:0:15}" > /dev/null; }
+    launcher() { pgrep -f "$launcher_pattern" > /dev/null; }
+    ours() { [ "$(cat "$owner" 2>/dev/null)" = $$ ]; }
+    log=""; reader=""; since=0
+    stop_reading() {
+        [ -n "$reader" ] || return 0
+        pkill -P "$reader" 2> /dev/null; kill "$reader" 2> /dev/null
+        exec 3<&-; reader=""
+    }
+    # The log by name: the game starts a new one at every start (the old one goes to logbackups), and that
+    # one is then read from its first line. Only the two kinds of line come through to this shell.
+    start_reading() {
+        stop_reading
+        log="$(game_log "$prefix")"
+        stamp "following $log"
+        exec 3< <(tail -F -n 0 "$log" 2> /dev/null | grep --line-buffered -E 'OpenLoadingScreen\] Started|Loading screen for .* closed after')
+        reader=$!
+    }
+    loading_on() {
+        [ -e "$flag" ] && return 0
+        : > "$flag"; since=$SECONDS
+        stamp "a loading screen: LOADING (the multiplier takes x3 at most)"
+    }
+    loading_off() {
+        [ -e "$flag" ] || return 0
+        rm -f "$flag"; stamp "$1"
+    }
+    trap 'stop_reading; if ours; then rm -f "$flag" "$owner"; fi' EXIT
+    trap 'exit 0' TERM INT
+    rm -f "$flag"
+    stamp "until $comm has come and gone"
+    until game; do
+        ours || { stamp "a newer launch follows the loading screens now: left to it"; exit 0; }
+        if [ $SECONDS -ge 1800 ] && ! launcher; then stamp "$comm did not start"; exit 0; fi
+        sleep 2
+    done
+    stamp "$comm runs"
+    start_reading
+    checked=$SECONDS
+    while :; do
+        if IFS= read -r -t 1 -u 3 line; then
+            case "$line" in
+            *OpenLoadingScreen*Started*) loading_on ;;
+            *"Loading screen for "*" closed after "*) loading_off "the loading screen has gone (the game's log: after ${line##*closed after })" ;;
+            esac
+        elif [ $? -le 128 ]; then
+            # (the end of what comes through: the reading has stopped; it is started again)
+            stamp "the game's log could not be read on; again"
+            sleep 2; start_reading
+        fi
+        [ $((SECONDS - checked)) -ge 2 ] || continue
+        checked=$SECONDS
+        ours || { stamp "a newer launch follows the loading screens now: left to it"; exit 0; }
+        if [ -e "$flag" ] && [ $((SECONDS - since)) -ge 600 ]; then
+            loading_off "no end of the loading screen in the game's log after 10 minutes: LOADING let go"
+        fi
+        game && continue
+        loading_off "$comm has ended during a loading screen: LOADING let go"
+        launcher && stamp "$comm has ended; waiting for it to come back while the RSI Launcher runs"
+        until game || ! launcher || ! ours; do sleep 2; done
+        ours || { stamp "a newer launch follows the loading screens now: left to it"; exit 0; }
+        game || { stamp "$comm has ended and the RSI Launcher is not running: done"; exit 0; }
+        stamp "$comm runs again"
+        # (from the launcher again, perhaps from another of its folders: PTU instead of LIVE)
+        [ "$(game_log "$prefix")" = "$log" ] || start_reading
+    done ;;
+*)
+    sed -n '2,/^set -u/p' "$0" | sed '$d; s/^# \{0,1\}//'
+    exit 2 ;;
+esac

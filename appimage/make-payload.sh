@@ -30,6 +30,7 @@ TOOLS=(
     "sc-tune|sc-turbo: SC_PREFETCH=off / SC_THP=on at launch (allowed, follow); its head tells how a user sets up the root helper"
     "sc-tune-root|not run by sc-turbo: the root helper a user installs by hand (docs/advanced-performance-tweaking.md), run as root by its systemd unit"
     "sc-iowatch|sc-turbo: \"fg N watch\" starts it in the background, \"sc-turbo iowatch [report]\""
+    "sc-loading|sc-turbo: every \"fg\" launch starts it (start_loading): the game's loading screens, from its Game.log, for the layer"
     "fg-where.py|sc-turbo: \"fg-where\""
     "fg-watch.py|sc-turbo: \"fg-watch\""
     "fg-ab.sh|sc-turbo: \"fg-ab\"; also run by sc-ab-threads.sh"

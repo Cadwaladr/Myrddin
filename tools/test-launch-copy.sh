@@ -125,6 +125,8 @@ if [ -x "$here/sc-turbo" ] && grep -q 'sc-launch-copy' "$here/sc-turbo"; then
     t="$work/turbo"; mkdir -p "$t/tools"
     cp "$here/sc-turbo" "$t/sc-turbo"; cp "$tool" "$t/tools/"
     printf '#!/usr/bin/env bash\nexit 1\n' > "$t/tools/sc-sched"; chmod +x "$t/tools/sc-sched"   # (no scheduler in a test)
+    # (the loading screens' follower: a stand-in that writes down how it was started)
+    printf '#!/usr/bin/env bash\necho "$*" > "%s/loading-follow"\n' "$work" > "$t/tools/sc-loading"; chmod +x "$t/tools/sc-loading"
     # a stand-in for the driver's tool: a 12 GB card (or what CARD says: "MiB, 0xDDDDVVVV")
     mkdir -p "$work/fakebin"; printf '#!/usr/bin/env bash\necho "${CARD:-12282, 0x278310DE}"\n' > "$work/fakebin/nvidia-smi"; chmod +x "$work/fakebin/nvidia-smi"
     turbo() { rm -f "$work/prefix/called"; ( cd "$t" && env -i PATH="$work/fakebin:$PATH" HOME="$work/home" XDG_DATA_HOME="$work/home/data" SC_PREFIX="$work/prefix" SC_LAUNCH="$work/sc-launch.sh" SC_MONITOR=off "$@" ) > "$work/turbo.txt" 2>&1; }
@@ -245,10 +247,10 @@ if [ -x "$here/sc-turbo" ] && grep -q 'sc-launch-copy' "$here/sc-turbo"; then
     sed -i '/SC_FG_KEEP_HUD/d; /SC_FG_GAPFILL/d' "$t/sc-turbo.conf"
     turbo ./sc-turbo fg 4
     [ ! -e "$t/logs/fg/HUDOFF" ]; check $? "and the next launch without it keeps the HUD apart again"
-    called "SC_FG_FILL=1" && grep -q "fills the display evenly (Performance off)" "$work/turbo.txt"; check $? "a launch limits the game's frames to fill the display evenly (SC_FG_FILL=1, Performance off), and that is said"
-    echo 'SC_FG_FILL=0' >> "$t/sc-turbo.conf"
+    called "SC_FG_FILL=0" && ! grep -q "fills the display" "$work/turbo.txt"; check $? "a launch leaves the game's frames unlimited (SC_FG_FILL=0) and says nothing about it"
+    echo 'SC_FG_FILL=1' >> "$t/sc-turbo.conf"
     turbo ./sc-turbo fg 4
-    called "SC_FG_FILL=0" && ! grep -q "fills the display" "$work/turbo.txt"; check $? "SC_FG_FILL=0 in sc-turbo.conf (Performance on): it does not"
+    called "SC_FG_FILL=1" && grep -q "fills the display evenly (SC_FG_FILL=1, the window's \"Limit the game's own frame rate\")" "$work/turbo.txt"; check $? "SC_FG_FILL=1 in sc-turbo.conf (\"Limit the game's own frame rate\"): the game's frames are limited to fill the display evenly, and that is said"
     # the prefetchers and huge pages through Myrddin's root helper: a stand-in that says whether it is set up
     printf '#!/usr/bin/env bash\ncase "$1" in allowed) exit "${TUNE_OK:-1}" ;; follow) shift; echo "$*" > "%s/tune-follow" ;; esac\n' "$work" > "$t/tools/sc-tune"
     chmod +x "$t/tools/sc-tune"; printf 'SC_PREFETCH=off\nSC_THP=on\n' >> "$t/sc-turbo.conf"
@@ -260,9 +262,9 @@ if [ -x "$here/sc-turbo" ] && grep -q 'sc-launch-copy' "$here/sc-turbo"; then
     sed -i '/SC_PREFETCH/d; /SC_THP/d' "$t/sc-turbo.conf"
     turbo env TUNE_OK=0 ./sc-turbo fg 4; sleep 0.3
     [ ! -e "$work/tune-follow" ] && ! grep -q "prefetchers" "$work/turbo.txt"; check $? "neither set: no follower, nothing said"
-    sed -i '/SC_FG_FILL/d' "$t/sc-turbo.conf"
     turbo ./sc-turbo fg 3 fixed
-    called "SC_FG_FILL=1" && ! grep -q "fills the display" "$work/turbo.txt"; check $? "with a multiplier that is held nothing is said about it"
+    called "SC_FG_FILL=1" && ! grep -q "fills the display" "$work/turbo.txt"; check $? "with a multiplier that is held nothing is said about it, SC_FG_FILL=1 or not"
+    sed -i '/SC_FG_FILL/d' "$t/sc-turbo.conf"
     # MangoHud with frame generation Off too (the window's overlay choice): "run hud", or SC_MANGOHUD=1
     mkdir -p "$work/home/.local/share/vulkan/implicit_layer.d"; : > "$work/home/.local/share/vulkan/implicit_layer.d/MangoHud.x86_64.json"
     turbo ./sc-turbo run hud
@@ -281,6 +283,20 @@ if [ -x "$here/sc-turbo" ] && grep -q 'sc-launch-copy' "$here/sc-turbo"; then
     called "SC_FG=1" && called "SC_FG_PANEL=1" && [ -e "$t/logs/fg/OFF" ] && grep -q "Frame generation off at the start" "$work/turbo.txt"; check $? "\"fg 4 panel off\": the layer and its panel, generation off from the start (the OFF file), and that is said"
     turbo ./sc-turbo fg 4
     [ ! -e "$t/logs/fg/OFF" ]; check $? "the next launch without \"off\" generates again"
+    # the loading screens' follower (the stand-in made with the scratch copy)
+    rm -f "$work/loading-follow"; : > "$t/logs/fg/LOADING"
+    turbo ./sc-turbo fg 4; sleep 0.3
+    [ "$(cat "$work/loading-follow" 2>/dev/null)" = "follow $work/prefix $t/logs/fg" ] && [ ! -e "$t/logs/fg/LOADING" ]
+    check $? "\"fg\" starts the loading screens' follower for the prefix and the layer's folder, and clears an old LOADING"
+    grep -q "It starts at x3 and takes x3 at most while the game shows a loading screen" "$work/turbo.txt"; check $? "and says what a loading screen does to Auto up to x4"
+    rm -f "$work/loading-follow"
+    turbo ./sc-turbo fg 3; sleep 0.3
+    [ -e "$work/loading-follow" ] && ! grep -q "loading screen" "$work/turbo.txt"; check $? "up to x3 the follower runs as well, and nothing is said"
+    turbo ./sc-turbo fg 4 fixed
+    ! grep -q "loading screen" "$work/turbo.txt"; check $? "a held x4: nothing said either"
+    rm -f "$work/loading-follow"
+    turbo ./sc-turbo run; sleep 0.3
+    [ ! -e "$work/loading-follow" ]; check $? "\"run\" (no layer): no follower"
     echo "9. In a running game: the multiplier and parameters (control files; no game is needed to write them)"
     ( cd "$t" && ./sc-turbo fg-mult 3 fixed > "$work/turbo.txt" 2>&1 )
     [ "$(cat "$t/logs/fg/MULT")" = 3 ] && grep -qx 'adapt=0' "$t/logs/fg/PARAMS" && grep -q "held there" "$work/turbo.txt"; check $? "\"fg-mult 3 fixed\": the multiplier and the word that holds it"

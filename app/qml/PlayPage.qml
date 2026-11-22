@@ -58,54 +58,20 @@ PageView {
                 Caption { text: "Frame generation" }
                 ModePicker { Layout.fillWidth: true; live: page.live; brief: true }
 
-                GridLayout {
+                // (Whether Auto limits the game's own frames is in Options: "Limit the game's own frame rate")
+                ColumnLayout {
                     Layout.fillWidth: true
                     Layout.topMargin: 8
-                    columns: page.roomy ? 2 : 1
-                    uniformCellWidths: page.roomy
-                    columnSpacing: 24
-                    rowSpacing: 14
-
-                    // Performance: whether Auto may limit the game's own frames to fill the display
-                    ColumnLayout {
+                    spacing: 10
+                    Caption { text: "Performance overlay" }
+                    OverlayChoice { id: overlay }
+                    Text {
+                        text: overlay.few + (backend.state === "idle" || overlay.which === "off" ? "" : " From the next launch.")
+                        color: Theme.dim
+                        font.pixelSize: 13
+                        lineHeight: 1.2
+                        wrapMode: Text.WordWrap
                         Layout.fillWidth: true
-                        Layout.alignment: Qt.AlignTop
-                        spacing: 10
-                        opacity: backend.prefs.mode === "auto" ? 1 : 0.45
-                        Behavior on opacity { NumberAnimation { duration: Theme.smooth } }
-                        Caption { text: "Performance" }
-                        RowLayout {
-                            Layout.preferredHeight: overlay.implicitHeight     // (level with the drop-down beside it)
-                            spacing: 10
-                            Toggle { checked: backend.conf.performance; onToggled: (v) => backend.setOption("performance", v) }
-                            Text { text: backend.conf.performance ? "On" : "Off"; color: Theme.text; font.pixelSize: 14 }
-                        }
-                        Text {
-                            text: backend.prefs.mode !== "auto" ? "Only Auto uses this."
-                                : backend.conf.performance ? "Fastest response: the game's frames are never limited."
-                                : "Smoother picture: the game's frames are limited, which adds latency."
-                            color: Theme.dim
-                            font.pixelSize: 13
-                            lineHeight: 1.2
-                            wrapMode: Text.WordWrap
-                            Layout.fillWidth: true
-                        }
-                    }
-
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        Layout.alignment: Qt.AlignTop
-                        spacing: 10
-                        Caption { text: "Performance overlay" }
-                        OverlayChoice { id: overlay }
-                        Text {
-                            text: overlay.few + (backend.state === "idle" || overlay.which === "off" ? "" : " From the next launch.")
-                            color: Theme.dim
-                            font.pixelSize: 13
-                            lineHeight: 1.2
-                            wrapMode: Text.WordWrap
-                            Layout.fillWidth: true
-                        }
                     }
                 }
             }

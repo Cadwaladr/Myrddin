@@ -308,9 +308,35 @@ experimental() {
     TEST_AT="4:MULT=6" REG_SECS=8 reg em "SC_FG_TARGET=120 SC_FG_MULT=4 SC_FG_ADAPT=0" --game-ms 50
     say "en: $(grep -ho '[0-9]* swapchain images, [0-9]* generated per frame[^,]*' logs/test/en/fg-*.log | tail -1); em: $(grep -hc 'this launch has room for x4 at most' logs/test/em/fg-*.log) line(s) saying x6 is x4 here"
 }
+loading() {
+    # (the game at about 20 a second, where a multiplier that follows it goes to x6 at 120 Hz)
+    say "## loading screens (control file LOADING, kept by tools/sc-loading): x3 at the start and at most while it exists"
+    local x="SC_FG_TARGET=120 SC_FG_EXPERIMENTAL=1 SC_FG_MULT=6 SC_FG_MAX_BASE=62" n verdict
+    local sim="--sim-ms 50 --sim-jitter 3 --game-ms 7 --jitter 1 --gpu-load 3 --unprotected"
+    # shellcheck disable=SC2086
+    { TEST_AT="pre:LOADING 12:-LOADING" REG_SECS=28 reg la "$x" $sim
+      TEST_AT="10:LOADING 20:-LOADING" REG_SECS=32 reg lb "$x" $sim
+      TEST_AT="pre:LOADING" REG_SECS=14 reg lc "$x SC_FG_ADAPT=0" $sim; }   # (14: a STAT line comes 10 s after the start)
+    # The order of the layer's lines: up to the screen's end no step above x3, after it one to x5 or more.
+    order() { grep -hoE 'ready for [0-9x]+ .* [0-9]+ generated per frame|a loading screen[^(]*x[0-9]+ -> x[0-9]+|a loading screen|the loading screen has gone|multiplier x[0-9]+ -> x[0-9]+' logs/test/$1/fg-*.log; }
+    for n in la lb; do
+        verdict=PASS
+        order $n | awk '/loading screen has gone/ { gone = 1 } /a loading screen/ { up = 1 }
+            /multiplier x[0-9]+ -> x[4-8]/ && up && !gone { bad = 1 } /multiplier x[0-9]+ -> x[5-8]/ && gone { after = 1 }
+            END { exit !(up && gone && after && !bad) }' || verdict=FAIL
+        # (the start's line: the first "generated per frame"; "a loading screen" can come before it)
+        [ $n = la ] && ! order la | grep -m1 'generated per frame' | grep -q ' 2 generated per frame' && verdict=FAIL
+        [ $n = lb ] && ! order lb | grep -qE 'a loading screen.*x[5-8] -> x3' && verdict=FAIL
+        say "$n $verdict: $(order $n | sed -E 's/ready for [0-9x]+ .* ([0-9]+) generated per frame/start: \1 generated/' | tr '\n' ';')"
+    done
+    verdict=PASS
+    grep -q ' 5 generated per frame' logs/test/lc/fg-*.log && grep -q 'STAT x6' logs/test/lc/fg-*.log &&
+        ! grep -q 'multiplier x6 -> x' logs/test/lc/fg-*.log || verdict=FAIL
+    say "lc $verdict: a held x6 stays x6 during a loading screen: $(grep -h 'STAT x' logs/test/lc/fg-*.log | tail -1 | grep -o 'STAT x[0-9]* real=[0-9.]*/s')"
+}
 case "${1:-all}" in
 all) regression; hose; limiter all; multiplier; gpuwait; soak; panel; given_up ;;
-regression|hose|multiplier|gpuwait|soak|panel|markers|experimental) "$1" ;;
+regression|hose|multiplier|gpuwait|soak|panel|markers|experimental|loading) "$1" ;;
 limiter) limiter "${2:-all}" ;;
 *) awk 'NR > 1 { if (/^#/) print; else exit }' "$0"; exit 1 ;;
 esac
