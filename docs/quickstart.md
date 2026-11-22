@@ -21,48 +21,36 @@ Download `Myrddin-x86_64.AppImage` from the
 
 ```sh
 chmod +x Myrddin-x86_64.AppImage
-./Myrddin-x86_64.AppImage              # the window
-./Myrddin-x86_64.AppImage fg 4 hud     # or any command from the list below, without the window
+./Myrddin-x86_64.AppImage
 ```
 
 The first start asks where the game is (it looks where the LUG Helper puts it) and checks what a
 launch needs: the launch script, a runner with vkd3d-proton, the NVIDIA driver, the display.
-After that the window has four pages:
 
-- Play: the multiplier, the performance overlay and the launch, and below them the session's
-  frame rates while the game runs. The multiplier is Off, 2×, 3×, 4× or Auto. 2×, 3× and 4× hold
-  that multiplier whatever the game's frame rate. With Auto the layer picks the multiplier as the
-  game's own rate changes, 2× at the least and no more than the highest multiplier set in Options
-  (4× unless you change it; Options' "Experimental: 5× to 8×" lets it go up to 8×, from the next
-  launch: see [Experimental multipliers](experimental-multipliers.md)). By default Auto does not
-  limit the game's own frames, which is the fastest response. A change acts at once in a running
-  game. The
-  overlay is MangoHud, Myrddin's own panel or none, and what is chosen is drawn with frame
-  generation Off too; the panel is there from the start of the game, and Shift+7 in the game steps
-  through it. "Run with logs" is the tab under the launch button. While the RSI Launcher or the game is up, the launch button says "Stop" under
-  the pointer: a click asks the session to end. If something of it is still there two seconds
-  later, the button offers "Kill", which ends it at once.
-- Setup: the game's folder and launch script, the system check with its fixes (the runner, NVAPI
-  in the prefix, whether the game is set to DLSS, the graphics driver, the display), an entry in
-  the application menu, a
-  `myrddin` command for the terminal, and the launch as it is set, as a command to copy.
-- Options: display and refresh rate, the multiplier, the highest one Auto may pick and "Limit
-  the game's own frame rate" (off by default; on, Auto limits the game's frames to an even part of
-  the display's rate so that every refresh gets a frame, with more latency), the
-  performance overlay with the panel's corner and its key (click the key and press another to
-  change it), how the HUD is treated in generated
-  frames, the CPU scheduler, running with logs, and the reports `sc-turbo` can make. The
-  multiplier, the limit on the game's frame rate and the HUD and performance switches are kept
-  for the next launch and also act at once in a running game.
+The window has five pages:
+
+- Play: the multiplier, the overlay and the launch button, and below them the session's frame
+  rates while the game runs.
+  - The multiplier is Off, 2×, 3×, 4× or Auto. 2×, 3× and 4× hold that multiplier; Auto follows
+    the game's own rate, from 2× up to the highest multiplier set in Options. A change acts at
+    once in a running game.
+  - The overlay is MangoHud, Myrddin's own panel (Shift+7 in the game steps through it) or none.
+  - "Run with logs" is the tab under the launch button. While the game runs, the button says
+    "Stop" under the pointer; if the game is still there two seconds after a Stop, it offers
+    "Kill".
+- Console: what the game's process is doing (CPU, memory, threads), the GPU, and the end of the
+  logs.
+- Setup: the game's folder and launch script, the system check with its fixes, an entry in the
+  application menu, and the launch as a command to copy.
+- Options: the display and its refresh rate, the multiplier and the highest one Auto may pick,
+  "Limit the game's own frame rate", the overlay with the panel's corner and key, how the HUD is
+  treated in generated frames, the advanced performance tweaks, running with logs and the
+  reports. Everything there is kept for the next launch; the multiplier, the limit on the game's
+  frame rate and the HUD and performance switches also act at once in a running game.
 - About: versions and licences.
 
-With "Run with logs" switched on (Play or Options), the window offers the session's log once the
-game has closed: read it, copy it, delete it or keep it. The log is one text file with what the
-launch said, the frame rates, and what the game used of the disk, memory and graphics memory, read
-from outside the game. Your home folder's name is not in it.
-
-The window is drawn in your desktop's own colours, its mark included: on KDE Plasma the colour
-scheme's, elsewhere light or dark as the desktop is set, with its accent colour where it has one.
+With "Run with logs" on, the window offers the session's log once the game has closed: read it,
+copy it, delete it or keep it. Your home folder's name is not in it.
 
 ## Built from source
 
@@ -79,6 +67,9 @@ moment, the shown frame rate and the game's own. The games are listed in
 one for Star Citizen), and none is part of this project.
 
 ## From a terminal
+
+The window's choices, as commands of the source folder (with the AppImage, see
+[Commands through the AppImage](usage.md#commands-through-the-appimage)):
 
 ```sh
 ./sc-turbo fg 4                  # launch with frame generation: the layer picks the multiplier, up to ×4

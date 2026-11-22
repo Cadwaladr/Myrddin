@@ -19,12 +19,12 @@ Fedora's package names; other distributions have the same things under other nam
 | GTK 4, libadwaita, PyGObject | the small launcher window of a source build (`./sc-turbo gui`) | `python3-gobject gtk4 libadwaita` |
 | FUSE 3 | lets the AppImage mount itself; without it `--appimage-extract-and-run` does | `fuse3` |
 | Weston, NumPy, Pillow | the headless tests (`tools/test-chain.sh`, `tools/fg-validate.sh`) | `weston python3-numpy python3-pillow` |
-| Qt 6.5 or later | building the AppImage's window outside its container | `qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg-devel` |
-| podman | building the AppImage | `podman` |
+| Qt 6.5 or later | building the full window from source ([Install guide](install.md#building-from-source)) | `qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg-devel` |
 
 ## MangoHud
 
-With `./sc-turbo fg 3 hud`, MangoHud sits below the layer and counts every frame that goes out.
+In the window, choose "MangoHud" as the overlay on the Play page or in Options; from a terminal,
+`./sc-turbo fg 3 hud`. MangoHud then sits below the layer and counts every frame that goes out.
 Keep MangoHud's own `fps_limit` off, or it holds the layer's frames back. The layer also has a
 small panel of its own (shown rate, the game's own rate, a pacing graph) when you ask for it
 at launch; Shift+7 in the game steps through it.

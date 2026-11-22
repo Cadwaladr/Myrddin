@@ -10,10 +10,12 @@ for.
 ./sc-turbo fg-where     # the last session: where each thread was inside the layer
 ```
 
+In the window: Options, Reports, "Where the layer stands".
+
 A line in the log that begins with `lock` means a thread waited more than a second for one of
 the layer's locks, or that a lock left behind by a call that never returned was taken over.
-Both, with the output of `fg-where`, are what a bug report needs. `./sc-turbo fg-off`, or a
-launch without `fg`, tells you whether the layer is involved at all.
+Both, with the output of `fg-where`, are what a bug report needs. Frame generation Off (on the
+window's Play page, or `./sc-turbo fg-off`) tells you whether the layer is involved at all.
 
 ## Only some keys act in the game (KDE Plasma)
 
@@ -38,4 +40,4 @@ busctl --user call org.kde.KWin /KWin org.kde.KWin reconfigure
 ```
 
 In a test at ×4, allowing tearing took the time from sending a frame to seeing it from 13.5 to
-2.7 ms. With it allowed, the tester saw tear lines when spawning in Orison.
+2.7 ms. With it allowed, tear lines showed when spawning in Orison.

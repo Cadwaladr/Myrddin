@@ -30,9 +30,11 @@ the AppImage needs:
 
 ```sh
 chmod +x Myrddin-x86_64.AppImage
-./Myrddin-x86_64.AppImage              # the window
-./Myrddin-x86_64.AppImage fg 4 hud     # or any sc-turbo command, without the window
+./Myrddin-x86_64.AppImage
 ```
+
+The AppImage also takes `sc-turbo`'s commands without opening the window: see
+[Commands through the AppImage](usage.md#commands-through-the-appimage).
 
 ### Where it keeps its files
 
@@ -67,19 +69,13 @@ its source. The Wayland packages are only needed for the test program. The tests
 The small launcher window of the source folder (`./sc-turbo gui`) needs GTK 4, libadwaita and
 PyGObject (Fedora: `python3-gobject gtk4 libadwaita`).
 
-### Building the AppImage
-
-The window of the AppImage is a Qt 6 program in [`app/`](../app/README.md) (Qt 6.5 or later: `sudo
-dnf install qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg-devel`):
+The full window, the one the AppImage has, is a Qt 6 program in [`app/`](../app/README.md) (Qt 6.5
+or later: `sudo dnf install qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg-devel`):
 
 ```sh
 cmake -S app -B build/app -G Ninja && cmake --build build/app
 build/app/myrddin --runtime .    # the window, on the sc-turbo of the source folder
 ```
-
-The AppImage itself is built in containers, with podman, by the scripts in
-[`appimage/`](../appimage/README.md): the layer once more so that it loads on any distribution,
-the window with Qt's official libraries, then the image and its tests.
 
 ## Where the game is
 

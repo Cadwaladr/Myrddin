@@ -1,7 +1,13 @@
 # Commands and settings
 
+The window has switches for most of what this page lists: the multiplier and the overlay on its
+Play page, the rest on Options and Setup. This page is for the terminal, for scripts and for
+`sc-turbo.conf`.
+
 ## Commands
 
+In the source folder `sc-turbo` is run as `./sc-turbo`; with the AppImage, put
+`./Myrddin-x86_64.AppImage` in its place (see [Commands through the AppImage](#commands-through-the-appimage)).
 These do what the launcher windows do:
 
 ```sh
@@ -39,6 +45,20 @@ runs. It names that display to the runner, whose Wayland driver otherwise takes 
 the most pixels (a TV beside the monitor, for instance), and tells the layer the rate. Logs and
 dumps go to `logs/` inside the project.
 
+## Commands through the AppImage
+
+Started with words after it, the AppImage opens no window and hands them to `sc-turbo`:
+
+```sh
+./Myrddin-x86_64.AppImage fg 4 hud          # launch with frame generation up to ×4 and MangoHud
+./Myrddin-x86_64.AppImage fg-mult 3 fixed    # in a running game: ×3, held
+./Myrddin-x86_64.AppImage displays          # any other command of this page
+```
+
+`sc-turbo` then runs from the AppImage's copy in `~/.local/share/myrddin/runtime`, so its
+settings file is `~/.local/share/myrddin/runtime/sc-turbo.conf` (the one the window writes) and
+its logs are in `logs/` there.
+
 ## Your launch script
 
 Your launch script is never changed. At every launch `sc-turbo` writes a copy of it to
@@ -63,8 +83,10 @@ script or your environment has not set it:
   card, no limit is set and the launch says so. With several NVIDIA cards of different kinds the
   limit is for the first one `nvidia-smi` names, and the launch says that too.
 
-A script that finds its files from its own location is started as it is, and so is any script
-with `SC_LAUNCH_COPY=0`.
+Without a copy, your script is started as it is, with none of the settings above placed in it,
+in two cases: when no copy of it can be made (it is not a shell script, or it looks for its files
+next to itself, which a copy in another folder would break), and when `sc-turbo.conf` says
+`SC_LAUNCH_COPY=0`. What `sc-turbo` exports still reaches it.
 
 ## Settings
 
@@ -75,7 +97,11 @@ Every line is optional, and the same names in the environment take precedence:
 cp sc-turbo.conf.example sc-turbo.conf
 ```
 
-- `SC_PREFIX`: the Wine prefix the game is installed in (default `~/Games/star-citizen`)
+The window's Setup and Options pages write most of these lines; where a line has a switch in the
+window, it is named.
+
+- `SC_PREFIX`: the Wine prefix the game is installed in (default `~/Games/star-citizen`; the
+  window: Setup, "Game folder")
 - `SC_LAUNCH`: the script that starts the game (default `sc-launch.sh` in the prefix)
 - `SC_LAUNCH_SET="NAME=value NAME=value"`: environment settings of your own for the game, placed
   in the copy of the launch script, where they take precedence over the script's
@@ -90,7 +116,7 @@ cp sc-turbo.conf.example sc-turbo.conf
   about, or a limit of your own
 - `SC_LAUNCH_COPY=0`: start the launch script itself, with nothing placed
 - `SC_MONITOR`, `SC_FG_TARGET`: the display the game should use and its refresh rate, where the
-  desktop cannot be asked
+  desktop cannot be asked (the window: Options, "Display" and "Refresh rate to fill")
 - `SC_MANGOHUD=1`: MangoHud at every launch, with frame generation or without (the window's
   overlay choice "MangoHud")
 - `SC_FG_PANEL_KEY=Ctrl+F9`: the key that steps the layer's panel in the game, in place of
@@ -98,15 +124,18 @@ cp sc-turbo.conf.example sc-turbo.conf
   PageUp, PageDown, Insert, Delete, Pause, ScrollLock or one of ``- = [ ] ; ' ` \ , . /``. Keys
   go by their place on a US keyboard. The layer reads the key inside the game while the game
   has the keyboard, so nothing is set up on the desktop; the game gets the key as well, so pick
-  one it does not use
-- `SC_SCHED=lavd`: a sched_ext scheduler at every launch
+  one it does not use (the window: Options, "Panel corner and key")
+- `SC_SCHED=lavd`: a sched_ext scheduler at every launch (the window: Options, "CPU scheduler")
 - `SC_PREFETCH=off`, `SC_THP=on`: the CPU's prefetchers off and huge pages on while the game runs
-- `SC_FG_MARKERS=0`: never move HUD elements
+  (the window: Options, "Advanced performance tweaks")
+- `SC_FG_MARKERS=0`: never move HUD elements (the window: Options, "Move HUD markers")
 - `SC_FG_KEEP_HUD=0`: the HUD is not kept apart from what is generated (`sc-turbo fg-hud on`
-  switches that on in the running game)
+  switches that on in the running game; the window: Options, "Keep the HUD sharp")
 - `export SC_FG_GAPFILL=0`, `export SC_FG_PICTURES=0`, `export SC_FG_BOOST=1`: the layer's own
   settings, which it reads from the environment, so they are exported: frames that come without
-  the HUD are not bridged, the map is moved like the markers, the GPU's speed is held up
+  the HUD are not bridged, the map is moved like the markers, the GPU's speed is held up (the
+  window: Options, "Bridge frames that come without the HUD", "Leave the map at the game's rate"
+  and "Hold the GPU's speed up")
 - `SC_FG_FILL=1`: with a multiplier that follows the game's rate, the game's own frames are
   limited to an even part of the display's rate and the layer takes the fewest generated frames
   that fill the display, so that every refresh gets a frame, with more latency. Without the line

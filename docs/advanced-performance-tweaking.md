@@ -12,6 +12,9 @@ closed.
 | [The CPU's prefetchers off](#the-cpus-hardware-prefetchers) | 4 to 7 % more frames at two busy spots | an Intel Core CPU of the 12th to 14th generation, Myrddin's root helper | `SC_PREFETCH=off` |
 | [Huge pages](#huge-pages) | about half of the game's memory in huge pages; the frame rate within what runs differ by | Myrddin's root helper | `SC_THP=on` |
 
+Only the prefetcher switch depends on the CPU: it works on Intel Core CPUs of the 12th to 14th
+generation only. The scheduler and huge pages work with any x86_64 CPU.
+
 The settings go in `sc-turbo.conf`, or are switched in the window under Options, "Advanced
 performance tweaks". They can be switched on before the tweak is set up: they act once it is,
 and until then a launch leaves the computer as it is and says so.
@@ -82,7 +85,7 @@ close to two hundred threads and keeps some fourteen cores busy on the test mach
 they run in is not a detail. A sched_ext scheduler that misbehaves is removed by the kernel
 itself, which goes back to its own.
 
-### What we measured
+### What was measured
 
 All on the machine under [Tested configuration](limitations.md#tested-configuration), with frame
 generation off, the two schedulers switched back and forth inside one session.
@@ -97,10 +100,9 @@ generation off, the two schedulers switched back and forth inside one session.
 
 In the two city runs (25 seconds a side, four rounds each) scx_lavd was ahead in seven of eight
 pairs, by 3.3 % on average. Stretches of the same scheduler differed by 5 to 10 % in those runs,
-so the frame rate alone does not prove a gain. The slow frames were shorter in both runs, and the
-tester found the game more responsive with it and has played with it since: in the table under
-[Frame rates and latency](measurements.md#frame-rates-and-latency) the rows dated 2026-11-19 were
-measured with scx_lavd, those dated 2026-11-18 with the kernel's own. `scx_bpfland` was tried
+so the frame rate alone does not prove a gain. The slow frames were shorter in both runs. In the
+table under [Frame rates and latency](measurements.md#frame-rates-and-latency) the rows dated
+2026-11-19 were measured with scx_lavd, those dated 2026-11-18 with the kernel's own. `scx_bpfland` was tried
 once: 3.9 % more frames in that run, and a longest frame of 168 ms against 129 ms.
 
 In short: a small gain at best, mostly in how even the frames are.
@@ -111,6 +113,9 @@ Install `scx-scheds` and `scx-tools` (on Fedora 44 from the Terra repository), p
 rule](#the-polkit-rule-for-the-cpu-scheduler) in place, and choose a scheduler: in the window
 under Options, or `SC_SCHED=lavd` in `sc-turbo.conf` for every launch. A launch then runs it in
 `scx_loader`'s "gaming" mode for as long as the game runs.
+
+Examples, for a single launch from a terminal (with the AppImage, `./Myrddin-x86_64.AppImage` in
+place of `./sc-turbo`):
 
 ```sh
 ./sc-turbo fg 3 sched=lavd           # scx_lavd for this launch
@@ -135,6 +140,9 @@ own in a running game (hold a steady view for about four minutes).
 
 ## The CPU's hardware prefetchers
 
+Intel Core CPUs of the 12th to 14th generation only (Alder Lake and Raptor Lake). On other CPUs
+Myrddin's switch does nothing and says so.
+
 ### What they are
 
 A prefetcher is a part of the CPU that watches which memory a program reads and fetches what it
@@ -142,12 +150,12 @@ expects to be read next, before the program asks for it. A program that goes thr
 order gains a great deal from that. A program that jumps about in memory gains little, and what
 was fetched in vain still takes its share of the memory's bandwidth and pushes other data out of
 the caches. Star Citizen is limited by memory on the test machine (see [The game's own frame
-rate](measurements.md#the-games-own-frame-rate)), which is why we tried it. Intel's CPUs have a
+rate](measurements.md#the-games-own-frame-rate)), which is why it was tried. Intel's CPUs have a
 register, `0x1A4`, in which every prefetcher has a bit that switches it off. Some BIOS set-ups
 show the same switches, under names such as "Hardware Prefetcher" and "Adjacent Cache Line
 Prefetch".
 
-### What we measured
+### What was measured
 
 On the machine under [Tested configuration](limitations.md#tested-configuration), on 2026-11-19
 with game build 13220821, frame generation off, standing still. All prefetchers were switched off
@@ -157,9 +165,9 @@ spot. Every ten seconds off are compared with the ten seconds on before and afte
 | | Prefetchers on | All off | | Rounds ahead |
 |---|---|---|---|---|
 | Orison, one spot: frames a second | 30.0 | 31.3 | +4.5 % | 12 of 12 |
-| Median and 99th-percentile frame time | 33.2 and 40.7 ms | 32.4 and 40.7 ms | | |
+| Median and 99th-percentile frame time | 33.2 ms and 40.7 ms | 32.4 ms and 40.7 ms | | |
 | A second, slower spot: frames a second | 26.7 | 28.5 | +7.4 % | 11 of 12 |
-| Median and 99th-percentile frame time | 36.3 and 65.4 ms | 33.7 and 61.3 ms | | |
+| Median and 99th-percentile frame time | 36.3 ms and 65.4 ms | 33.7 ms and 61.3 ms | | |
 
 Compared in the same way with itself, "on" came out at +0.05 % and -0.25 %. The gain is small,
 and it was there in 23 of 24 rounds. What these figures do not tell:
@@ -167,14 +175,14 @@ and it was there in 23 of 24 rounds. What these figures do not tell:
 - Which prefetchers matter. Only all of them off together showed a gain. In a first pass of
   three rounds each, the adjacent-line prefetcher alone (-0.3 %), the two of the second-level
   cache alone (-1.9 %) and the two of the first-level cache alone (+0.3 %) changed nothing that
-  stands out from a spread of 4 %. The fifth, which Intel calls AMP, was not tried alone. So we
-  cannot say whether the switches a BIOS offers are enough.
+  stands out from a spread of 4 %. The fifth, which Intel calls AMP, was not tried alone. So
+  whether the switches a BIOS offers are enough is not known.
 - How large the gain is at the Orison spot. With the prefetchers on, the game stood at 30.0
-  frames a second there in most ten-second stretches. We have not found what holds it at that
-  figure, and the gain may be cut short by it.
+  frames a second there in most ten-second stretches. What holds it at that figure is not known,
+  and the gain may be cut short by it.
 - What it does to loading times and to other programs. Programs that read memory in order
-  (copying, compressing, compiling) usually get slower without prefetchers. We have measured
-  neither, so treat this as a setting for the time you play, not one to keep for good, which is
+  (copying, compressing, compiling) usually get slower without prefetchers. Neither was
+  measured, so treat this as a setting for the time you play, not one to keep for good, which is
   how Myrddin uses it.
 - Anything about other machines. This is one CPU with memory at 2666 MT/s. With another CPU or
   faster memory the result may differ, in either direction.
@@ -194,8 +202,8 @@ that lets root write the register (see the lockdown note there).
 ### By hand
 
 The values below are for those same CPUs. Other Intel CPUs use the same register with other bits,
-and AMD's use other registers, which we have not looked at: there, leave it alone or look in the
-BIOS. You need the package `msr-tools` (its two commands `rdmsr` and `wrmsr`) and a kernel that
+and AMD's use other registers, which Myrddin does not handle: there, leave it alone or look in
+the BIOS. You need the package `msr-tools` (its two commands `rdmsr` and `wrmsr`) and a kernel that
 lets root write such registers. With Secure Boot most kernels refuse:
 `cat /sys/kernel/security/lockdown` must show `[none]`.
 
@@ -217,8 +225,8 @@ On a CPU of those generations without E-cores the two `cat` commands find nothin
 does it: `sudo wrmsr -a 0x1a4 0x2f`.
 
 It takes effect at once and can be switched while the game runs. It is a setting of the CPU, the
-same one a BIOS switch sets, and touches nothing of the game. A reboot puts everything back; we
-have not checked whether a suspend does. At the first such write the kernel puts a note in its
+same one a BIOS switch sets, and touches nothing of the game. A reboot puts everything back;
+whether a suspend does has not been checked. At the first such write the kernel puts a note in its
 log and marks itself "tainted" (flag S) until the next boot. That mark is there for people who
 read kernel bug reports and changes nothing else.
 
@@ -239,7 +247,7 @@ one lookup covers 512 times as much memory. Wine never asks the kernel for huge 
 gets none unless the kernel's setting is "always" (Fedora's default is "madvise": only for
 programs that ask). The setting applies to every program while it is on, not only to the game.
 
-### What we measured
+### What was measured
 
 Two sessions on the test machine with the kernel's setting at "always", frame generation off,
 standing still:
@@ -253,7 +261,7 @@ standing still:
   frames a second against 30.2, 32.5 and 29.8 without huge pages.
 - No hitches were noticed in two long sessions.
 
-So far: no gain we could measure, and no harm seen. Getting nearly all of the game's memory into
+So far: no measurable gain, and no harm seen. Getting nearly all of the game's memory into
 huge pages would need a change in Wine, which is not part of Myrddin.
 
 ### Automated by Myrddin

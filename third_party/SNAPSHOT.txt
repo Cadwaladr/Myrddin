@@ -1,8 +1,7 @@
 AMD FidelityFX SDK 1.1.4 (MIT): frame interpolation and optical flow, with changes that let one
 pair of frames yield several generated frames, and the recipe that builds it for Linux
-(ffx_fg/, GPL-3.0-or-later). Taken on 2026-11-13 from the authors' own modified
-build of Lichii (an emulator made to run Nintendo Switch 2 games; the build is a local one) at its
-commit 8618ffe51f, where these changes and the recipe were first written. The approach, building
+(ffx_fg/, GPL-3.0-or-later). Taken on 2026-11-13 from a local build at its commit 8618ffe51f,
+where these changes and the recipe were first written. The approach, building
 AMD's FSR 3 frame interpolation from its sources on Linux and giving it a game's own depth and
 motion vectors with a HUD-free picture, was found in a fork of the PS5 emulator KytyPS5
 (https://github.com/chenxiao07/KytyPS5, pull requests #117 and #118 by Bios2000; GPL-2.0-only). It

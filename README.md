@@ -13,8 +13,8 @@ game's window between the real ones, with the HUD put over them sharp. NVIDIA GP
 DLSS and Vulkan selected in the game (NVAPI is needed in the prefix).
 
 > [!WARNING]
-> Experimental, under active development, and tested on one setup only (see
-> [Requirements](#requirements)). Star Citizen uses Easy Anti-Cheat. Myrddin does not modify the
+> Experimental, under active development, and tested on one machine only (see
+> [Tested on](#tested-on)). Star Citizen uses Easy Anti-Cheat. Myrddin does not modify the
 > game, its files or its memory and sends it no input, but it is not affiliated with or endorsed
 > by Cloud Imperium Games. Use it at your own risk.
 
@@ -63,9 +63,8 @@ ten-second averages, busy the slowest tenth of them.
 | Lorville | 36 (29) | 117 (110) |
 | Orison | 29 (25) | 114 (92) |
 | Pyro Gateway | 31 (28) | 117 (109) |
-| CRU-L4 Shallow Fields Station | 40 (28) | 117 (109) |
 | Port Tressler | 24 (17) | 83 (59) |
-| Seraphim Station | 40 (38) | 119 (112) |
+| Seraphim Station (during IAE) | 40 (38) | 119 (112) |
 
 Generated frames make motion smoother but delay every real frame. What Myrddin adds is the time
 it takes to generate the frames and the wait while the generated frames ahead of each real frame
@@ -79,9 +78,19 @@ sessions and the whole way from the game to the display.
   game's prefix. AMD and Intel GPUs are not supported.
 - Linux on x86_64, with the game under Wine on a runner that ships vkd3d-proton, such as the
   Star Citizen LUG's "experimental" runners.
-- Tested on one setup: Fedora Linux 44, kernel 7.3.4, KDE Plasma 6.8.3 on Wayland, an RTX 4070
-  SUPER with driver 620.70.06, game build 13220821. Known faults are listed in
-  [Limitations](docs/limitations.md).
+
+## Tested on
+
+One machine: Fedora Linux 44 on x86_64, an Intel Core i5-13600K and an NVIDIA GeForce RTX 4070
+SUPER, at 2560×1440 with a fixed refresh rate (variable refresh rate is untested).
+
+- Desktops: KDE Plasma 6.8.3 and COSMIC 1.11.0, both on Wayland
+- Kernels: 7.3.4 and 7.2.15
+- NVIDIA drivers: 620.70.06 and 615.78.08
+- Wine runners: the Star Citizen LUG's experimental Wayland runners 11.22-1 and 11.20-2, unmodified
+- Game: Star Citizen Alpha 4.10, builds 13220821 and 13165946
+
+Every version, and the known faults, are under [Limitations](docs/limitations.md).
 
 ## Documentation
 
@@ -107,12 +116,12 @@ The code, the tests and the documents were written by Claude, the AI model made 
 [Anthropic](https://www.anthropic.com), working in Claude Code. Cadwaladr directed the work,
 decided what it should do and tested it in the game.
 
-The frame generation from the game's motion vectors is our own implementation. The approach was
-found in a fork of the PS5 emulator KytyPS5,
+Myrddin's frame generation from the game's motion vectors is its own implementation. The
+approach comes from a fork of the PS5 emulator KytyPS5,
 [chenxiao07/KytyPS5](https://github.com/chenxiao07/KytyPS5) (pull requests
 [#117](https://github.com/chenxiao07/KytyPS5/pull/117) and
-[#118](https://github.com/chenxiao07/KytyPS5/pull/118) by Bios2000), and used as a guide; none of
-its code was taken. [Third-party code](docs/third-party.md) has the details, every component and
+[#118](https://github.com/chenxiao07/KytyPS5/pull/118) by Bios2000), which served as a guide; none
+of its code was taken. [Third-party code](docs/third-party.md) has the details, every component and
 its licence, and the trademarks.
 
 Star Citizen is a trademark of Cloud Imperium Games, which is not affiliated with Myrddin and does
