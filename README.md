@@ -61,7 +61,7 @@ ten-second averages, busy the slowest tenth of them.
 
 | Place | The game's own frames per second, typical (busy) | Shown with frame generation, typical (busy) |
 |---|---|---|
-| New Babbage | 30 (26) | 116 (103) |
+| New Babbage ( during IAE 2956 ) | 30 (26) | 116 (103) |
 | Lorville | 36 (29) | 117 (110) |
 | Orison | 29 (25) | 114 (92) |
 | Pyro Gateway | 31 (28) | 117 (109) |
