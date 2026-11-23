@@ -25,7 +25,7 @@ DLSS and Vulkan selected in the game (NVAPI is needed in the prefix).
 You need an NVIDIA GPU and the game on a Wine runner with vkd3d-proton (see
 [Requirements](#requirements)). In the game, set the renderer to Vulkan and the upscaler to DLSS.
 Then download `Myrddin-x86_64.AppImage` from the
-[latest release](https://github.com/Cadwaladr/Myrddin/releases/latest) and start it:
+[latest release](https://github.com/Cadwaladr/Myrddin/releases/latest) and restart the game with it:
 
 ```sh
 chmod +x Myrddin-x86_64.AppImage
